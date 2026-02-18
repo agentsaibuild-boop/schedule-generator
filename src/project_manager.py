@@ -94,6 +94,7 @@ class ProjectManager:
             # Update access time
             existing["last_accessed"] = now
             existing["stats"]["total_sessions"] = existing["stats"].get("total_sessions", 0) + 1
+            self.projects["last_active_id"] = project_id
             self._save_projects_db()
             self.current_project = existing
             return existing
@@ -121,6 +122,7 @@ class ProjectManager:
                 "last_schedule": None,
                 "exports": [],
                 "chat_summary": None,
+                "chat_history": [],
             },
             "stats": {
                 "total_ai_cost": 0.0,
@@ -130,6 +132,7 @@ class ProjectManager:
         }
 
         projects_dict[project_id] = project
+        self.projects["last_active_id"] = project_id
         self._save_projects_db()
         self.current_project = project
         return project
@@ -169,6 +172,22 @@ class ProjectManager:
             result.append(proj_copy)
 
         return result
+
+    # ------------------------------------------------------------------
+    # Last active project (for auto-restore on session loss)
+    # ------------------------------------------------------------------
+
+    def get_last_active_project(self) -> dict | None:
+        """Get the last active project for auto-restore after session loss."""
+        last_id = self.projects.get("last_active_id")
+        if not last_id:
+            return None
+        return self.projects.get("projects", {}).get(last_id)
+
+    def clear_last_active(self) -> None:
+        """Clear the last active project marker."""
+        self.projects.pop("last_active_id", None)
+        self._save_projects_db()
 
     # ------------------------------------------------------------------
     # Load / resume project
@@ -234,7 +253,7 @@ class ProjectManager:
         # Update progress fields
         progress = project.setdefault("progress", {})
         for key in ("files_converted", "schedule_version", "last_schedule",
-                     "chat_summary", "files_total"):
+                     "chat_summary", "chat_history", "files_total"):
             if key in updates:
                 progress[key] = updates[key]
 

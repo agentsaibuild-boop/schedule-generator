@@ -36,6 +36,33 @@ from src.schedule_builder import ScheduleBuilder
 from src.self_evolution import SelfEvolution
 from src.docs_updater import DocsUpdater
 
+
+def _ensure_schedule_list(data: object) -> list[dict]:
+    """Parse schedule data into a list of task dicts.
+
+    Handles: list[dict] (passthrough), JSON string, markdown-fenced JSON.
+    """
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, str) or not data.strip():
+        return []
+    cleaned = data.strip()
+    # Strip markdown code fences
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3].strip()
+    try:
+        parsed = json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if isinstance(parsed, dict):
+        return parsed.get("tasks", [])
+    if isinstance(parsed, list):
+        return parsed
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Environment & Paths
 # ---------------------------------------------------------------------------
@@ -166,11 +193,22 @@ if "current_project" not in st.session_state:
 if "recent_projects" not in st.session_state:
     st.session_state.recent_projects = []
 
+if "processing" not in st.session_state:
+    st.session_state.processing = False
+
+if "stop_requested" not in st.session_state:
+    st.session_state.stop_requested = False
+
+if "restored_history" not in st.session_state:
+    st.session_state.restored_history = []
+
 # ---------------------------------------------------------------------------
 # Initialize managers (cached in session state to survive reruns)
 # ---------------------------------------------------------------------------
 if "router" not in st.session_state:
-    st.session_state.router = AIRouter()
+    _router = AIRouter()
+    _router.set_cumulative_path(str(CONFIG_DIR))
+    st.session_state.router = _router
 
 if "knowledge_mgr" not in st.session_state:
     st.session_state.knowledge_mgr = KnowledgeManager(str(KNOWLEDGE_DIR))
@@ -236,6 +274,22 @@ if not st.session_state.recent_projects and st.session_state.welcome_shown is Fa
     st.session_state.recent_projects = project_mgr.get_recent_projects(5)
 
 
+def _save_chat_history() -> None:
+    """Persist last 10 message pairs (20 entries) to project history."""
+    proj = st.session_state.get("current_project")
+    if not proj:
+        return
+    pid = proj.get("id")
+    if not pid:
+        return
+    # Combine restored + current messages for full context
+    all_msgs = list(st.session_state.get("restored_history", []))
+    all_msgs.extend(st.session_state.get("messages", []))
+    # Keep last 20 entries (≈10 pairs)
+    trimmed = all_msgs[-20:]
+    project_mgr.save_progress(pid, {"chat_history": trimmed})
+
+
 # ---------------------------------------------------------------------------
 # Helper: load project by path (shared logic)
 # ---------------------------------------------------------------------------
@@ -269,8 +323,18 @@ def _load_project_by_path(path: str) -> None:
     # If already has a schedule, restore it
     last_schedule = project.get("progress", {}).get("last_schedule")
     if last_schedule:
-        st.session_state.current_schedule = last_schedule
-        st.session_state.schedule_data = last_schedule
+        parsed = _ensure_schedule_list(last_schedule)
+        st.session_state.current_schedule = parsed
+        st.session_state.schedule_data = parsed
+
+    # Restore chat history from previous sessions
+    saved_history = project.get("progress", {}).get("chat_history", [])
+    if saved_history:
+        st.session_state.restored_history = saved_history
+        st.session_state.messages = []  # Fresh start; old msgs shown in expander
+        chat_handler.restore_history(saved_history)
+    else:
+        st.session_state.restored_history = []
 
     # Update status based on conversion state
     if info["converted_count"] > 0 and info["needs_conversion"] == 0:
@@ -410,6 +474,28 @@ def _run_conversion(force: bool = False) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Auto-restore last active project if session was lost (e.g. page refresh)
+# ---------------------------------------------------------------------------
+if not st.session_state.project_loaded:
+    _last_active = project_mgr.get_last_active_project()
+    if _last_active and Path(_last_active.get("path", "")).is_dir():
+        _load_project_by_path(_last_active["path"])
+        # Restore schedule from project history if available
+        _restored_sched = _last_active.get("progress", {}).get("last_schedule")
+        if _restored_sched:
+            _parsed = _ensure_schedule_list(_restored_sched)
+            st.session_state.current_schedule = _parsed
+            st.session_state.schedule_data = _parsed
+            chat_handler.current_schedule = _parsed
+        # Restore chat history (also handled in _load_project_by_path,
+        # but ensure consistency after page refresh)
+        _saved_chat = _last_active.get("progress", {}).get("chat_history", [])
+        if _saved_chat:
+            st.session_state.restored_history = _saved_chat
+            chat_handler.restore_history(_saved_chat)
+
+
+# ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
@@ -454,9 +540,12 @@ with st.sidebar:
 
     # --- Cost tracking ---
     st.subheader("\U0001f4b0 Разходи")
+
+    # Session costs
     stats = router.get_usage_stats()
     st.session_state.usage_stats = stats
 
+    st.caption("**Тази сесия:**")
     col_ds, col_an = st.columns(2)
     with col_ds:
         ds_cost = stats["deepseek"]["cost_usd"]
@@ -467,7 +556,19 @@ with st.sidebar:
         an_calls = stats["anthropic"]["calls"]
         st.metric("Anthropic", f"${an_cost:.4f}", f"{an_calls} заявки")
 
-    st.caption(f"**Общо: ${stats['total_cost_usd']:.4f}**")
+    st.caption(f"Сесия общо: **${stats['total_cost_usd']:.4f}**")
+
+    # Cumulative costs (all-time, persisted)
+    cumulative = router.get_cumulative_stats()
+    cum_total = cumulative.get("total", 0.0)
+    cum_calls = cumulative.get("total_calls", 0)
+    cum_ds = cumulative.get("deepseek", 0.0)
+    cum_an = cumulative.get("anthropic", 0.0)
+    st.caption(
+        f"**Общо (всички сесии):** ${cum_total:.4f} "
+        f"({cum_calls} заявки)"
+    )
+    st.caption(f"DS: ${cum_ds:.4f} | AN: ${cum_an:.4f}")
 
     st.divider()
 
@@ -488,15 +589,18 @@ with st.sidebar:
             st.caption(f"Файлове: {converted}/{total} конвертирани")
 
         if st.button("\U0001f504 Смени проект", use_container_width=True, key="change_project"):
+            _save_chat_history()
             st.session_state.project_loaded = False
             st.session_state.current_project = None
             st.session_state.project_path = ""
             st.session_state.project_info = {}
             st.session_state.conversion_done = False
             st.session_state.messages = []
+            st.session_state.restored_history = []
             st.session_state.welcome_shown = False
             st.session_state.recent_projects = project_mgr.get_recent_projects(5)
             chat_handler.clear_history()
+            project_mgr.clear_last_active()
             st.rerun()
     else:
         st.caption("Няма зареден проект.")
@@ -505,6 +609,28 @@ with st.sidebar:
 
     # --- Project path ---
     st.subheader("\U0001f4c1 Зареди проект")
+
+    # Show recent projects in sidebar for quick access
+    _sidebar_recent = st.session_state.get("recent_projects", [])
+    if _sidebar_recent and not st.session_state.project_loaded:
+        st.caption("**Скорошни проекти:**")
+        for _i, _proj in enumerate(_sidebar_recent):
+            _emoji = project_mgr.get_status_emoji(_proj.get("status", "new"))
+            _name = _proj.get("name", "?")
+            _ago = _proj.get("time_ago", "")
+            _exists = _proj.get("exists", True)
+            _btn_label = f"{_emoji} {_name} ({_ago})"
+            if not _exists:
+                _btn_label += " \u274c"
+            if st.button(
+                _btn_label,
+                use_container_width=True,
+                key=f"sidebar_recent_{_i}",
+                disabled=not _exists,
+            ):
+                _load_project_by_path(_proj["path"])
+                st.rerun()
+        st.divider()
 
     path_col, browse_col = st.columns([3, 1])
     with path_col:
@@ -716,7 +842,9 @@ with st.sidebar:
 
     # --- Clear chat ---
     if st.button("\U0001f5d1\ufe0f Изчисти чата", use_container_width=True):
+        _save_chat_history()
         st.session_state.messages = []
+        st.session_state.restored_history = []
         st.session_state.welcome_shown = False
         st.session_state.pending_changes = None
         chat_handler.clear_history()
@@ -761,8 +889,8 @@ with chat_col:
                 # Build detail
                 schedule_info = ""
                 progress = proj.get("progress", {})
-                last_sched = progress.get("last_schedule")
-                if last_sched and isinstance(last_sched, list):
+                last_sched = _ensure_schedule_list(progress.get("last_schedule"))
+                if last_sched:
                     total_days = max(
                         (
                             t.get("end_day", t.get("start_day", 0) + t.get("duration", 0))
@@ -813,26 +941,73 @@ with chat_col:
     # Display chat history
     chat_container = st.container(height=520)
     with chat_container:
+        # Show restored history from previous session in an expander
+        restored = st.session_state.get("restored_history", [])
+        if restored:
+            n_pairs = len(restored) // 2
+            last_topic = ""
+            for _m in reversed(restored):
+                if _m.get("role") == "user":
+                    last_topic = _m["content"][:60].replace("\n", " ")
+                    break
+            summary = f"Заредена история от последната сесия ({n_pairs} размени)"
+            if last_topic:
+                summary += f". Последна тема: _{last_topic}..._"
+            st.info(summary)
+
+            with st.expander("Покажи предишна история", expanded=False):
+                for msg in restored:
+                    with st.chat_message(msg["role"]):
+                        st.markdown(msg["content"])
+            st.divider()
+
+        # Current session messages
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-    # Chat input
-    user_input = st.chat_input("Напишете съобщение...")
+    # Stop button (visible when processing is active)
+    if st.session_state.get("processing"):
+        if st.button(
+            "\u23f9 \u0421\u043f\u0440\u0438 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u044f\u0442\u0430",
+            type="primary",
+            use_container_width=True,
+            key="stop_btn",
+        ):
+            st.session_state.stop_requested = True
+            st.session_state.processing = False
+            router.stop_requested = True
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": "\u23f9 \u041e\u043f\u0435\u0440\u0430\u0446\u0438\u044f\u0442\u0430 \u0435 \u0441\u043f\u0440\u044f\u043d\u0430 \u043e\u0442 \u043f\u043e\u0442\u0440\u0435\u0431\u0438\u0442\u0435\u043b\u044f.",
+            })
+            st.rerun()
+
+    # Chat input (disabled during processing)
+    user_input = st.chat_input(
+        "\u041d\u0430\u043f\u0438\u0448\u0435\u0442\u0435 \u0441\u044a\u043e\u0431\u0449\u0435\u043d\u0438\u0435..."
+        if not st.session_state.get("processing")
+        else "\u0418\u0437\u0447\u0430\u043a\u0432\u0430\u0439\u0442\u0435...",
+        disabled=st.session_state.get("processing", False),
+    )
 
     # Show pending changes indicator
     if st.session_state.pending_changes:
         pending_lvl = st.session_state.pending_changes.get("level", "?")
         lvl_emoji = {"green": "\U0001f7e2", "yellow": "\U0001f7e1", "red": "\U0001f534"}.get(pending_lvl, "\u26aa")
         if pending_lvl == "red":
-            st.info(f"{lvl_emoji} Очаква се **админ код** за прилагане на промени...")
+            st.info(f"{lvl_emoji} \u041e\u0447\u0430\u043a\u0432\u0430 \u0441\u0435 **\u0430\u0434\u043c\u0438\u043d \u043a\u043e\u0434** \u0437\u0430 \u043f\u0440\u0438\u043b\u0430\u0433\u0430\u043d\u0435 \u043d\u0430 \u043f\u0440\u043e\u043c\u0435\u043d\u0438...")
         else:
-            st.info(f"{lvl_emoji} Очаква се **потвърждение** за прилагане на промени...")
+            st.info(f"{lvl_emoji} \u041e\u0447\u0430\u043a\u0432\u0430 \u0441\u0435 **\u043f\u043e\u0442\u0432\u044a\u0440\u0436\u0434\u0435\u043d\u0438\u0435** \u0437\u0430 \u043f\u0440\u0438\u043b\u0430\u0433\u0430\u043d\u0435 \u043d\u0430 \u043f\u0440\u043e\u043c\u0435\u043d\u0438...")
 
     if user_input:
         st.session_state.messages.append(
             {"role": "user", "content": user_input}
         )
+
+        # Sync schedule state: if session has schedule but chat_handler lost it
+        if st.session_state.get("current_schedule") and not chat_handler.current_schedule:
+            chat_handler.current_schedule = st.session_state.current_schedule
 
         # Build project context
         project_context = None
@@ -843,8 +1018,13 @@ with chat_col:
                 "conversion_done": st.session_state.conversion_done,
             }
 
+        # Set processing flag and reset stop
+        st.session_state.processing = True
+        st.session_state.stop_requested = False
+        router.stop_requested = False
+
         # Process through ChatHandler (real AI)
-        with st.spinner("Обработвам..."):
+        with st.spinner("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0432\u0430\u043c..."):
             result = chat_handler.process_message(
                 user_input,
                 project_loaded=st.session_state.project_loaded,
@@ -853,6 +1033,20 @@ with chat_col:
                 pending_changes=st.session_state.pending_changes,
                 recent_projects=st.session_state.recent_projects,
             )
+
+        # Clear processing flag
+        st.session_state.processing = False
+
+        # Check if stopped mid-operation
+        if st.session_state.get("stop_requested"):
+            st.session_state.stop_requested = False
+            router.stop_requested = False
+            if result.get("response"):
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": result["response"] + "\n\n\u23f9 _\u041e\u043f\u0435\u0440\u0430\u0446\u0438\u044f\u0442\u0430 \u0435 \u0441\u043f\u0440\u044f\u043d\u0430._",
+                })
+            st.rerun()
 
         # Handle project loading from chat
         if result.get("load_project_path"):
@@ -901,6 +1095,9 @@ with chat_col:
         # Update usage stats
         st.session_state.usage_stats = router.get_usage_stats()
 
+        # Persist chat history
+        _save_chat_history()
+
         st.rerun()
 
 # ---------------------------------------------------------------------------
@@ -908,7 +1105,13 @@ with chat_col:
 # ---------------------------------------------------------------------------
 with viz_col:
     st.markdown("### \U0001f4ca Визуализация")
-    schedule = st.session_state.get("current_schedule") or []
+    schedule = _ensure_schedule_list(
+        st.session_state.get("current_schedule")
+    )
+    # Persist the parsed version back so we don't re-parse on every rerun
+    if schedule != st.session_state.get("current_schedule"):
+        st.session_state.current_schedule = schedule
+        st.session_state.schedule_data = schedule
 
     # ── Layer toggles (row 1) ─────────────────────────────────────────
     st.caption("**Слоеве:**")

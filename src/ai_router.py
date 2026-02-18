@@ -15,6 +15,7 @@ import logging
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -119,6 +120,16 @@ class AIRouter:
         self.fallback_source: str | None = None  # which API is down
 
         self.usage_log: list[dict] = []
+
+        # Cumulative usage persistence (across sessions)
+        self._cumulative_path: Path | None = None
+        self._cumulative: dict = {
+            "deepseek": 0.0, "anthropic": 0.0,
+            "total": 0.0, "total_calls": 0,
+        }
+
+        # Stop flag for cancelling multi-step operations
+        self.stop_requested: bool = False
 
     # ------------------------------------------------------------------
     # Lazy client initialization
@@ -565,6 +576,16 @@ class AIRouter:
         verification: dict = {}
 
         while cycle < max_cycles:
+            # Check stop flag between steps
+            if self.stop_requested:
+                return {
+                    "status": "stopped",
+                    "schedule": current_schedule,
+                    "cycles": cycle,
+                    "total_cost": total_cost,
+                    "history": all_issues,
+                }
+
             # Verify
             if progress_callback:
                 model_label = "Anthropic" if self.anthropic_available else "DeepSeek"
@@ -601,6 +622,16 @@ class AIRouter:
                 "issues": verification["issues"],
                 "corrections_count": len(verification["corrections"]),
             })
+
+            # Check stop flag before correction step
+            if self.stop_requested:
+                return {
+                    "status": "stopped",
+                    "schedule": current_schedule,
+                    "cycles": cycle + 1,
+                    "total_cost": total_cost,
+                    "history": all_issues,
+                }
 
             if progress_callback:
                 issues_str = ", ".join(verification["issues"][:3])
@@ -943,21 +974,65 @@ class AIRouter:
     def _log_usage(
         self, model: str, tokens_in: int, tokens_out: int, task_type: str
     ) -> None:
-        """Log an API call for usage tracking."""
+        """Log an API call for usage tracking (session + cumulative)."""
+        cost = self._calculate_cost(model, tokens_in, tokens_out)
         self.usage_log.append({
             "timestamp": datetime.now().isoformat(),
             "model": model,
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
-            "cost_usd": self._calculate_cost(model, tokens_in, tokens_out),
+            "cost_usd": cost,
             "task_type": task_type,
         })
+
+        # Update cumulative (persisted to disk)
+        key = "deepseek" if model == "deepseek-chat" else "anthropic"
+        self._cumulative[key] = self._cumulative.get(key, 0.0) + cost
+        self._cumulative["total"] = self._cumulative.get("total", 0.0) + cost
+        self._cumulative["total_calls"] = self._cumulative.get("total_calls", 0) + 1
+        self._save_cumulative()
 
     @staticmethod
     def _calculate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
         """Calculate cost for a specific API call."""
         rate = PRICING.get(model, PRICING["deepseek-chat"])
         return tokens_in * rate["input"] + tokens_out * rate["output"]
+
+    # ------------------------------------------------------------------
+    # Cumulative usage persistence
+    # ------------------------------------------------------------------
+
+    def set_cumulative_path(self, config_dir: str) -> None:
+        """Set the path for cumulative usage file and load existing data."""
+        self._cumulative_path = Path(config_dir) / "cumulative_usage.json"
+        self._load_cumulative()
+
+    def _load_cumulative(self) -> None:
+        """Load cumulative usage from disk."""
+        if self._cumulative_path and self._cumulative_path.exists():
+            try:
+                data = json.loads(self._cumulative_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self._cumulative = data
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    def _save_cumulative(self) -> None:
+        """Save cumulative usage to disk."""
+        if not self._cumulative_path:
+            return
+        try:
+            self._cumulative_path.parent.mkdir(parents=True, exist_ok=True)
+            self._cumulative_path.write_text(
+                json.dumps(self._cumulative, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def get_cumulative_stats(self) -> dict:
+        """Get all-time cumulative usage stats (persisted across sessions)."""
+        return dict(self._cumulative)
 
     # ------------------------------------------------------------------
     # JSON parsing helper

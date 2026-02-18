@@ -1159,3 +1159,7 @@ class ChatHandler:
         self.history = []
         self.current_schedule = None
         self.correction_history = []
+
+    def restore_history(self, messages: list[dict[str, str]]) -> None:
+        """Restore chat history from saved data."""
+        self.history = list(messages)
