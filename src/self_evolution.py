@@ -507,6 +507,17 @@ class SelfEvolution:
             except Exception as exc:
                 errors.append(f"Грешка при инсталиране на пакети: {exc}")
 
+        # Auto-update documentation after successful changes
+        if applied > 0:
+            try:
+                from src.docs_updater import DocsUpdater
+                docs_updater = DocsUpdater(self.app_root)
+                docs_result = docs_updater.run_all_updates()
+                if docs_result["total"] > 0:
+                    logger.info("Auto-updated %d doc sections after self-evolution", docs_result["total"])
+            except Exception as exc:
+                logger.warning("Docs auto-update failed (non-critical): %s", exc)
+
         return {
             "applied": applied,
             "failed": failed,

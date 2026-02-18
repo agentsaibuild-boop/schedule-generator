@@ -34,6 +34,7 @@ from src.knowledge_manager import KnowledgeManager
 from src.project_manager import ProjectManager
 from src.schedule_builder import ScheduleBuilder
 from src.self_evolution import SelfEvolution
+from src.docs_updater import DocsUpdater
 
 # ---------------------------------------------------------------------------
 # Environment & Paths
@@ -687,6 +688,25 @@ with st.sidebar:
             if st.button("OK", key="no_history_ok"):
                 st.session_state["show_rollback_dialog"] = False
                 st.rerun()
+
+    st.divider()
+
+    # --- Documentation status ---
+    st.subheader("\U0001f4dd Документация")
+    _docs_updater = DocsUpdater(str(APP_DIR))
+    _docs_updates = _docs_updater.check_for_updates()
+
+    if _docs_updates:
+        st.warning(f"\U0001f4dd {len(_docs_updates)} документа трябва да се обновят")
+        if st.button("Обнови документацията", use_container_width=True, key="docs_update_btn"):
+            result = _docs_updater.run_all_updates()
+            if result["total"] > 0:
+                st.success(f"\u2705 Обновени: {result['total']} секции")
+            else:
+                st.info("Няма секции за обновяване.")
+            st.rerun()
+    else:
+        st.success("\U0001f4dd Документацията е актуална")
 
     st.divider()
 
