@@ -200,11 +200,20 @@ class FileManager:
     # Conversion status
     # ------------------------------------------------------------------
 
+    def is_conversion_needed(self) -> bool:
+        """Check if there are unconverted or changed files.
+
+        Returns:
+            True if any files need conversion.
+        """
+        status = self.get_conversion_status()
+        return (status["pending"] + status["changed"]) > 0
+
     def get_conversion_status(self) -> dict:
         """Compare original files against the manifest.
 
         Returns:
-            Dict with total, converted, pending, changed, files (list of details).
+            Dict with total, converted, pending, changed, failed, method_summary, files (list of details).
         """
         supported = self._list_supported_files()
         manifest_files: dict = self._manifest.get("files", {})
@@ -241,11 +250,19 @@ class FileManager:
                 })
                 converted += 1
 
+        # Build method summary from manifest
+        method_counts: dict[str, int] = {}
+        for name, entry in manifest_files.items():
+            if entry.get("status") == "ok":
+                method = entry.get("conversion_method", "unknown")
+                method_counts[method] = method_counts.get(method, 0) + 1
+
         return {
             "total": len(supported),
             "converted": converted,
             "pending": pending,
             "changed": changed,
+            "method_summary": method_counts,
             "files": details,
         }
 

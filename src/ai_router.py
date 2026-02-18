@@ -3,6 +3,9 @@
 DeepSeek handles: chat, document analysis, schedule generation, OCR, corrections.
 Anthropic handles: schedule verification, lesson validation, quality control.
 Both directions have automatic fallback if one API is unavailable.
+
+CRITICAL: DeepSeek NEVER receives a request without knowledge context in system_prompt.
+Every function that calls DeepSeek MUST include a knowledge-aware system prompt.
 """
 
 from __future__ import annotations
@@ -55,6 +58,8 @@ CORRECTION_SYSTEM_PROMPT = """\
 Получаваш график в JSON формат и списък с корекции.
 Приложи ВСИЧКИ корекции и върни коригирания график.
 
+{knowledge_context}
+
 Отговори САМО с валиден JSON (без markdown, без ```):
 {{
   "schedule": <коригираният график>,
@@ -80,6 +85,21 @@ LESSON_VERIFICATION_PROMPT = """\
   "formatted_lesson": "Форматиран текст на урока",
   "reason": "Защо е одобрен/отхвърлен"
 }}
+"""
+
+# Minimal OCR system prompt — includes domain-specific guidance
+OCR_SYSTEM_PROMPT = """\
+Ти си OCR асистент за строителни документи на български език.
+Извличаш текст от сканирани документи за ВиК (водоснабдяване и канализация) проекти.
+
+Правила:
+- Запази структурата на документа (заглавия, параграфи, таблици)
+- Българските букви трябва да са правилни (не ги заменяй с латиница)
+- Числата и мерните единици трябва да са точни (м, м², м³, бр., кг, т, DN)
+- Таблиците подреди с разделители | или табулации
+- Ако текстът е нечетлив, отбележи с [нечетливо]
+
+{additional_context}\
 """
 
 
@@ -136,6 +156,24 @@ class AIRouter:
 
         self._anthropic_client = anthropic.Anthropic(api_key=self._anthropic_key)
         return self._anthropic_client
+
+    # ------------------------------------------------------------------
+    # System prompt validation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _warn_empty_prompt(system_prompt: str, caller: str) -> None:
+        """Log a warning if system_prompt is empty or suspiciously short.
+
+        DeepSeek is a 'clean' model — without knowledge context it doesn't
+        know the rules for ViK schedules, productivities, lessons, etc.
+        """
+        if not system_prompt or len(system_prompt) < 100:
+            logger.warning(
+                "DeepSeek called with empty/short system prompt in %s! "
+                "Knowledge context may be missing. Prompt length: %d chars.",
+                caller, len(system_prompt) if system_prompt else 0,
+            )
 
     # ------------------------------------------------------------------
     # Health check
@@ -212,6 +250,8 @@ class AIRouter:
         Returns:
             Dict with content, model, usage, cost, fallback.
         """
+        self._warn_empty_prompt(system_prompt, "chat")
+
         # Try DeepSeek first
         if self.deepseek_available:
             try:
@@ -334,9 +374,9 @@ class AIRouter:
 
         return {
             "approved": False,
-            "issues": ["AI моделите са недостъпни — не може да се извърши проверка."],
+            "issues": ["AI models are unavailable — cannot verify."],
             "corrections": [],
-            "summary": "Грешка при проверка.",
+            "summary": "Verification error.",
             "model": "none",
             "cost": 0.0,
             "error": True,
@@ -396,17 +436,28 @@ class AIRouter:
     # ------------------------------------------------------------------
 
     def apply_corrections(
-        self, schedule_json: str, corrections: list[dict]
+        self, schedule_json: str, corrections: list[dict],
+        system_prompt: str = "",
     ) -> dict:
         """Send corrections to the worker (DeepSeek) for application.
 
         Args:
             schedule_json: Current schedule JSON string.
             corrections: List of correction dicts from verification.
+            system_prompt: Knowledge context for the AI. If empty, uses
+                a basic correction prompt (with warning).
 
         Returns:
             Dict with corrected_schedule, applied, model, cost.
         """
+        # Build the correction system prompt with knowledge context
+        knowledge_ctx = system_prompt if system_prompt else ""
+        full_system = CORRECTION_SYSTEM_PROMPT.format(
+            knowledge_context=knowledge_ctx
+        )
+
+        self._warn_empty_prompt(knowledge_ctx, "apply_corrections")
+
         user_message = (
             f"Ето текущият график:\n{schedule_json}\n\n"
             f"Приложи следните корекции:\n{json.dumps(corrections, ensure_ascii=False, indent=2)}"
@@ -416,7 +467,7 @@ class AIRouter:
         # Try DeepSeek first
         if self.deepseek_available:
             try:
-                return self._apply_with_model("deepseek", messages)
+                return self._apply_with_model("deepseek", messages, full_system)
             except Exception as exc:
                 logger.warning("DeepSeek corrections failed: %s", exc)
                 self.deepseek_available = False
@@ -425,7 +476,7 @@ class AIRouter:
         # Fallback to Anthropic
         if self.anthropic_available:
             try:
-                return self._apply_with_model("anthropic", messages)
+                return self._apply_with_model("anthropic", messages, full_system)
             except Exception as exc:
                 logger.error("Anthropic corrections fallback failed: %s", exc)
 
@@ -437,12 +488,14 @@ class AIRouter:
             "error": True,
         }
 
-    def _apply_with_model(self, provider: str, messages: list[dict]) -> dict:
+    def _apply_with_model(
+        self, provider: str, messages: list[dict], system_prompt: str
+    ) -> dict:
         """Apply corrections using a specific provider."""
         if provider == "deepseek":
             client = self._get_deepseek()
             full_msgs = [
-                {"role": "system", "content": CORRECTION_SYSTEM_PROMPT}
+                {"role": "system", "content": system_prompt}
             ] + messages
             response = client.chat.completions.create(
                 model="deepseek-chat",
@@ -460,7 +513,7 @@ class AIRouter:
             response = client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=8192,
-                system=CORRECTION_SYSTEM_PROMPT,
+                system=system_prompt,
                 messages=messages,
                 temperature=0.1,
             )
@@ -491,6 +544,7 @@ class AIRouter:
         rules: str,
         max_cycles: int = 3,
         progress_callback: Any | None = None,
+        knowledge_prompt: str = "",
     ) -> dict:
         """Automatic correction cycle: verify -> correct -> verify (max N times).
 
@@ -499,6 +553,7 @@ class AIRouter:
             rules: Verification rules.
             max_cycles: Maximum correction attempts.
             progress_callback: Optional callable(message: str) for progress updates.
+            knowledge_prompt: Knowledge context to pass to apply_corrections.
 
         Returns:
             Dict with status, schedule, cycles, total_cost, history.
@@ -507,6 +562,7 @@ class AIRouter:
         current_schedule = schedule_json
         all_issues: list[dict] = []
         total_cost = 0.0
+        verification: dict = {}
 
         while cycle < max_cycles:
             # Verify
@@ -526,7 +582,7 @@ class AIRouter:
                     "cycles": cycle + 1,
                     "total_cost": total_cost,
                     "history": all_issues,
-                    "error": "AI моделите са недостъпни.",
+                    "error": "AI models are unavailable.",
                 }
 
             if verification["approved"]:
@@ -552,9 +608,10 @@ class AIRouter:
                     f"Коригирам: {issues_str}..."
                 )
 
-            # Apply corrections
+            # Apply corrections (with knowledge context)
             result = self.apply_corrections(
-                current_schedule, verification["corrections"]
+                current_schedule, verification["corrections"],
+                system_prompt=knowledge_prompt,
             )
             total_cost += result.get("cost", 0.0)
 
@@ -565,7 +622,7 @@ class AIRouter:
                     "cycles": cycle + 1,
                     "total_cost": total_cost,
                     "history": all_issues,
-                    "error": "Грешка при прилагане на корекции.",
+                    "error": "Error applying corrections.",
                 }
 
             current_schedule = (
@@ -581,7 +638,7 @@ class AIRouter:
             "schedule": current_schedule,
             "cycles": max_cycles,
             "total_cost": total_cost,
-            "remaining_issues": verification["issues"],
+            "remaining_issues": verification.get("issues", []),
             "history": all_issues,
         }
 
@@ -589,16 +646,23 @@ class AIRouter:
     # OCR (Worker = DeepSeek vision, fallback = Anthropic vision)
     # ------------------------------------------------------------------
 
-    def ocr_pdf_page(self, image_base64: str) -> str:
+    def ocr_pdf_page(
+        self, image_base64: str, system_prompt: str = ""
+    ) -> str:
         """OCR a single page image via DeepSeek vision. Falls back to Anthropic.
 
         Args:
             image_base64: Base64-encoded PNG image.
+            system_prompt: Optional knowledge context for OCR guidance.
 
         Returns:
             Extracted text string.
         """
-        ocr_prompt = (
+        # Build OCR prompt with optional additional context
+        additional = system_prompt if system_prompt else ""
+        full_ocr_system = OCR_SYSTEM_PROMPT.format(additional_context=additional)
+
+        ocr_user_prompt = (
             "Извлечи ЦЕЛИЯ текст от това изображение. "
             "Текстът е на български. Запази структурата — заглавия, параграфи, таблици. "
             "Отговори САМО с извлечения текст, без коментари."
@@ -607,7 +671,9 @@ class AIRouter:
         # Try DeepSeek first
         if self.deepseek_available:
             try:
-                return self._ocr_deepseek(image_base64, ocr_prompt)
+                return self._ocr_deepseek(
+                    image_base64, ocr_user_prompt, full_ocr_system
+                )
             except Exception as exc:
                 logger.warning("DeepSeek OCR failed: %s", exc)
                 self.deepseek_available = False
@@ -616,29 +682,38 @@ class AIRouter:
         # Fallback to Anthropic
         if self.anthropic_available:
             try:
-                return self._ocr_anthropic(image_base64, ocr_prompt)
+                return self._ocr_anthropic(
+                    image_base64, ocr_user_prompt, full_ocr_system
+                )
             except Exception as exc:
                 logger.error("Anthropic OCR fallback failed: %s", exc)
 
-        return "[OCR ГРЕШКА: И двата AI модела са недостъпни]"
+        return "[OCR ERROR: Both AI models are unavailable]"
 
-    def _ocr_deepseek(self, image_base64: str, prompt: str) -> str:
+    def _ocr_deepseek(
+        self, image_base64: str, prompt: str, system_prompt: str
+    ) -> str:
         """OCR via DeepSeek vision."""
         client = self._get_deepseek()
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{image_base64}",
+                    },
+                },
+                {"type": "text", "text": prompt},
+            ],
+        })
+
         response = client.chat.completions.create(
             model="deepseek-chat",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{image_base64}",
-                        },
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }],
+            messages=messages,
             max_tokens=4096,
         )
         text = response.choices[0].message.content or ""
@@ -648,12 +723,15 @@ class AIRouter:
         self._log_usage("deepseek-chat", tokens_in, tokens_out, "ocr")
         return text
 
-    def _ocr_anthropic(self, image_base64: str, prompt: str) -> str:
+    def _ocr_anthropic(
+        self, image_base64: str, prompt: str, system_prompt: str
+    ) -> str:
         """OCR via Anthropic vision."""
         client = self._get_anthropic()
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=4096,
+            system=system_prompt if system_prompt else "",
             messages=[{
                 "role": "user",
                 "content": [
@@ -696,7 +774,7 @@ class AIRouter:
             Dict with approved, formatted_lesson, reason.
         """
         system_prompt = LESSON_VERIFICATION_PROMPT.format(
-            existing_lessons=existing_lessons or "(няма)",
+            existing_lessons=existing_lessons or "(none)",
             new_lesson=lesson_text,
             context=context,
         )
@@ -763,7 +841,7 @@ class AIRouter:
         return {
             "approved": True,
             "formatted_lesson": lesson_text,
-            "reason": "AI проверката е недостъпна — урокът е записан без валидация.",
+            "reason": "AI verification unavailable — lesson saved without validation.",
             "model": "none",
         }
 
@@ -856,4 +934,4 @@ class AIRouter:
                 pass
 
         logger.warning("Failed to parse JSON response: %.200s", text)
-        return {"approved": False, "issues": ["Невалиден JSON отговор от AI"], "corrections": []}
+        return {"approved": False, "issues": ["Invalid JSON response from AI"], "corrections": []}

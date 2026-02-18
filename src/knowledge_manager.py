@@ -1,10 +1,12 @@
 """Knowledge manager for the 3-tier knowledge system (Lessons, Methodologies, Skills).
 
 Supports AI-verified lesson saving via AIRouter (Anthropic controller).
+Includes cached knowledge loading and multi-level prompt building for DeepSeek.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -30,6 +32,54 @@ class KnowledgeManager:
         self.methodologies_path = self.knowledge_path / "methodologies"
         self.skills_path = self.knowledge_path / "skills"
 
+        # Cache for knowledge content — avoids re-reading files every call
+        self._knowledge_cache: dict[str, str] = {}
+        self._cache_timestamps: dict[str, float] = {}
+
+        # Path to productivities.json (sibling of knowledge/ dir)
+        self._productivities_path = self.knowledge_path.parent / "config" / "productivities.json"
+
+    # ------------------------------------------------------------------
+    # Cached file reading
+    # ------------------------------------------------------------------
+
+    def _read_cached(self, filepath: Path) -> str:
+        """Read file with timestamp-based caching.
+
+        Returns cached content if file hasn't changed since last read.
+        """
+        key = str(filepath)
+        if not filepath.exists():
+            self._knowledge_cache.pop(key, None)
+            self._cache_timestamps.pop(key, None)
+            return ""
+
+        current_mtime = filepath.stat().st_mtime
+        cached_mtime = self._cache_timestamps.get(key, 0)
+
+        if key in self._knowledge_cache and current_mtime == cached_mtime:
+            return self._knowledge_cache[key]
+
+        # File changed or not cached — read it
+        try:
+            content = filepath.read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Failed to read %s: %s", filepath, exc)
+            return ""
+
+        self._knowledge_cache[key] = content
+        self._cache_timestamps[key] = current_mtime
+        return content
+
+    def invalidate_cache(self) -> None:
+        """Force re-read of all cached files on next access."""
+        self._knowledge_cache.clear()
+        self._cache_timestamps.clear()
+
+    # ------------------------------------------------------------------
+    # Lessons
+    # ------------------------------------------------------------------
+
     def get_lessons(self) -> list[str]:
         """Read all learned lessons from lessons_learned.md.
 
@@ -37,10 +87,10 @@ class KnowledgeManager:
             List of lesson strings.
         """
         filepath = self.lessons_path / "lessons_learned.md"
-        if not filepath.exists():
+        content = self._read_cached(filepath)
+        if not content:
             return []
 
-        content = filepath.read_text(encoding="utf-8")
         lessons = []
         for line in content.split("\n"):
             stripped = line.strip()
@@ -63,6 +113,9 @@ class KnowledgeManager:
         content = filepath.read_text(encoding="utf-8")
         content += f"\n- {lesson}"
         filepath.write_text(content, encoding="utf-8")
+        # Invalidate cache for this file
+        self._knowledge_cache.pop(str(filepath), None)
+        self._cache_timestamps.pop(str(filepath), None)
 
     def get_pending_lessons(self) -> list[str]:
         """Read pending lessons awaiting user approval.
@@ -71,10 +124,10 @@ class KnowledgeManager:
             List of pending lesson strings.
         """
         filepath = self.lessons_path / "pending_lessons.md"
-        if not filepath.exists():
+        content = self._read_cached(filepath)
+        if not content:
             return []
 
-        content = filepath.read_text(encoding="utf-8")
         lessons = []
         for line in content.split("\n"):
             stripped = line.strip()
@@ -105,6 +158,16 @@ class KnowledgeManager:
             pending_content = pending_content.replace(f"\n- {lesson}", "")
             pending_path.write_text(pending_content, encoding="utf-8")
 
+        # Invalidate affected caches
+        self._knowledge_cache.pop(str(learned_path), None)
+        self._cache_timestamps.pop(str(learned_path), None)
+        self._knowledge_cache.pop(str(pending_path), None)
+        self._cache_timestamps.pop(str(pending_path), None)
+
+    # ------------------------------------------------------------------
+    # Methodology
+    # ------------------------------------------------------------------
+
     def get_methodology(self, project_type: str) -> str:
         """Get methodology content for a project type.
 
@@ -123,13 +186,13 @@ class KnowledgeManager:
 
         filename = type_map.get(project_type)
         if not filename:
-            return f"Непознат тип проект: {project_type}"
+            return f"Unknown project type: {project_type}"
 
         filepath = self.methodologies_path / filename
-        if not filepath.exists():
-            return f"Методиката за '{project_type}' не е намерена."
-
-        return filepath.read_text(encoding="utf-8")
+        content = self._read_cached(filepath)
+        if not content:
+            return f"Methodology for '{project_type}' not found."
+        return content
 
     def update_methodology(self, project_type: str, content: str) -> None:
         """Update methodology file for a project type.
@@ -151,6 +214,12 @@ class KnowledgeManager:
 
         filepath = self.methodologies_path / filename
         filepath.write_text(content, encoding="utf-8")
+        self._knowledge_cache.pop(str(filepath), None)
+        self._cache_timestamps.pop(str(filepath), None)
+
+    # ------------------------------------------------------------------
+    # Skills
+    # ------------------------------------------------------------------
 
     def get_skills(self) -> str:
         """Read the main SKILL.md file.
@@ -159,9 +228,39 @@ class KnowledgeManager:
             Full SKILL.md content.
         """
         filepath = self.skills_path / "SKILL.md"
-        if not filepath.exists():
+        return self._read_cached(filepath)
+
+    # ------------------------------------------------------------------
+    # Productivities
+    # ------------------------------------------------------------------
+
+    def get_productivities(self) -> str:
+        """Read productivities.json as formatted text.
+
+        Returns:
+            Productivities JSON content as string.
+        """
+        content = self._read_cached(self._productivities_path)
+        if not content:
             return ""
-        return filepath.read_text(encoding="utf-8")
+        return content
+
+    # ------------------------------------------------------------------
+    # Workflow rules
+    # ------------------------------------------------------------------
+
+    def get_workflow_rules(self) -> str:
+        """Read workflow-rules.md from skill references.
+
+        Returns:
+            Workflow rules content.
+        """
+        filepath = self.skills_path / "references" / "workflow-rules.md"
+        return self._read_cached(filepath)
+
+    # ------------------------------------------------------------------
+    # Statistics
+    # ------------------------------------------------------------------
 
     def get_knowledge_stats(self) -> dict:
         """Get statistics about the knowledge base.
@@ -194,14 +293,85 @@ class KnowledgeManager:
             "skill_references": refs_count,
         }
 
+    # ------------------------------------------------------------------
+    # Multi-level system prompt builders
+    # ------------------------------------------------------------------
+
     def build_system_prompt(self, project_type: str | None = None) -> str:
-        """Build a system prompt combining all knowledge tiers.
+        """Build a FULL system prompt combining all knowledge tiers.
+
+        Includes: SKILL.md + references + methodology + last 20 lessons + productivities.
+        ~5000-8000 tokens. Use for schedule generation and document analysis.
 
         Args:
             project_type: Optional project type to include specific methodology.
 
         Returns:
             Combined system prompt string for AI.
+        """
+        return self.get_all_knowledge_for_prompt(
+            project_type=project_type, level="full"
+        )
+
+    def get_all_knowledge_for_prompt(
+        self,
+        project_type: str | None = None,
+        level: str = "full",
+    ) -> str:
+        """Collect all knowledge into a single text for system prompt.
+
+        Args:
+            project_type: Optional project type for methodology inclusion.
+            level: One of 'minimal', 'full', 'verification'.
+                - minimal: Core rules + productivities (~1500-2000 tokens)
+                - full: SKILL.md + methodology + 20 lessons + productivities + workflow (~5000-8000 tokens)
+                - verification: Everything including ALL lessons (~8000-12000 tokens)
+
+        Returns:
+            Combined knowledge text.
+        """
+        if level == "minimal":
+            return self._build_minimal_prompt()
+        elif level == "verification":
+            return self._build_verification_knowledge(project_type)
+        else:
+            return self._build_full_prompt(project_type)
+
+    def _build_minimal_prompt(self) -> str:
+        """Build minimal knowledge prompt for lightweight tasks (OCR, simple questions).
+
+        Includes ONLY: core rules summary + productivities.
+        ~1500-2000 tokens.
+        """
+        parts = [
+            "=== CORE RULES ===",
+            "You are an assistant for construction schedules (linear Gantt charts) "
+            "for water and sewage (ViK) infrastructure projects in Bulgaria.",
+            "Respond in Bulgarian. Follow the rules for generating linear schedules.",
+            "",
+            "Key rules:",
+            "- Rule #0: Convert ALL documents to JSON BEFORE analysis",
+            "- 7-day calendar, FS dependencies",
+            "- Water supply BEFORE sewage; Sewage BOTTOM-UP",
+            "- Disinfection: 2d (DN90-110 short), 4d (mixed/DN500), 6d (DN300 CI)",
+            "- Testing: 2 days (strength + pressure drop)",
+            "- days = ceil(length_m / productivity_rate)",
+            "- Rolling Wave: Water -> Sewage -> Roads with 10-12d LAG",
+        ]
+
+        # Add productivities
+        prod = self.get_productivities()
+        if prod:
+            parts.append("\n=== PRODUCTIVITIES ===")
+            parts.append(prod)
+
+        return "\n".join(parts)
+
+    def _build_full_prompt(self, project_type: str | None = None) -> str:
+        """Build full knowledge prompt for generation and analysis tasks.
+
+        Includes: SKILL.md + methodology + last 20 lessons + productivities + workflow rules.
+        ~5000-8000 tokens.
         """
         parts = []
 
@@ -215,9 +385,10 @@ class KnowledgeManager:
         refs_path = self.skills_path / "references"
         if refs_path.exists():
             for ref_file in sorted(refs_path.glob("*.md")):
-                ref_content = ref_file.read_text(encoding="utf-8")
-                parts.append(f"\n--- {ref_file.stem} ---")
-                parts.append(ref_content)
+                ref_content = self._read_cached(ref_file)
+                if ref_content:
+                    parts.append(f"\n--- {ref_file.stem} ---")
+                    parts.append(ref_content)
 
         # Tier 2: Methodology for specific project type
         if project_type:
@@ -225,15 +396,77 @@ class KnowledgeManager:
             parts.append(f"\n=== METHODOLOGY ({project_type}) ===")
             parts.append(methodology)
 
-        # Tier 3: Lessons learned (summarized)
+        # Tier 3: Lessons learned (last 20)
         lessons = self.get_lessons()
         if lessons:
             parts.append("\n=== LESSONS LEARNED ===")
             parts.append(f"Total lessons: {len(lessons)}")
-            # Include last 20 lessons for context
             recent = lessons[-20:]
             for lesson in recent:
                 parts.append(lesson)
+
+        # Tier 4: Productivities
+        prod = self.get_productivities()
+        if prod:
+            parts.append("\n=== PRODUCTIVITIES (config/productivities.json) ===")
+            parts.append(prod)
+
+        # Tier 5: Workflow rules
+        workflow = self.get_workflow_rules()
+        if workflow:
+            parts.append("\n=== WORKFLOW RULES ===")
+            parts.append(workflow)
+
+        return "\n\n".join(parts)
+
+    def _build_verification_knowledge(self, project_type: str | None = None) -> str:
+        """Build comprehensive knowledge for verification tasks.
+
+        Includes EVERYTHING: SKILL.md + workflow + ALL lessons.
+        ~8000-12000 tokens. Suitable for Anthropic controller.
+        """
+        parts = []
+
+        # Full skills
+        skills = self.get_skills()
+        if skills:
+            parts.append("=== SKILLS (Core Rules) ===")
+            parts.append(skills)
+
+        # All references
+        refs_path = self.skills_path / "references"
+        if refs_path.exists():
+            for ref_file in sorted(refs_path.glob("*.md")):
+                ref_content = self._read_cached(ref_file)
+                if ref_content:
+                    parts.append(f"\n--- {ref_file.stem} ---")
+                    parts.append(ref_content)
+
+        # Methodology
+        if project_type:
+            methodology = self.get_methodology(project_type)
+            parts.append(f"\n=== METHODOLOGY ({project_type}) ===")
+            parts.append(methodology)
+
+        # ALL lessons (not just last 20)
+        lessons = self.get_lessons()
+        if lessons:
+            parts.append("\n=== ALL LESSONS LEARNED ===")
+            parts.append(f"Total lessons: {len(lessons)}")
+            for lesson in lessons:
+                parts.append(lesson)
+
+        # Productivities
+        prod = self.get_productivities()
+        if prod:
+            parts.append("\n=== PRODUCTIVITIES ===")
+            parts.append(prod)
+
+        # Workflow rules
+        workflow = self.get_workflow_rules()
+        if workflow:
+            parts.append("\n=== WORKFLOW RULES ===")
+            parts.append(workflow)
 
         return "\n\n".join(parts)
 
@@ -279,6 +512,10 @@ class KnowledgeManager:
             content += f"\n**#{next_num}**: {formatted}"
             learned_path.write_text(content, encoding="utf-8")
 
+            # Invalidate cache
+            self._knowledge_cache.pop(str(learned_path), None)
+            self._cache_timestamps.pop(str(learned_path), None)
+
             logger.info("Lesson #%d saved: %s", next_num, formatted[:80])
 
             return {
@@ -295,8 +532,12 @@ class KnowledgeManager:
             pending_path.write_text("# Нови уроци за преглед\n\n", encoding="utf-8")
 
         pending_content = pending_path.read_text(encoding="utf-8")
-        pending_content += f"\n- {lesson} (ОТХВЪРЛЕН: {result['reason']})"
+        pending_content += f"\n- {lesson} (REJECTED: {result['reason']})"
         pending_path.write_text(pending_content, encoding="utf-8")
+
+        # Invalidate cache
+        self._knowledge_cache.pop(str(pending_path), None)
+        self._cache_timestamps.pop(str(pending_path), None)
 
         logger.info("Lesson rejected: %s — %s", lesson[:80], result["reason"])
 

@@ -6,3 +6,4 @@ output/
 *.pdf
 *.xml
 .streamlit/secrets.toml
+# Note: config/projects_history.json is NOT ignored — it's needed for persistence

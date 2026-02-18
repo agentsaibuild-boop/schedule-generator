@@ -3,6 +3,7 @@
 Routes intents to appropriate actions: chat, generate, modify, export, lessons, evolve.
 Uses AIProcessor (backed by AIRouter) for all AI operations.
 Includes self-evolution support with 3-level change management (green/yellow/red).
+Enforces strict JSON pipeline: converted files only for AI operations (Rule #0).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
     from src.ai_processor import AIProcessor
     from src.file_manager import FileManager
     from src.knowledge_manager import KnowledgeManager
+    from src.project_manager import ProjectManager
     from src.self_evolution import SelfEvolution
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,7 @@ class ChatHandler:
         file_manager: FileManager | None = None,
         knowledge_manager: KnowledgeManager | None = None,
         evolution: SelfEvolution | None = None,
+        project_manager: ProjectManager | None = None,
     ) -> None:
         """Initialize the chat handler.
 
@@ -60,11 +63,13 @@ class ChatHandler:
             file_manager: FileManager for project file access.
             knowledge_manager: KnowledgeManager for knowledge lookups.
             evolution: SelfEvolution instance for self-modification.
+            project_manager: ProjectManager for project persistence and history.
         """
         self.ai = ai_processor
         self.files = file_manager
         self.knowledge = knowledge_manager
         self.evolution = evolution
+        self.project_mgr = project_manager
         self.history: list[dict[str, str]] = []
         self.current_schedule: dict | None = None
         self.correction_history: list[dict] = []
@@ -76,6 +81,7 @@ class ChatHandler:
         conversion_done: bool = False,
         project_context: dict | None = None,
         pending_changes: dict | None = None,
+        recent_projects: list[dict] | None = None,
     ) -> dict:
         """Process a user message and return a structured response.
 
@@ -85,15 +91,27 @@ class ChatHandler:
             conversion_done: Whether files are converted.
             project_context: Optional dict with current project info.
             pending_changes: Pending self-evolution changes awaiting confirmation.
+            recent_projects: List of recent projects for number selection.
 
         Returns:
             Dict with response, schedule_updated, schedule_data,
             correction_info, intent, model_used, plus optional
-            evolution_pending / evolution_applied / evolution_cleared.
+            evolution_pending / evolution_applied / evolution_cleared /
+            load_project_path / load_project_id.
         """
         # Check if there are pending evolution changes waiting for confirmation
         if pending_changes:
             return self._handle_confirm_change(user_message, pending_changes)
+
+        # Check for recent project selection (numbers 1-5)
+        stripped = user_message.strip()
+        if (
+            stripped.isdigit()
+            and 1 <= int(stripped) <= 5
+            and recent_projects
+            and len(recent_projects) >= int(stripped)
+        ):
+            return self._handle_select_recent(int(stripped), recent_projects)
 
         self.history.append({"role": "user", "content": user_message})
 
@@ -115,6 +133,14 @@ class ChatHandler:
             }
 
         self.history.append({"role": "assistant", "content": result["response"]})
+
+        # Track message in project manager
+        if self.project_mgr and self.project_mgr.current_project:
+            pid = self.project_mgr.current_project.get("id")
+            if pid:
+                stats = self.project_mgr.projects.get("projects", {}).get(pid, {}).get("stats", {})
+                stats["total_messages"] = stats.get("total_messages", 0) + 1
+                self.project_mgr.save_progress(pid, {})
 
         return result
 
@@ -158,12 +184,80 @@ class ChatHandler:
     # Intent handlers
     # ------------------------------------------------------------------
 
+    def _handle_select_recent(self, number: int, recent_projects: list[dict]) -> dict:
+        """Handle selection of a recent project by number.
+
+        Args:
+            number: 1-based index of the selected project.
+            recent_projects: List of recent project dicts.
+
+        Returns:
+            Response dict with load_project_id for the app to handle.
+        """
+        idx = number - 1
+        if idx >= len(recent_projects):
+            return {
+                "response": f"Няма проект с номер {number}.",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "select_recent",
+                "model_used": "none",
+            }
+
+        selected = recent_projects[idx]
+
+        if not selected.get("exists", True):
+            return {
+                "response": (
+                    f"Папката за проект **{selected.get('name', '?')}** не съществува:\n"
+                    f"`{selected.get('path', '?')}`\n\n"
+                    "Моля, заредете друг проект."
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "select_recent",
+                "model_used": "none",
+            }
+
+        return {
+            "response": f"Зареждам проект **{selected.get('name', '?')}**...",
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "select_recent",
+            "model_used": "none",
+            "load_project_id": selected.get("id"),
+            "load_project_path": selected.get("path"),
+        }
+
     def _handle_load_project(self, message: str) -> dict:
-        """Handle project loading intent."""
+        """Handle project loading intent.
+
+        Tries to extract a path from the message for direct loading.
+        """
+        # Try to extract path from the message
+        import re
+        path_match = re.search(r'[A-Za-z]:\\[^\s"\']+|/[^\s"\']+', message)
+        if path_match:
+            path = path_match.group(0)
+            return {
+                "response": f"Зареждам проект от **{path}**...",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "load_project",
+                "model_used": "none",
+                "load_project_path": path,
+            }
+
         return {
             "response": (
-                "Моля, въведете пътя до проектната папка в страничната лента (вляво) "
-                "и натиснете **Зареди проект**."
+                "Моля, въведете пътя до проектната папка.\n\n"
+                "Примери:\n"
+                "- `Зареди D:\\Projects\\Горица`\n"
+                "- Или изберете папка от бутона 📂 в страничната лента."
             ),
             "schedule_updated": False,
             "schedule_data": None,
@@ -179,11 +273,14 @@ class ChatHandler:
         conversion_done: bool,
         project_context: dict | None,
     ) -> dict:
-        """Handle schedule generation intent."""
+        """Handle schedule generation intent.
+
+        Enforces strict JSON pipeline: only converted .json files are used.
+        """
         if not project_loaded:
             return {
                 "response": (
-                    "Първо заредете проект от страничната лента.\n\n"
+                    "⚠️ Първо заредете проект.\n\n"
                     "1. Изберете папката с тендерна документация\n"
                     "2. Натиснете **Зареди проект**\n"
                     "3. Конвертирайте файловете\n"
@@ -199,9 +296,10 @@ class ChatHandler:
         if not conversion_done:
             return {
                 "response": (
-                    "Файловете не са конвертирани.\n\n"
+                    "⚠️ Файловете не са конвертирани.\n\n"
                     "Натиснете **Конвертирай файлове** в страничната лента, "
-                    "след което ще мога да анализирам документацията."
+                    "след което ще мога да анализирам документацията.\n\n"
+                    "_Правило #0: Конвертиране ВИНАГИ преди анализ._"
                 ),
                 "schedule_updated": False,
                 "schedule_data": None,
@@ -220,10 +318,36 @@ class ChatHandler:
                 "model_used": "none",
             }
 
-        # Get converted files info
+        # Get converted files info — ONLY .json files (Rule #0)
         converted_files = []
         if self.files and self.files.base_path:
             converted_files = self.files.get_converted_files()
+
+        if not converted_files:
+            return {
+                "response": (
+                    "⚠️ Няма конвертирани файлове за анализ.\n\n"
+                    "Натиснете **Конвертирай файлове** в страничната лента."
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "generate_schedule",
+                "model_used": "none",
+            }
+
+        # Validate all files are .json
+        try:
+            self.ai._validate_json_inputs(converted_files)
+        except ValueError as exc:
+            return {
+                "response": f"⚠️ {exc}",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "generate_schedule",
+                "model_used": "none",
+            }
 
         # Step 1: Analyze documents
         analysis = self.ai.analyze_documents(converted_files)
@@ -289,6 +413,15 @@ class ChatHandler:
         self.current_schedule = gen_result.get("schedule")
         self.correction_history = history
 
+        # Save schedule to project manager
+        if self.project_mgr and self.project_mgr.current_project:
+            pid = self.project_mgr.current_project.get("id")
+            if pid:
+                self.project_mgr.save_progress(pid, {
+                    "status": "schedule_generated",
+                    "last_schedule": self.current_schedule,
+                })
+
         return {
             "response": "\n".join(response_parts),
             "schedule_updated": status in ("approved", "needs_human_review"),
@@ -347,10 +480,20 @@ class ChatHandler:
         # Re-verify after modification
         rules = self.ai.build_verification_prompt()
         verification = self.ai.router.run_correction_cycle(
-            result["content"], rules, max_cycles=2
+            result["content"], rules, max_cycles=2,
+            knowledge_prompt=system_prompt,
         )
 
         self.current_schedule = verification.get("schedule")
+
+        # Save updated schedule to project manager
+        if self.project_mgr and self.project_mgr.current_project:
+            pid = self.project_mgr.current_project.get("id")
+            if pid:
+                self.project_mgr.save_progress(pid, {
+                    "status": "schedule_generated",
+                    "last_schedule": self.current_schedule,
+                })
 
         return {
             "response": (
@@ -381,6 +524,12 @@ class ChatHandler:
                 "intent": "export",
                 "model_used": "none",
             }
+
+        # Save export status to project manager
+        if self.project_mgr and self.project_mgr.current_project:
+            pid = self.project_mgr.current_project.get("id")
+            if pid:
+                self.project_mgr.save_progress(pid, {"status": "exported"})
 
         return {
             "response": (
@@ -504,12 +653,12 @@ class ChatHandler:
         progress: list[str] = []
 
         # Step 1: Analyze
-        progress.append("🔄 Анализирам заявката... (Anthropic Sonnet 4.6)")
+        progress.append("Анализирам заявката... (Anthropic Sonnet 4.6)")
         plan = self.evolution.analyze_request(message)
 
         if plan.get("error"):
             return {
-                "response": f"❌ Грешка при анализ: {plan.get('description', 'неизвестна')}",
+                "response": f"Грешка при анализ: {plan.get('description', 'неизвестна')}",
                 "schedule_updated": False,
                 "schedule_data": None,
                 "correction_info": None,
@@ -518,15 +667,14 @@ class ChatHandler:
             }
 
         level = plan.get("level", "red")
-        level_info = self.evolution.CHANGE_LEVELS.get(level, self.evolution.CHANGE_LEVELS["red"])
 
         # Step 2: Generate changes
-        progress.append("📝 Генерирам код... (Anthropic Sonnet 4.6)")
+        progress.append("Генерирам код... (Anthropic Sonnet 4.6)")
         changes = self.evolution.generate_changes(plan)
 
         if changes.get("error") and not changes.get("changes"):
             return {
-                "response": f"❌ Грешка при генериране: {changes.get('error', 'неизвестна')}",
+                "response": f"Грешка при генериране: {changes.get('error', 'неизвестна')}",
                 "schedule_updated": False,
                 "schedule_data": None,
                 "correction_info": None,
@@ -542,7 +690,7 @@ class ChatHandler:
 
         if level == "green":
             # GREEN: Apply directly, no confirmation needed
-            progress.append("🔧 Прилагам промени...")
+            progress.append("Прилагам промени...")
             apply_result = self.evolution.apply_changes(changes)
 
             if apply_result["failed"] > 0:
@@ -550,7 +698,7 @@ class ChatHandler:
                 return {
                     "response": (
                         f"{progress_text}\n\n"
-                        f"❌ Грешка при прилагане:\n{error_text}"
+                        f"Грешка при прилагане:\n{error_text}"
                     ),
                     "schedule_updated": False,
                     "schedule_data": None,
@@ -566,7 +714,7 @@ class ChatHandler:
                 "response": (
                     f"{progress_text}\n\n"
                     f"{preview}\n\n"
-                    f"🟢 Промените са приложени: {plan.get('description', '')}"
+                    f"Промените са приложени: {plan.get('description', '')}"
                 ),
                 "schedule_updated": False,
                 "schedule_data": None,
@@ -581,7 +729,7 @@ class ChatHandler:
                 "response": (
                     f"{progress_text}\n\n"
                     f"{preview}\n\n"
-                    "🟡 Тази промяна ще засегне конфигурацията.\n"
+                    "Тази промяна ще засегне конфигурацията.\n"
                     "Потвърждавате ли? Напишете **Да** за да продължа."
                 ),
                 "schedule_updated": False,
@@ -605,7 +753,7 @@ class ChatHandler:
                     "response": (
                         f"{progress_text}\n\n"
                         f"{preview}\n\n"
-                        "🔴 Тази промяна изисква админ код, но **ADMIN_CODE** не е зададен в .env.\n"
+                        "Тази промяна изисква админ код, но **ADMIN_CODE** не е зададен в .env.\n"
                         "Добавете `ADMIN_CODE=вашият-код` в `.env` файла и рестартирайте."
                     ),
                     "schedule_updated": False,
@@ -619,8 +767,8 @@ class ChatHandler:
                 "response": (
                     f"{progress_text}\n\n"
                     f"{preview}\n\n"
-                    "🔴 Тази промяна ще модифицира **кода** на приложението.\n\n"
-                    "⚠️ **ВНИМАНИЕ:** Промяната засяга ВСИЧКИ потребители.\n"
+                    "Тази промяна ще модифицира **кода** на приложението.\n\n"
+                    "**ВНИМАНИЕ:** Промяната засяга ВСИЧКИ потребители.\n"
                     "Ще бъде създаден автоматичен backup преди промяната.\n\n"
                     "За да продължите, **въведете админ код:**"
                 ),
@@ -667,7 +815,7 @@ class ChatHandler:
         # Check for cancellation
         if stripped.lower() in ["не", "no", "отказ", "откажи", "cancel"]:
             return {
-                "response": "❌ Промяната е отказана.",
+                "response": "Промяната е отказана.",
                 "schedule_updated": False,
                 "schedule_data": None,
                 "correction_info": None,
@@ -680,7 +828,7 @@ class ChatHandler:
             # Verify admin code
             if not self.evolution.verify_admin_code(stripped):
                 return {
-                    "response": "❌ Невалиден админ код. Промяната е отказана.",
+                    "response": "Невалиден админ код. Промяната е отказана.",
                     "schedule_updated": False,
                     "schedule_data": None,
                     "correction_info": None,
@@ -709,16 +857,16 @@ class ChatHandler:
         # Backup (for red level)
         backup_hash = ""
         if level == "red":
-            progress.append("💾 Създавам backup...")
+            progress.append("Създавам backup...")
             backup = self.evolution.create_backup(plan.get("description", ""))
             if backup["success"]:
                 backup_hash = backup["commit_hash"]
                 progress.append(f"   Git commit: {backup_hash[:8]}")
             else:
-                progress.append(f"   ⚠️ Backup неуспешен: {backup.get('error', '?')}")
+                progress.append(f"   Backup неуспешен: {backup.get('error', '?')}")
 
         # Apply changes
-        progress.append("🔧 Прилагам промени...")
+        progress.append("Прилагам промени...")
         apply_result = self.evolution.apply_changes(changes)
         progress.append(f"   Приложени: {apply_result['applied']}, Грешки: {apply_result['failed']}")
 
@@ -726,17 +874,17 @@ class ChatHandler:
             error_text = "\n".join(apply_result["errors"])
             # Auto-rollback for red level
             if level == "red" and backup_hash:
-                progress.append("❌ Тестовете не минаха! Автоматично връщам промените...")
+                progress.append("Тестовете не минаха! Автоматично връщам промените...")
                 rollback_result = self.evolution.rollback(backup_hash)
                 if rollback_result["success"]:
-                    progress.append(f"⏪ Възстановен backup от: {backup_hash[:8]}")
+                    progress.append(f"Възстановен backup от: {backup_hash[:8]}")
                 else:
-                    progress.append(f"⚠️ Rollback неуспешен: {rollback_result.get('error', '?')}")
+                    progress.append(f"Rollback неуспешен: {rollback_result.get('error', '?')}")
 
             return {
                 "response": (
                     "\n".join(progress) + "\n\n"
-                    f"❌ Грешки при прилагане:\n{error_text}\n\n"
+                    f"Грешки при прилагане:\n{error_text}\n\n"
                     "Моля, опишете какво искахте по-подробно и ще опитам отново."
                 ),
                 "schedule_updated": False,
@@ -749,7 +897,7 @@ class ChatHandler:
 
         # Run tests (for red level)
         if level == "red":
-            progress.append("🧪 Тествам...")
+            progress.append("Тествам...")
             test_result = self.evolution.test_changes()
             progress.append(
                 f"   {test_result['tests_passed']}/{test_result['tests_run']} теста минаха"
@@ -757,14 +905,14 @@ class ChatHandler:
 
             if not test_result["passed"]:
                 error_text = "\n".join(test_result["errors"])
-                progress.append("❌ Тестовете не минаха! Автоматично връщам промените...")
+                progress.append("Тестовете не минаха! Автоматично връщам промените...")
 
                 if backup_hash:
                     rollback_result = self.evolution.rollback(backup_hash)
                     if rollback_result["success"]:
-                        progress.append(f"⏪ Възстановен backup от: {backup_hash[:8]}")
+                        progress.append(f"Възстановен backup от: {backup_hash[:8]}")
                     else:
-                        progress.append(f"⚠️ Rollback неуспешен: {rollback_result.get('error', '?')}")
+                        progress.append(f"Rollback неуспешен: {rollback_result.get('error', '?')}")
 
                 return {
                     "response": (
@@ -788,9 +936,8 @@ class ChatHandler:
         # Log
         self.evolution.log_change(request, plan, backup_hash, "applied")
 
-        progress.append(f"✅ Готово! Промените са приложени успешно.")
+        progress.append("Готово! Промените са приложени успешно.")
         progress.append(f"   Git commit: '{description}' ({commit_hash[:8]})")
-        progress.append(f"   За връщане назад → sidebar → ⏪ Върни предишна версия")
 
         return {
             "response": "\n".join(progress),

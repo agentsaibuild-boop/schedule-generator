@@ -1,6 +1,7 @@
 """AI processor — orchestrates document analysis, schedule generation, and chat.
 
 Uses AIRouter for all API calls (DeepSeek worker + Anthropic controller).
+Enforces strict JSON pipeline: only converted .json files are accepted for analysis.
 """
 
 from __future__ import annotations
@@ -53,10 +54,10 @@ class AIProcessor:
     # ------------------------------------------------------------------
 
     def build_system_prompt(self, project_type: str | None = None) -> str:
-        """Build system prompt for the worker (DeepSeek) from all knowledge tiers.
+        """Build FULL system prompt for the worker (DeepSeek) from all knowledge tiers.
 
-        Includes: SKILL.md + methodology + last 20 lessons + productivities.
-        Capped at ~8000 tokens to avoid excessive prompt size.
+        Includes: SKILL.md + methodology + last 20 lessons + productivities + workflow.
+        ~5000-8000 tokens.
 
         Args:
             project_type: Optional project type for specific methodology.
@@ -65,11 +66,30 @@ class AIProcessor:
             Combined system prompt string.
         """
         if self.knowledge:
-            return self.knowledge.build_system_prompt(project_type)
+            return self.knowledge.get_all_knowledge_for_prompt(
+                project_type=project_type, level="full"
+            )
 
         return (
             "Ти си асистент за строителни графици за ВиК проекти в България. "
             "Отговаряй на български. Следвай правилата за генериране на линейни графици."
+        )
+
+    def build_minimal_prompt(self) -> str:
+        """Build minimal system prompt for lightweight tasks (OCR, simple questions).
+
+        Includes ONLY: core rules + productivities.
+        ~1500-2000 tokens. Saves tokens for routine operations.
+
+        Returns:
+            Minimal system prompt string.
+        """
+        if self.knowledge:
+            return self.knowledge.get_all_knowledge_for_prompt(level="minimal")
+
+        return (
+            "Ти си асистент за строителни графици за ВиК проекти в България. "
+            "Отговаряй на български."
         )
 
     def build_verification_prompt(self) -> str:
@@ -91,7 +111,7 @@ class AIProcessor:
             checklist_path = refs_path / "verification-checklist.md"
             if checklist_path.exists():
                 parts.append(
-                    "\n=== ВЕРИФИКАЦИОНЕН СПИСЪК ===\n"
+                    "\n=== VERIFICATION CHECKLIST ===\n"
                     + checklist_path.read_text(encoding="utf-8")
                 )
 
@@ -99,11 +119,35 @@ class AIProcessor:
             workflow_path = refs_path / "workflow-rules.md"
             if workflow_path.exists():
                 parts.append(
-                    "\n=== ПРАВИЛА ЗА WORKFLOW ===\n"
+                    "\n=== WORKFLOW RULES ===\n"
                     + workflow_path.read_text(encoding="utf-8")
                 )
 
         return "\n\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # Input validation
+    # ------------------------------------------------------------------
+
+    def _validate_json_inputs(self, files: list[dict]) -> None:
+        """Validate that all input files are converted .json files.
+
+        Args:
+            files: List of file info dicts from FileManager.
+
+        Raises:
+            ValueError: If any non-JSON files are detected.
+        """
+        non_json = [
+            f.get("original", f.get("name", "unknown"))
+            for f in files
+            if f.get("converted") and not f["converted"].endswith(".json")
+        ]
+        if non_json:
+            raise ValueError(
+                f"Non-JSON files detected: {non_json}. "
+                "Run file conversion first! (Rule #0)"
+            )
 
     # ------------------------------------------------------------------
     # Document analysis
@@ -112,8 +156,10 @@ class AIProcessor:
     def analyze_documents(self, converted_files: list[dict]) -> dict:
         """Analyze converted documents via the worker (DeepSeek).
 
+        IMPORTANT: Only accepts converted .json files (Rule #0).
+
         Args:
-            converted_files: List of file info dicts from FileManager.
+            converted_files: List of file info dicts from FileManager.get_converted_files().
 
         Returns:
             Analysis dict with project_type, scope, quantities, etc.
@@ -121,8 +167,11 @@ class AIProcessor:
         if not self.router:
             return {
                 "status": "error",
-                "message": "AI Router не е инициализиран.",
+                "message": "AI Router not initialized.",
             }
+
+        # Validate: only JSON files allowed
+        self._validate_json_inputs(converted_files)
 
         # Build a summary of all files
         file_summaries = []
@@ -182,7 +231,7 @@ class AIProcessor:
         if not self.router:
             return {
                 "status": "error",
-                "message": "AI Router не е инициализиран.",
+                "message": "AI Router not initialized.",
             }
 
         # Step 1: Generate via DeepSeek
@@ -202,7 +251,7 @@ class AIProcessor:
             "content": (
                 f"Генерирай строителен линеен график за следния проект:\n\n"
                 f"{analysis_text}\n\n"
-                "Тип: {project_type}\n\n"
+                f"Тип: {project_type}\n\n"
                 "Отговори в JSON формат с:\n"
                 "- tasks: масив от задачи с id, name, duration, start_day, "
                 "dependencies, dn, length_m, team\n"
@@ -294,7 +343,10 @@ class AIProcessor:
             }
 
         if not self.router:
-            return {"status": "error", "error": "AI Router не е инициализиран."}
+            return {"status": "error", "error": "AI Router not initialized."}
+
+        # Build minimal prompt for OCR context
+        ocr_system_prompt = self.build_minimal_prompt()
 
         source_name = Path(filepath).name
         doc = fitz.open(filepath)
@@ -307,14 +359,16 @@ class AIProcessor:
             b64_image = base64.b64encode(img_bytes).decode("ascii")
 
             try:
-                extracted = self.router.ocr_pdf_page(b64_image)
+                extracted = self.router.ocr_pdf_page(
+                    b64_image, system_prompt=ocr_system_prompt
+                )
             except Exception as exc:
                 logger.warning(
                     "OCR error on page %d of %s: %s", page_num + 1, source_name, exc
                 )
                 if "rate" in str(exc).lower():
                     time.sleep(5)
-                extracted = f"[OCR ГРЕШКА стр. {page_num + 1}: {exc}]"
+                extracted = f"[OCR ERROR page {page_num + 1}: {exc}]"
 
             pages_text.append({"page": page_num + 1, "text": extracted})
             logger.info(
