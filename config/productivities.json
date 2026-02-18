@@ -1,0 +1,24 @@
+{
+  "version": "0.4",
+  "productivities": {
+    "DN90_PE_HDD": {"drill_rate": 56, "effective_rate": 12, "unit": "м/ден"},
+    "DN110_PE_HDD": {"drill_rate": 60, "effective_rate": 13, "unit": "м/ден"},
+    "DN125_PE_HDD": {"drill_rate": 65, "effective_rate": 14, "unit": "м/ден"},
+    "DN315_PVC_open": {"dig_rate": 48, "effective_rate": 12, "unit": "м/ден"},
+    "DN400_PVC_open": {"dig_rate": 45, "effective_rate": 11, "unit": "м/ден"},
+    "DN500_PE_open": {"dig_rate": 48, "effective_rate": 15, "unit": "м/ден"},
+    "DN630_open": {"dig_rate": 35, "effective_rate": 9, "unit": "м/ден"},
+    "DN300_CI_open": {"dig_rate": 10.5, "effective_rate": 8, "unit": "м/ден"}
+  },
+  "terrain_factors": {
+    "asphalt": 0.75,
+    "dirt_road": 1.0,
+    "forest": 0.6
+  },
+  "disinfection_days": {
+    "DN90_110_PE_short": 2,
+    "mixed_DN_large": 4,
+    "DN300_CI_forest": 6,
+    "DN500_PE": 4
+  }
+}

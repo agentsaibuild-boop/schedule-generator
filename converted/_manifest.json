@@ -1,0 +1,44 @@
+{
+  "files": {
+    "app_config.json": {
+      "original_size": 1053,
+      "original_modified": "2026-02-18T10:15:59",
+      "converted_file": "converted/app_config.json",
+      "converted_size": 1396,
+      "conversion_method": "json_copy",
+      "conversion_date": "2026-02-18T10:51:27",
+      "status": "ok",
+      "pages_or_rows": 19
+    },
+    "productivities.json": {
+      "original_size": 946,
+      "original_modified": "2026-02-18T10:15:50",
+      "converted_file": "converted/productivities.json",
+      "converted_size": 1357,
+      "conversion_method": "json_copy",
+      "conversion_date": "2026-02-18T10:51:27",
+      "status": "ok",
+      "pages_or_rows": 25
+    },
+    "requirements.txt": {
+      "original_size": 180,
+      "original_modified": "2026-02-18T10:51:04",
+      "converted_file": "converted/requirements.json",
+      "converted_size": 497,
+      "conversion_method": "txt_copy",
+      "conversion_date": "2026-02-18T10:51:27",
+      "status": "ok",
+      "pages_or_rows": 11
+    }
+  },
+  "project_path": ".",
+  "created": "2026-02-18T10:51:27",
+  "last_updated": "2026-02-18T10:51:27",
+  "app_version": "0.1",
+  "stats": {
+    "total_files": 3,
+    "converted_ok": 3,
+    "converted_ocr": 0,
+    "failed": 0
+  }
+}

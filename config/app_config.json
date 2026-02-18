@@ -1,0 +1,18 @@
+{
+  "app_name": "ВиК График Генератор",
+  "version": "0.1",
+  "company": "РАИ Комерс",
+  "supported_file_types": [".pdf", ".xlsx", ".xls", ".csv", ".json", ".txt", ".docx"],
+  "project_types": [
+    {"id": "distribution", "name": "Разпределителна мрежа", "description": "Много еднакви участъци, pipeline overlap"},
+    {"id": "supply", "name": "Довеждащ водопровод", "description": "Променливи участъци, последователно"},
+    {"id": "single", "name": "Единичен участък", "description": "1 непрекъснат, уникални дейности"},
+    {"id": "engineering", "name": "ИНЖЕНЕРИНГ", "description": "Проектиране + Строителство + Авт. надзор"},
+    {"id": "mega", "name": "Mega-scale", "description": ">20км, >1000 задачи"}
+  ],
+  "default_params": {
+    "design_days": 180,
+    "construction_days": 600,
+    "work_calendar": "7-day"
+  }
+}
