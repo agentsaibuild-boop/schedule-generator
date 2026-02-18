@@ -193,6 +193,9 @@ if "self_evolution" not in st.session_state:
 if "project_manager" not in st.session_state:
     st.session_state.project_manager = ProjectManager(str(APP_DIR))
 
+if "schedule_builder" not in st.session_state:
+    st.session_state.schedule_builder = ScheduleBuilder()
+
 if "chat_handler" not in st.session_state:
     st.session_state.chat_handler = ChatHandler(
         ai_processor=st.session_state.ai_processor,
@@ -200,6 +203,7 @@ if "chat_handler" not in st.session_state:
         knowledge_manager=st.session_state.knowledge_mgr,
         evolution=st.session_state.self_evolution,
         project_manager=st.session_state.project_manager,
+        schedule_builder=st.session_state.schedule_builder,
     )
 
 router: AIRouter = st.session_state.router

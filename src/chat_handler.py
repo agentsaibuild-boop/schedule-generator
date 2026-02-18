@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from src.file_manager import FileManager
     from src.knowledge_manager import KnowledgeManager
     from src.project_manager import ProjectManager
+    from src.schedule_builder import ScheduleBuilder
     from src.self_evolution import SelfEvolution
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ class ChatHandler:
         knowledge_manager: KnowledgeManager | None = None,
         evolution: SelfEvolution | None = None,
         project_manager: ProjectManager | None = None,
+        schedule_builder: ScheduleBuilder | None = None,
     ) -> None:
         """Initialize the chat handler.
 
@@ -64,12 +66,14 @@ class ChatHandler:
             knowledge_manager: KnowledgeManager for knowledge lookups.
             evolution: SelfEvolution instance for self-modification.
             project_manager: ProjectManager for project persistence and history.
+            schedule_builder: ScheduleBuilder for local validation and adjustments.
         """
         self.ai = ai_processor
         self.files = file_manager
         self.knowledge = knowledge_manager
         self.evolution = evolution
         self.project_mgr = project_manager
+        self.builder = schedule_builder
         self.history: list[dict[str, str]] = []
         self.current_schedule: dict | None = None
         self.correction_history: list[dict] = []
@@ -437,7 +441,11 @@ class ChatHandler:
         }
 
     def _handle_modify_schedule(self, message: str) -> dict:
-        """Handle schedule modification intent."""
+        """Handle schedule modification intent.
+
+        Sends the change to AI, re-verifies, then runs local diff validation
+        to detect unintended changes, missing/new tasks, etc.
+        """
         if not self.current_schedule:
             return {
                 "response": "Няма генериран график за промяна. Първо генерирайте график.",
@@ -457,6 +465,13 @@ class ChatHandler:
                 "intent": "modify_schedule",
                 "model_used": "none",
             }
+
+        # Snapshot the old schedule for diff comparison
+        old_schedule: list[dict] = []
+        if isinstance(self.current_schedule, list):
+            old_schedule = self.current_schedule
+        elif isinstance(self.current_schedule, dict):
+            old_schedule = self.current_schedule.get("tasks", [])
 
         # Send modification request to AI
         schedule_str = (
@@ -484,7 +499,52 @@ class ChatHandler:
             knowledge_prompt=system_prompt,
         )
 
-        self.current_schedule = verification.get("schedule")
+        new_schedule = verification.get("schedule")
+
+        # --- Local diff validation ---
+        validation_notes: list[str] = []
+        if self.builder and old_schedule and new_schedule:
+            new_tasks: list[dict] = []
+            if isinstance(new_schedule, list):
+                new_tasks = new_schedule
+            elif isinstance(new_schedule, dict):
+                new_tasks = new_schedule.get("tasks", [])
+
+            if old_schedule and new_tasks:
+                mod_result = self.builder.validate_modification(
+                    old_schedule, new_tasks, message,
+                )
+
+                if mod_result.get("missing_tasks"):
+                    ids = ", ".join(mod_result["missing_tasks"][:5])
+                    validation_notes.append(
+                        f"🔴 AI-ят е премахнал задачи: {ids}. Проверете внимателно."
+                    )
+
+                if mod_result.get("new_tasks"):
+                    ids = ", ".join(mod_result["new_tasks"][:5])
+                    validation_notes.append(
+                        f"🔴 AI-ят е добавил нови задачи: {ids}. Проверете внимателно."
+                    )
+
+                if mod_result.get("unintended_changes"):
+                    items = mod_result["unintended_changes"]
+                    ids = ", ".join(c["id"] for c in items[:5])
+                    validation_notes.append(
+                        f"ℹ️ Освен поисканата промяна, бяха променени и: {ids}"
+                    )
+                    for item in items[:3]:
+                        fields = ", ".join(item["changed_fields"][:4])
+                        validation_notes.append(
+                            f"   — {item['id']} ({item['name']}): {fields}"
+                        )
+
+                if not mod_result.get("valid") and not validation_notes:
+                    validation_notes.append(
+                        "⚠️ Внимание: AI-ят е направил непредвидени промени."
+                    )
+
+        self.current_schedule = new_schedule
 
         # Save updated schedule to project manager
         if self.project_mgr and self.project_mgr.current_project:
@@ -495,11 +555,18 @@ class ChatHandler:
                     "last_schedule": self.current_schedule,
                 })
 
+        # Build response
+        response_parts = [
+            f"Промяната е приложена.",
+            f"Модел: {result['model']}, Проверка: {verification['status']}",
+        ]
+        if validation_notes:
+            response_parts.append("")
+            response_parts.append("**Локална проверка:**")
+            response_parts.extend(validation_notes)
+
         return {
-            "response": (
-                f"Промяната е приложена.\n"
-                f"Модел: {result['model']}, Проверка: {verification['status']}"
-            ),
+            "response": "\n".join(response_parts),
             "schedule_updated": True,
             "schedule_data": self.current_schedule,
             "correction_info": {
