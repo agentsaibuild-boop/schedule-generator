@@ -1,13 +1,20 @@
+[server]
+headless = false
+port = 8501
+enableCORS = false
+enableXsrfProtection = false
+maxUploadSize = 200
+
+[browser]
+gatherUsageStats = false
+
 [theme]
-primaryColor = "#4472C4"
+primaryColor = "#5B9BD5"
 backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F0F2F6"
 textColor = "#262730"
 font = "sans serif"
 
-[server]
-maxUploadSize = 500
-headless = true
-
-[browser]
-gatherUsageStats = false
+[client]
+showSidebarNavigation = false
+toolbarMode = "minimal"

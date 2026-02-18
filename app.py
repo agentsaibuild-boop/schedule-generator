@@ -73,6 +73,36 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
+# Configuration check (for installer deployments)
+# ---------------------------------------------------------------------------
+def _check_configuration():
+    """Check if the application is properly configured."""
+    issues = []
+    if not os.path.exists(".env"):
+        issues.append("missing_env")
+    else:
+        if not os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY") == "sk-ant-your-key-here":
+            issues.append("invalid_anthropic_key")
+        if not os.getenv("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY") == "sk-your-deepseek-key-here":
+            issues.append("invalid_deepseek_key")
+        if not os.getenv("ADMIN_CODE") or os.getenv("ADMIN_CODE") == "your-admin-code-here":
+            issues.append("invalid_admin_code")
+    return issues
+
+_config_issues = _check_configuration()
+if _config_issues:
+    st.error("Приложението не е конфигурирано правилно!")
+    if "missing_env" in _config_issues:
+        st.warning("Липсва файл `.env`. Стартирайте `install.bat` или копирайте `.env.example` в `.env`.")
+    if "invalid_anthropic_key" in _config_issues:
+        st.warning("Anthropic API ключът не е валиден. Обърнете се към администратора.")
+    if "invalid_deepseek_key" in _config_issues:
+        st.warning("DeepSeek API ключът не е валиден. Обърнете се към администратора.")
+    if "invalid_admin_code" in _config_issues:
+        st.info("Админ кодът не е зададен. Функцията за еволюция няма да работи.")
+    st.stop()
+
+# ---------------------------------------------------------------------------
 # Session state initialization
 # ---------------------------------------------------------------------------
 if "messages" not in st.session_state:

@@ -1,9 +1,29 @@
+# Environment
 .env
+.env.company
+venv/
+
+# Python
 __pycache__/
 *.pyc
+
+# OS
 .DS_Store
+
+# Output
 output/
 *.pdf
 *.xml
+
+# Streamlit secrets
 .streamlit/secrets.toml
+
+# Installer tools
+tools/python-installer.exe
+
 # Note: config/projects_history.json is NOT ignored — it's needed for persistence
+# Note: These files ARE tracked (needed for installer):
+#   install.bat, start.bat, update.bat
+#   .env.example, .env.company.example
+#   README_INSTALL.md, .streamlit/config.toml
+#   tools/README.md
