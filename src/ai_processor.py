@@ -1,78 +1,289 @@
-"""Anthropic API communication handler for AI-powered schedule generation.
+"""AI processor — orchestrates document analysis, schedule generation, and chat.
 
-Provides chat, document analysis, schedule generation, and OCR via vision.
+Uses AIRouter for all API calls (DeepSeek worker + Anthropic controller).
 """
 
 from __future__ import annotations
 
 import base64
+import json
 import logging
-import os
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.ai_router import AIRouter
+    from src.knowledge_manager import KnowledgeManager
 
 logger = logging.getLogger(__name__)
 
 
 class AIProcessor:
-    """Handles communication with the Anthropic API for AI responses."""
+    """Orchestrates AI-powered schedule generation and document analysis."""
 
-    def __init__(self, api_key: str | None = None, skills_path: str = "") -> None:
+    def __init__(
+        self,
+        router: AIRouter | None = None,
+        knowledge_manager: KnowledgeManager | None = None,
+        api_key: str | None = None,
+        skills_path: str = "",
+    ) -> None:
         """Initialize the AI processor.
 
-        Reads ANTHROPIC_API_KEY from the environment (via .env) if not provided.
-
         Args:
-            api_key: Anthropic API key. Falls back to env var.
-            skills_path: Path to the skills directory for system prompts.
+            router: AIRouter instance for dual-AI calls.
+            knowledge_manager: KnowledgeManager for building prompts.
+            api_key: Legacy param (kept for backward compat during transition).
+            skills_path: Legacy param.
         """
-        self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
-        self.skills_path = skills_path
-        self.model = "claude-sonnet-4-5-20250929"
-        self.ocr_model = "claude-sonnet-4-5-20250929"
-        self._client = None
-
-    # ------------------------------------------------------------------
-    # Lazy client initialization
-    # ------------------------------------------------------------------
-
-    def _get_client(self):
-        """Return an Anthropic client, creating one on first call."""
-        if self._client is not None:
-            return self._client
-
-        if not self.api_key:
-            raise RuntimeError(
-                "ANTHROPIC_API_KEY is not set. "
-                "Add it to the .env file or pass it directly."
-            )
-
-        import anthropic
-
-        self._client = anthropic.Anthropic(api_key=self.api_key)
-        return self._client
+        self.router = router
+        self.knowledge = knowledge_manager
+        self._legacy_api_key = api_key or ""
 
     @property
     def is_configured(self) -> bool:
-        """Check whether an API key is available."""
-        return bool(self.api_key)
+        """Check whether at least one AI model is available."""
+        if self.router:
+            return self.router.deepseek_available or self.router.anthropic_available
+        return bool(self._legacy_api_key)
 
     # ------------------------------------------------------------------
-    # OCR via vision
+    # System prompt builders
+    # ------------------------------------------------------------------
+
+    def build_system_prompt(self, project_type: str | None = None) -> str:
+        """Build system prompt for the worker (DeepSeek) from all knowledge tiers.
+
+        Includes: SKILL.md + methodology + last 20 lessons + productivities.
+        Capped at ~8000 tokens to avoid excessive prompt size.
+
+        Args:
+            project_type: Optional project type for specific methodology.
+
+        Returns:
+            Combined system prompt string.
+        """
+        if self.knowledge:
+            return self.knowledge.build_system_prompt(project_type)
+
+        return (
+            "Ти си асистент за строителни графици за ВиК проекти в България. "
+            "Отговаряй на български. Следвай правилата за генериране на линейни графици."
+        )
+
+    def build_verification_prompt(self) -> str:
+        """Build strict verification rules for the controller (Anthropic).
+
+        Returns:
+            Verification rules string.
+        """
+        parts = ["Проверявай СТРИКТНО следните правила:\n"]
+
+        if self.knowledge:
+            # Include skills (core rules)
+            skills = self.knowledge.get_skills()
+            if skills:
+                parts.append(skills)
+
+            # Include verification checklist if available
+            refs_path = self.knowledge.skills_path / "references"
+            checklist_path = refs_path / "verification-checklist.md"
+            if checklist_path.exists():
+                parts.append(
+                    "\n=== ВЕРИФИКАЦИОНЕН СПИСЪК ===\n"
+                    + checklist_path.read_text(encoding="utf-8")
+                )
+
+            # Include workflow rules
+            workflow_path = refs_path / "workflow-rules.md"
+            if workflow_path.exists():
+                parts.append(
+                    "\n=== ПРАВИЛА ЗА WORKFLOW ===\n"
+                    + workflow_path.read_text(encoding="utf-8")
+                )
+
+        return "\n\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # Document analysis
+    # ------------------------------------------------------------------
+
+    def analyze_documents(self, converted_files: list[dict]) -> dict:
+        """Analyze converted documents via the worker (DeepSeek).
+
+        Args:
+            converted_files: List of file info dicts from FileManager.
+
+        Returns:
+            Analysis dict with project_type, scope, quantities, etc.
+        """
+        if not self.router:
+            return {
+                "status": "error",
+                "message": "AI Router не е инициализиран.",
+            }
+
+        # Build a summary of all files
+        file_summaries = []
+        for f in converted_files:
+            name = f.get("original", f.get("name", "unknown"))
+            method = f.get("method", "")
+            file_summaries.append(f"- {name} ({method})")
+
+        files_text = "\n".join(file_summaries)
+
+        system_prompt = self.build_system_prompt()
+        messages = [{
+            "role": "user",
+            "content": (
+                "Анализирай следните конвертирани документи от тендерна процедура за ВиК:\n\n"
+                f"{files_text}\n\n"
+                "Определи:\n"
+                "1. Тип проект (разпределителна мрежа, довеждащ, единичен, инженеринг, mega)\n"
+                "2. Обхват — какви мрежи се строят (водопровод, канализация, пътни)\n"
+                "3. Количества — DN, дължини на клонове/участъци\n"
+                "4. Срокове — ако са споменати\n"
+                "5. Специфики — терен, материали, брой екипи\n\n"
+                "Отговори в JSON формат."
+            ),
+        }]
+
+        result = self.router.chat(messages, system_prompt)
+
+        return {
+            "status": "ok",
+            "analysis": result["content"],
+            "model": result["model"],
+            "cost": result["cost"],
+            "fallback": result.get("fallback", False),
+        }
+
+    # ------------------------------------------------------------------
+    # Schedule generation with verification cycle
+    # ------------------------------------------------------------------
+
+    def generate_schedule(
+        self,
+        analysis: dict,
+        project_type: str,
+        progress_callback: Any | None = None,
+    ) -> dict:
+        """Generate a schedule via worker, then verify via controller.
+
+        Args:
+            analysis: Analysis dict from analyze_documents.
+            project_type: Type of construction project.
+            progress_callback: Optional callable(message: str) for progress.
+
+        Returns:
+            Dict with schedule, correction history, costs.
+        """
+        if not self.router:
+            return {
+                "status": "error",
+                "message": "AI Router не е инициализиран.",
+            }
+
+        # Step 1: Generate via DeepSeek
+        if progress_callback:
+            model_label = "DeepSeek" if self.router.deepseek_available else "Anthropic"
+            progress_callback(f"Генерирам график... ({model_label})")
+
+        system_prompt = self.build_system_prompt(project_type)
+        analysis_text = (
+            analysis.get("analysis", "")
+            if isinstance(analysis.get("analysis"), str)
+            else json.dumps(analysis, ensure_ascii=False)
+        )
+
+        messages = [{
+            "role": "user",
+            "content": (
+                f"Генерирай строителен линеен график за следния проект:\n\n"
+                f"{analysis_text}\n\n"
+                "Тип: {project_type}\n\n"
+                "Отговори в JSON формат с:\n"
+                "- tasks: масив от задачи с id, name, duration, start_day, "
+                "dependencies, dn, length_m, team\n"
+                "- total_duration: общ брой дни\n"
+                "- teams: списък екипи\n"
+                "- notes: допълнителни бележки"
+            ),
+        }]
+
+        gen_result = self.router.chat(messages, system_prompt)
+
+        if gen_result.get("error"):
+            return {
+                "status": "error",
+                "message": gen_result["content"],
+            }
+
+        schedule_json = gen_result["content"]
+
+        # Step 2: Verification cycle
+        rules = self.build_verification_prompt()
+
+        cycle_result = self.router.run_correction_cycle(
+            schedule_json, rules, max_cycles=3, progress_callback=progress_callback
+        )
+
+        gen_cost = gen_result.get("cost", 0.0)
+        cycle_cost = cycle_result.get("total_cost", 0.0)
+
+        return {
+            "status": cycle_result["status"],
+            "schedule": cycle_result["schedule"],
+            "cycles": cycle_result["cycles"],
+            "total_cost": gen_cost + cycle_cost,
+            "history": cycle_result.get("history", []),
+            "remaining_issues": cycle_result.get("remaining_issues", []),
+            "gen_model": gen_result["model"],
+        }
+
+    # ------------------------------------------------------------------
+    # Chat response
+    # ------------------------------------------------------------------
+
+    def chat_response(
+        self, messages: list[dict], project_context: dict | None = None
+    ) -> dict:
+        """Process a chat message via the worker.
+
+        Args:
+            messages: Chat history as list of dicts.
+            project_context: Optional current project info.
+
+        Returns:
+            Dict with content, model, cost, fallback.
+        """
+        if not self.router:
+            return {
+                "content": "AI не е инициализиран. Проверете .env файла.",
+                "model": "none",
+                "cost": 0.0,
+            }
+
+        system_prompt = self.build_system_prompt()
+        if project_context:
+            ctx_str = json.dumps(project_context, ensure_ascii=False, default=str)
+            system_prompt += f"\n\nТекущ проект: {ctx_str}"
+
+        return self.router.chat(messages, system_prompt)
+
+    # ------------------------------------------------------------------
+    # OCR (delegates to router, which handles fallback)
     # ------------------------------------------------------------------
 
     def ocr_pdf(self, filepath: str) -> dict:
-        """OCR a scanned PDF using Anthropic vision API.
-
-        Each page is rendered as an image and sent to the API for text
-        extraction. Results are collected into the standard converted-JSON
-        format used by FileManager.
+        """OCR a scanned PDF using AI vision (DeepSeek, fallback Anthropic).
 
         Args:
             filepath: Absolute path to the PDF file.
 
         Returns:
-            Dict with 'status' and 'data' keys matching the conversion format.
+            Dict with 'status' and 'data' keys matching conversion format.
         """
         try:
             import fitz  # PyMuPDF
@@ -82,58 +293,25 @@ class AIProcessor:
                 "error": "PyMuPDF (fitz) is required for OCR. Run: pip install PyMuPDF",
             }
 
-        client = self._get_client()
-        source_name = Path(filepath).name
+        if not self.router:
+            return {"status": "error", "error": "AI Router не е инициализиран."}
 
+        source_name = Path(filepath).name
         doc = fitz.open(filepath)
         pages_text: list[dict] = []
 
         for page_num in range(len(doc)):
             page = doc[page_num]
-            # Render at 200 DPI for good OCR quality
             pix = page.get_pixmap(dpi=200)
             img_bytes = pix.tobytes("png")
             b64_image = base64.b64encode(img_bytes).decode("ascii")
 
-            # Call the vision API
             try:
-                message = client.messages.create(
-                    model=self.ocr_model,
-                    max_tokens=4096,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": "image/png",
-                                        "data": b64_image,
-                                    },
-                                },
-                                {
-                                    "type": "text",
-                                    "text": (
-                                        "Извлечи ЦЕЛИЯ текст от това изображение. "
-                                        "Запази структурата — заглавия, параграфи, таблици. "
-                                        "Текстът е на български език. "
-                                        "Отговори САМО с извлечения текст, без коментари."
-                                    ),
-                                },
-                            ],
-                        }
-                    ],
-                )
-                extracted = message.content[0].text
+                extracted = self.router.ocr_pdf_page(b64_image)
             except Exception as exc:
                 logger.warning(
-                    "OCR API error on page %d of %s: %s",
-                    page_num + 1,
-                    source_name,
-                    exc,
+                    "OCR error on page %d of %s: %s", page_num + 1, source_name, exc
                 )
-                # Rate limit back-off
                 if "rate" in str(exc).lower():
                     time.sleep(5)
                 extracted = f"[OCR ГРЕШКА стр. {page_num + 1}: {exc}]"
@@ -141,10 +319,7 @@ class AIProcessor:
             pages_text.append({"page": page_num + 1, "text": extracted})
             logger.info(
                 "OCR page %d/%d of %s: %d chars",
-                page_num + 1,
-                len(doc),
-                source_name,
-                len(extracted),
+                page_num + 1, len(doc), source_name, len(extracted),
             )
 
         doc.close()
@@ -162,77 +337,22 @@ class AIProcessor:
         return {"status": "ok", "data": data}
 
     # ------------------------------------------------------------------
-    # Document analysis (placeholder)
+    # Legacy compatibility methods
     # ------------------------------------------------------------------
 
     def process_documents(self, files: list[dict], project_type: str) -> dict:
-        """Analyze project documents and extract schedule parameters.
+        """Legacy method — delegates to analyze_documents."""
+        return self.analyze_documents(files)
 
-        Args:
-            files: List of file info dicts.
-            project_type: Type of construction project.
-
-        Returns:
-            Analysis dict with extracted parameters.
-        """
-        return {
-            "status": "placeholder",
-            "message": "Document processing will be implemented with Anthropic API.",
-            "project_type": project_type,
-            "files_count": len(files),
-        }
-
-    # ------------------------------------------------------------------
-    # Schedule generation (placeholder)
-    # ------------------------------------------------------------------
-
-    def generate_schedule(self, analysis: dict, config: dict) -> dict:
-        """Generate a schedule from analysis results.
-
-        Args:
-            analysis: Analysis dict from process_documents.
-            config: Schedule configuration parameters.
-
-        Returns:
-            Schedule dict with tasks, durations, dependencies.
-        """
-        return {
-            "status": "placeholder",
-            "message": "Schedule generation will be implemented with Anthropic API.",
-            "tasks": [],
-        }
-
-    # ------------------------------------------------------------------
-    # Clarification (placeholder)
-    # ------------------------------------------------------------------
-
-    def ask_clarification(self, context: str, question: str) -> str:
-        """Ask the user a clarification question based on context.
-
-        Args:
-            context: Current conversation/project context.
-            question: The clarification question to ask.
-
-        Returns:
-            Formatted question string.
-        """
-        return f"Уточняващ въпрос: {question}"
-
-    # ------------------------------------------------------------------
-    # Chat (placeholder)
-    # ------------------------------------------------------------------
+    def generate_schedule_legacy(self, analysis: dict, config: dict) -> dict:
+        """Legacy method — delegates to generate_schedule."""
+        return self.generate_schedule(analysis, config.get("project_type", ""))
 
     def chat(self, messages: list[dict], system_prompt: str) -> str:
-        """Send a chat message and get a response.
+        """Legacy chat method — returns just the content string."""
+        result = self.chat_response(messages)
+        return result.get("content", "")
 
-        Args:
-            messages: List of message dicts with 'role' and 'content'.
-            system_prompt: System prompt with knowledge context.
-
-        Returns:
-            AI response string.
-        """
-        return (
-            "Тази функция ще бъде свързана с Anthropic API в следваща стъпка. "
-            "Засега работя в режим на placeholder."
-        )
+    def ask_clarification(self, context: str, question: str) -> str:
+        """Legacy method for clarification questions."""
+        return f"Уточняващ въпрос: {question}"

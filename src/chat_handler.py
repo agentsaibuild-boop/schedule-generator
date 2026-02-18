@@ -1,15 +1,25 @@
-"""Chat session handler for processing user messages and managing history."""
+"""Chat session handler — processes user messages via dual AI system.
+
+Routes intents to appropriate actions: chat, generate, modify, export, lessons, evolve.
+Uses AIProcessor (backed by AIRouter) for all AI operations.
+Includes self-evolution support with 3-level change management (green/yellow/red).
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+import logging
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from src.ai_processor import AIProcessor
+    from src.file_manager import FileManager
     from src.knowledge_manager import KnowledgeManager
+    from src.self_evolution import SelfEvolution
 
+logger = logging.getLogger(__name__)
 
-INTENT_KEYWORDS = {
+INTENT_KEYWORDS: dict[str, list[str]] = {
     "load_project": ["зареди", "папка", "проект", "път", "директория", "отвори"],
     "generate_schedule": [
         "генерирай", "график", "създай", "направи", "gantt",
@@ -19,76 +29,844 @@ INTENT_KEYWORDS = {
         "какво", "как", "защо", "кога", "колко", "обясни",
         "правило", "методика", "урок",
     ],
-    "export": ["свали", "експорт", "pdf", "xml", "mspdi", "export"],
+    "export": ["свали", "експорт", "pdf", "xml", "mspdi", "export", "изтегли"],
     "modify_schedule": [
-        "промени", "корекция", "измени", "обнови", "добави",
-        "премахни", "премести",
+        "промени", "корекция", "коригирай", "измени", "обнови", "добави",
+        "премахни", "махни", "премести", "смени",
+    ],
+    "save_lesson": ["запиши урок", "научен урок", "запомни"],
+    "evolve": [
+        "добави функционалност", "промени приложението", "нова функция",
+        "модифицирай", "обнови кода", "искам промяна", "добави модул",
+        "нов тип проект", "нова възможност", "самоеволюция", "evolution",
     ],
 }
 
 
 class ChatHandler:
-    """Manages the chat session: message processing, history, and intent detection."""
+    """Manages the chat session: message processing, AI routing, intent detection."""
 
     def __init__(
         self,
-        knowledge_manager: KnowledgeManager | None = None,
         ai_processor: AIProcessor | None = None,
+        file_manager: FileManager | None = None,
+        knowledge_manager: KnowledgeManager | None = None,
+        evolution: SelfEvolution | None = None,
     ) -> None:
         """Initialize the chat handler.
 
         Args:
-            knowledge_manager: KnowledgeManager instance for knowledge lookups.
-            ai_processor: AIProcessor instance for AI responses.
+            ai_processor: AIProcessor instance for AI calls.
+            file_manager: FileManager for project file access.
+            knowledge_manager: KnowledgeManager for knowledge lookups.
+            evolution: SelfEvolution instance for self-modification.
         """
-        self.knowledge_manager = knowledge_manager
-        self.ai_processor = ai_processor
+        self.ai = ai_processor
+        self.files = file_manager
+        self.knowledge = knowledge_manager
+        self.evolution = evolution
         self.history: list[dict[str, str]] = []
+        self.current_schedule: dict | None = None
+        self.correction_history: list[dict] = []
 
-    def process_message(self, user_message: str) -> str:
-        """Process a user message and return a response.
+    def process_message(
+        self,
+        user_message: str,
+        project_loaded: bool = False,
+        conversion_done: bool = False,
+        project_context: dict | None = None,
+        pending_changes: dict | None = None,
+    ) -> dict:
+        """Process a user message and return a structured response.
 
         Args:
-            user_message: The user's input message.
+            user_message: The user's input text.
+            project_loaded: Whether a project is loaded.
+            conversion_done: Whether files are converted.
+            project_context: Optional dict with current project info.
+            pending_changes: Pending self-evolution changes awaiting confirmation.
 
         Returns:
-            Assistant response string.
+            Dict with response, schedule_updated, schedule_data,
+            correction_info, intent, model_used, plus optional
+            evolution_pending / evolution_applied / evolution_cleared.
         """
-        # Add user message to history
+        # Check if there are pending evolution changes waiting for confirmation
+        if pending_changes:
+            return self._handle_confirm_change(user_message, pending_changes)
+
         self.history.append({"role": "user", "content": user_message})
 
-        # Detect intent
         intent = self._detect_intent(user_message)
 
-        # Generate response based on intent
-        response = self._generate_response(user_message, intent)
+        try:
+            result = self._handle_intent(
+                user_message, intent, project_loaded, conversion_done, project_context
+            )
+        except Exception as exc:
+            logger.exception("Error processing message")
+            result = {
+                "response": f"Възникна грешка: {exc}\n\nМоля, опитайте отново.",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": intent,
+                "model_used": "none",
+            }
 
-        # Add assistant response to history
-        self.history.append({"role": "assistant", "content": response})
+        self.history.append({"role": "assistant", "content": result["response"]})
 
-        return response
+        return result
 
-    def get_chat_history(self) -> list[dict[str, str]]:
-        """Get the full chat history.
+    def _handle_intent(
+        self,
+        message: str,
+        intent: str,
+        project_loaded: bool,
+        conversion_done: bool,
+        project_context: dict | None,
+    ) -> dict:
+        """Route to the appropriate handler based on intent."""
 
-        Returns:
-            List of message dicts with 'role' and 'content'.
-        """
-        return self.history
+        if intent == "load_project":
+            return self._handle_load_project(message)
 
-    def clear_history(self) -> None:
-        """Clear all chat history."""
-        self.history = []
+        if intent == "generate_schedule":
+            return self._handle_generate_schedule(
+                message, project_loaded, conversion_done, project_context
+            )
 
-    def _detect_intent(self, message: str) -> str:
-        """Detect the user's intent from their message.
+        if intent == "modify_schedule":
+            return self._handle_modify_schedule(message)
+
+        if intent == "export":
+            return self._handle_export(message)
+
+        if intent == "save_lesson":
+            return self._handle_save_lesson(message)
+
+        if intent == "evolve":
+            return self._handle_evolve(message)
+
+        if intent == "ask_question":
+            return self._handle_question(message, project_context)
+
+        # general — send to AI chat
+        return self._handle_general(message, project_context)
+
+    # ------------------------------------------------------------------
+    # Intent handlers
+    # ------------------------------------------------------------------
+
+    def _handle_load_project(self, message: str) -> dict:
+        """Handle project loading intent."""
+        return {
+            "response": (
+                "Моля, въведете пътя до проектната папка в страничната лента (вляво) "
+                "и натиснете **Зареди проект**."
+            ),
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "load_project",
+            "model_used": "none",
+        }
+
+    def _handle_generate_schedule(
+        self,
+        message: str,
+        project_loaded: bool,
+        conversion_done: bool,
+        project_context: dict | None,
+    ) -> dict:
+        """Handle schedule generation intent."""
+        if not project_loaded:
+            return {
+                "response": (
+                    "Първо заредете проект от страничната лента.\n\n"
+                    "1. Изберете папката с тендерна документация\n"
+                    "2. Натиснете **Зареди проект**\n"
+                    "3. Конвертирайте файловете\n"
+                    "4. След това кажете: **генерирай график**"
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "generate_schedule",
+                "model_used": "none",
+            }
+
+        if not conversion_done:
+            return {
+                "response": (
+                    "Файловете не са конвертирани.\n\n"
+                    "Натиснете **Конвертирай файлове** в страничната лента, "
+                    "след което ще мога да анализирам документацията."
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "generate_schedule",
+                "model_used": "none",
+            }
+
+        if not self.ai or not self.ai.router:
+            return {
+                "response": "AI не е инициализиран. Проверете API ключовете в .env файла.",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "generate_schedule",
+                "model_used": "none",
+            }
+
+        # Get converted files info
+        converted_files = []
+        if self.files and self.files.base_path:
+            converted_files = self.files.get_converted_files()
+
+        # Step 1: Analyze documents
+        analysis = self.ai.analyze_documents(converted_files)
+
+        if analysis.get("status") == "error":
+            return {
+                "response": f"Грешка при анализ: {analysis.get('message', 'неизвестна')}",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "generate_schedule",
+                "model_used": "none",
+            }
+
+        # Step 2: Generate schedule with verification
+        project_type = ""
+        if project_context:
+            project_type = project_context.get("type", "")
+
+        progress_messages: list[str] = []
+
+        def _progress(msg: str) -> None:
+            progress_messages.append(msg)
+
+        gen_result = self.ai.generate_schedule(analysis, project_type, _progress)
+
+        # Build response
+        status = gen_result.get("status", "error")
+        cycles = gen_result.get("cycles", 0)
+        cost = gen_result.get("total_cost", 0.0)
+        history = gen_result.get("history", [])
+
+        response_parts = []
+
+        # Progress log
+        for msg in progress_messages:
+            response_parts.append(f"- {msg}")
+
+        if status == "approved":
+            response_parts.append(
+                f"\n**График одобрен!** ({cycles} {'цикъл' if cycles == 1 else 'цикъла'} проверка, ${cost:.4f})"
+            )
+        elif status == "needs_human_review":
+            remaining = gen_result.get("remaining_issues", [])
+            response_parts.append(
+                f"\nСлед {cycles} опита за корекция, следните проблеми остават:"
+            )
+            for issue in remaining:
+                response_parts.append(f"  - {issue}")
+            response_parts.append("\nМоля, прегледайте и кажете как да продължа.")
+        else:
+            response_parts.append(f"\nГрешка: {gen_result.get('error', 'неизвестна')}")
+
+        # Correction history summary
+        if history:
+            response_parts.append("\n**Корекционен цикъл:**")
+            for h in history:
+                c = h["cycle"]
+                issues_count = len(h["issues"])
+                issues_short = ", ".join(h["issues"][:3])
+                response_parts.append(f"  Опит {c}: {issues_count} проблема ({issues_short})")
+
+        self.current_schedule = gen_result.get("schedule")
+        self.correction_history = history
+
+        return {
+            "response": "\n".join(response_parts),
+            "schedule_updated": status in ("approved", "needs_human_review"),
+            "schedule_data": self.current_schedule,
+            "correction_info": {
+                "status": status,
+                "cycles": cycles,
+                "cost": cost,
+                "history": history,
+            },
+            "intent": "generate_schedule",
+            "model_used": gen_result.get("gen_model", "unknown"),
+        }
+
+    def _handle_modify_schedule(self, message: str) -> dict:
+        """Handle schedule modification intent."""
+        if not self.current_schedule:
+            return {
+                "response": "Няма генериран график за промяна. Първо генерирайте график.",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "modify_schedule",
+                "model_used": "none",
+            }
+
+        if not self.ai or not self.ai.router:
+            return {
+                "response": "AI не е инициализиран.",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "modify_schedule",
+                "model_used": "none",
+            }
+
+        # Send modification request to AI
+        schedule_str = (
+            json.dumps(self.current_schedule, ensure_ascii=False)
+            if isinstance(self.current_schedule, dict)
+            else str(self.current_schedule)
+        )
+
+        messages = [{
+            "role": "user",
+            "content": (
+                f"Текущ график:\n{schedule_str}\n\n"
+                f"Промяна: {message}\n\n"
+                "Приложи промяната и върни коригирания график в JSON."
+            ),
+        }]
+
+        system_prompt = self.ai.build_system_prompt()
+        result = self.ai.router.chat(messages, system_prompt)
+
+        # Re-verify after modification
+        rules = self.ai.build_verification_prompt()
+        verification = self.ai.router.run_correction_cycle(
+            result["content"], rules, max_cycles=2
+        )
+
+        self.current_schedule = verification.get("schedule")
+
+        return {
+            "response": (
+                f"Промяната е приложена.\n"
+                f"Модел: {result['model']}, Проверка: {verification['status']}"
+            ),
+            "schedule_updated": True,
+            "schedule_data": self.current_schedule,
+            "correction_info": {
+                "status": verification["status"],
+                "cycles": verification.get("cycles", 0),
+            },
+            "intent": "modify_schedule",
+            "model_used": result["model"],
+        }
+
+    def _handle_export(self, message: str) -> dict:
+        """Handle export intent."""
+        if not self.current_schedule:
+            return {
+                "response": (
+                    "Няма генериран график за експорт.\n\n"
+                    "Използвайте таб **Експорт** вдясно след генериране на график."
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "export",
+                "model_used": "none",
+            }
+
+        return {
+            "response": (
+                "Графикът е готов за експорт.\n\n"
+                "Форматите за експорт са:\n"
+                "- **PDF** (A3 landscape Gantt диаграма)\n"
+                "- **MSPDI XML** (за MS Project)\n\n"
+                "Използвайте таб **Експорт** вдясно."
+            ),
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "export",
+            "model_used": "none",
+        }
+
+    def _handle_save_lesson(self, message: str) -> dict:
+        """Handle lesson saving intent."""
+        if not self.ai or not self.ai.router:
+            return {
+                "response": "AI не е инициализиран — не може да се провери урокът.",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "save_lesson",
+                "model_used": "none",
+            }
+
+        # Extract lesson text (everything after trigger keywords)
+        lesson_text = message
+        for trigger in ("запиши урок", "научен урок", "запомни"):
+            if trigger in message.lower():
+                idx = message.lower().find(trigger)
+                lesson_text = message[idx + len(trigger):].strip(" :-")
+                break
+
+        if not lesson_text or len(lesson_text) < 10:
+            return {
+                "response": (
+                    "Моля, формулирайте урока по-подробно.\n"
+                    "Пример: **запиши урок: DN90 PE се полага с 20% по-бързо от DN500**"
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "save_lesson",
+                "model_used": "none",
+            }
+
+        # Get existing lessons for context
+        existing = ""
+        if self.knowledge:
+            lessons = self.knowledge.get_lessons()
+            existing = "\n".join(lessons[-10:]) if lessons else ""
+
+        # Verify via controller
+        result = self.ai.router.save_lesson(lesson_text, "user_request", existing)
+
+        if result["approved"]:
+            # Save the lesson
+            if self.knowledge:
+                self.knowledge.add_lesson(result["formatted_lesson"])
+
+            return {
+                "response": (
+                    f"Урокът е проверен и записан.\n\n"
+                    f"**Урок:** {result['formatted_lesson']}\n"
+                    f"**Проверка:** {result['reason']}\n"
+                    f"**Модел:** {result['model']}"
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "save_lesson",
+                "model_used": result["model"],
+            }
+
+        return {
+            "response": (
+                f"Урокът НЕ е одобрен от контрольора.\n\n"
+                f"**Причина:** {result['reason']}\n"
+                f"**Предложение:** {result['formatted_lesson']}\n\n"
+                "Можете да го преформулирате и опитате отново."
+            ),
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "save_lesson",
+            "model_used": result["model"],
+        }
+
+    # ------------------------------------------------------------------
+    # Self-evolution handlers
+    # ------------------------------------------------------------------
+
+    def _handle_evolve(self, message: str) -> dict:
+        """Handle self-evolution intent: analyze, plan, generate changes."""
+        if not self.evolution:
+            return {
+                "response": "Системата за самоеволюция не е инициализирана.",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "evolve",
+                "model_used": "none",
+            }
+
+        if not self.ai or not self.ai.router or not self.ai.router.anthropic_available:
+            return {
+                "response": (
+                    "Anthropic API не е достъпен — самоеволюцията изисква Anthropic Claude.\n"
+                    "Проверете ANTHROPIC_API_KEY в .env файла."
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "evolve",
+                "model_used": "none",
+            }
+
+        progress: list[str] = []
+
+        # Step 1: Analyze
+        progress.append("🔄 Анализирам заявката... (Anthropic Sonnet 4.6)")
+        plan = self.evolution.analyze_request(message)
+
+        if plan.get("error"):
+            return {
+                "response": f"❌ Грешка при анализ: {plan.get('description', 'неизвестна')}",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "evolve",
+                "model_used": "claude-sonnet-4-6",
+            }
+
+        level = plan.get("level", "red")
+        level_info = self.evolution.CHANGE_LEVELS.get(level, self.evolution.CHANGE_LEVELS["red"])
+
+        # Step 2: Generate changes
+        progress.append("📝 Генерирам код... (Anthropic Sonnet 4.6)")
+        changes = self.evolution.generate_changes(plan)
+
+        if changes.get("error") and not changes.get("changes"):
+            return {
+                "response": f"❌ Грешка при генериране: {changes.get('error', 'неизвестна')}",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "evolve",
+                "model_used": "claude-sonnet-4-6",
+            }
+
+        # Step 3: Preview
+        preview = self.evolution.preview_changes(plan, changes)
+
+        # Build response based on level
+        progress_text = "\n".join(progress)
+
+        if level == "green":
+            # GREEN: Apply directly, no confirmation needed
+            progress.append("🔧 Прилагам промени...")
+            apply_result = self.evolution.apply_changes(changes)
+
+            if apply_result["failed"] > 0:
+                error_text = "\n".join(apply_result["errors"])
+                return {
+                    "response": (
+                        f"{progress_text}\n\n"
+                        f"❌ Грешка при прилагане:\n{error_text}"
+                    ),
+                    "schedule_updated": False,
+                    "schedule_data": None,
+                    "correction_info": None,
+                    "intent": "evolve",
+                    "model_used": "claude-sonnet-4-6",
+                }
+
+            # Log the change
+            self.evolution.log_change(message, plan, "", "applied")
+
+            return {
+                "response": (
+                    f"{progress_text}\n\n"
+                    f"{preview}\n\n"
+                    f"🟢 Промените са приложени: {plan.get('description', '')}"
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "evolve",
+                "model_used": "claude-sonnet-4-6",
+            }
+
+        elif level == "yellow":
+            # YELLOW: Requires confirmation
+            return {
+                "response": (
+                    f"{progress_text}\n\n"
+                    f"{preview}\n\n"
+                    "🟡 Тази промяна ще засегне конфигурацията.\n"
+                    "Потвърждавате ли? Напишете **Да** за да продължа."
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "evolve",
+                "model_used": "claude-sonnet-4-6",
+                "evolution_pending": {
+                    "level": level,
+                    "plan": plan,
+                    "changes": changes,
+                    "request": message,
+                },
+            }
+
+        else:
+            # RED: Requires admin code
+            admin_set = bool(self.evolution.admin_code)
+            if not admin_set:
+                return {
+                    "response": (
+                        f"{progress_text}\n\n"
+                        f"{preview}\n\n"
+                        "🔴 Тази промяна изисква админ код, но **ADMIN_CODE** не е зададен в .env.\n"
+                        "Добавете `ADMIN_CODE=вашият-код` в `.env` файла и рестартирайте."
+                    ),
+                    "schedule_updated": False,
+                    "schedule_data": None,
+                    "correction_info": None,
+                    "intent": "evolve",
+                    "model_used": "claude-sonnet-4-6",
+                }
+
+            return {
+                "response": (
+                    f"{progress_text}\n\n"
+                    f"{preview}\n\n"
+                    "🔴 Тази промяна ще модифицира **кода** на приложението.\n\n"
+                    "⚠️ **ВНИМАНИЕ:** Промяната засяга ВСИЧКИ потребители.\n"
+                    "Ще бъде създаден автоматичен backup преди промяната.\n\n"
+                    "За да продължите, **въведете админ код:**"
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "evolve",
+                "model_used": "claude-sonnet-4-6",
+                "evolution_pending": {
+                    "level": level,
+                    "plan": plan,
+                    "changes": changes,
+                    "request": message,
+                },
+            }
+
+    def _handle_confirm_change(self, user_message: str, pending: dict) -> dict:
+        """Handle confirmation or admin code for pending evolution changes.
 
         Args:
-            message: The user's input message.
+            user_message: The user's confirmation message or admin code.
+            pending: The pending changes dict from session state.
 
         Returns:
-            Intent string: 'load_project', 'generate_schedule', 'ask_question',
-            'export', 'modify_schedule', or 'general'.
+            Standard response dict with evolution status.
+        """
+        if not self.evolution:
+            return {
+                "response": "Системата за самоеволюция не е инициализирана.",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "confirm_change",
+                "model_used": "none",
+                "evolution_cleared": True,
+            }
+
+        level = pending.get("level", "red")
+        plan = pending.get("plan", {})
+        changes = pending.get("changes", {})
+        request = pending.get("request", "")
+        stripped = user_message.strip()
+
+        # Check for cancellation
+        if stripped.lower() in ["не", "no", "отказ", "откажи", "cancel"]:
+            return {
+                "response": "❌ Промяната е отказана.",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "confirm_change",
+                "model_used": "none",
+                "evolution_cleared": True,
+            }
+
+        if level == "red":
+            # Verify admin code
+            if not self.evolution.verify_admin_code(stripped):
+                return {
+                    "response": "❌ Невалиден админ код. Промяната е отказана.",
+                    "schedule_updated": False,
+                    "schedule_data": None,
+                    "correction_info": None,
+                    "intent": "confirm_change",
+                    "model_used": "none",
+                    "evolution_cleared": True,
+                }
+        else:
+            # Yellow: check for confirmation word
+            if stripped.lower() not in ["да", "yes", "потвърждавам", "ок", "ok"]:
+                return {
+                    "response": (
+                        "Моля, потвърдете с **Да** или откажете с **Не**."
+                    ),
+                    "schedule_updated": False,
+                    "schedule_data": None,
+                    "correction_info": None,
+                    "intent": "confirm_change",
+                    "model_used": "none",
+                    # Keep pending — don't clear
+                }
+
+        # Proceed with applying changes
+        progress: list[str] = []
+
+        # Backup (for red level)
+        backup_hash = ""
+        if level == "red":
+            progress.append("💾 Създавам backup...")
+            backup = self.evolution.create_backup(plan.get("description", ""))
+            if backup["success"]:
+                backup_hash = backup["commit_hash"]
+                progress.append(f"   Git commit: {backup_hash[:8]}")
+            else:
+                progress.append(f"   ⚠️ Backup неуспешен: {backup.get('error', '?')}")
+
+        # Apply changes
+        progress.append("🔧 Прилагам промени...")
+        apply_result = self.evolution.apply_changes(changes)
+        progress.append(f"   Приложени: {apply_result['applied']}, Грешки: {apply_result['failed']}")
+
+        if apply_result["failed"] > 0:
+            error_text = "\n".join(apply_result["errors"])
+            # Auto-rollback for red level
+            if level == "red" and backup_hash:
+                progress.append("❌ Тестовете не минаха! Автоматично връщам промените...")
+                rollback_result = self.evolution.rollback(backup_hash)
+                if rollback_result["success"]:
+                    progress.append(f"⏪ Възстановен backup от: {backup_hash[:8]}")
+                else:
+                    progress.append(f"⚠️ Rollback неуспешен: {rollback_result.get('error', '?')}")
+
+            return {
+                "response": (
+                    "\n".join(progress) + "\n\n"
+                    f"❌ Грешки при прилагане:\n{error_text}\n\n"
+                    "Моля, опишете какво искахте по-подробно и ще опитам отново."
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "confirm_change",
+                "model_used": "claude-sonnet-4-6",
+                "evolution_cleared": True,
+            }
+
+        # Run tests (for red level)
+        if level == "red":
+            progress.append("🧪 Тествам...")
+            test_result = self.evolution.test_changes()
+            progress.append(
+                f"   {test_result['tests_passed']}/{test_result['tests_run']} теста минаха"
+            )
+
+            if not test_result["passed"]:
+                error_text = "\n".join(test_result["errors"])
+                progress.append("❌ Тестовете не минаха! Автоматично връщам промените...")
+
+                if backup_hash:
+                    rollback_result = self.evolution.rollback(backup_hash)
+                    if rollback_result["success"]:
+                        progress.append(f"⏪ Възстановен backup от: {backup_hash[:8]}")
+                    else:
+                        progress.append(f"⚠️ Rollback неуспешен: {rollback_result.get('error', '?')}")
+
+                return {
+                    "response": (
+                        "\n".join(progress) + "\n\n"
+                        f"Грешка: {error_text}\n\n"
+                        "Моля, опишете какво искахте по-подробно и ще опитам отново."
+                    ),
+                    "schedule_updated": False,
+                    "schedule_data": None,
+                    "correction_info": None,
+                    "intent": "confirm_change",
+                    "model_used": "claude-sonnet-4-6",
+                    "evolution_cleared": True,
+                }
+
+        # Commit changes
+        description = plan.get("description", request[:50])
+        commit_result = self.evolution.commit_changes(description)
+        commit_hash = commit_result.get("commit_hash", "?")
+
+        # Log
+        self.evolution.log_change(request, plan, backup_hash, "applied")
+
+        progress.append(f"✅ Готово! Промените са приложени успешно.")
+        progress.append(f"   Git commit: '{description}' ({commit_hash[:8]})")
+        progress.append(f"   За връщане назад → sidebar → ⏪ Върни предишна версия")
+
+        return {
+            "response": "\n".join(progress),
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "confirm_change",
+            "model_used": "claude-sonnet-4-6",
+            "evolution_cleared": True,
+            "evolution_applied": True,
+        }
+
+    def _handle_question(
+        self, message: str, project_context: dict | None
+    ) -> dict:
+        """Handle knowledge question via AI chat."""
+        return self._handle_general(message, project_context)
+
+    def _handle_general(
+        self, message: str, project_context: dict | None
+    ) -> dict:
+        """Handle general messages via AI chat."""
+        if not self.ai or not self.ai.router:
+            # Offline mode — keyword-based responses
+            return self._offline_response(message)
+
+        # Build conversation for AI (last 10 messages for context)
+        recent_history = self.history[-10:]
+
+        result = self.ai.chat_response(recent_history, project_context)
+
+        fallback_note = ""
+        if result.get("fallback"):
+            fallback_note = "\n\n_DeepSeek не отговаря. Отговорът е от Anthropic Claude._"
+
+        return {
+            "response": result["content"] + fallback_note,
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "general",
+            "model_used": result.get("model", "none"),
+        }
+
+    def _offline_response(self, message: str) -> dict:
+        """Fallback response when no AI is available."""
+        stats = {}
+        if self.knowledge:
+            stats = self.knowledge.get_knowledge_stats()
+
+        return {
+            "response": (
+                "AI не е наличен в момента.\n\n"
+                f"Базата знания съдържа: {stats.get('lessons', 0)} урока, "
+                f"{stats.get('methodologies', 0)} методики.\n\n"
+                "Проверете API ключовете в .env файла и рестартирайте."
+            ),
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "general",
+            "model_used": "none",
+        }
+
+    # ------------------------------------------------------------------
+    # Intent detection
+    # ------------------------------------------------------------------
+
+    def _detect_intent(self, message: str) -> str:
+        """Detect the user's intent from keywords.
+
+        Args:
+            message: The user's message.
+
+        Returns:
+            Intent string.
         """
         message_lower = message.lower()
 
@@ -103,81 +881,40 @@ class ChatHandler:
 
         return best_intent
 
-    def _generate_response(self, message: str, intent: str) -> str:
-        """Generate a response based on the message and detected intent.
+    # ------------------------------------------------------------------
+    # Correction summary
+    # ------------------------------------------------------------------
 
-        Currently a placeholder that echoes the intent. Will be connected
-        to the AI processor in a future step.
-
-        Args:
-            message: The user's input message.
-            intent: Detected intent string.
+    def get_correction_summary(self) -> str:
+        """Get a human-readable summary of the last correction cycle.
 
         Returns:
-            Response string.
+            Formatted string with cycle history.
         """
-        intent_labels = {
-            "load_project": "Зареждане на проект",
-            "generate_schedule": "Генериране на график",
-            "ask_question": "Въпрос",
-            "export": "Експорт",
-            "modify_schedule": "Промяна на график",
-            "general": "Общо",
-        }
+        if not self.correction_history:
+            return "Няма история на корекции."
 
-        intent_label = intent_labels.get(intent, "Общо")
+        lines = ["**Цикъл на проверка:**"]
+        for h in self.correction_history:
+            c = h["cycle"]
+            issues = h["issues"]
+            issues_str = ", ".join(issues[:3])
+            if len(issues) > 3:
+                issues_str += f" (+{len(issues) - 3} други)"
+            lines.append(f"  Опит {c}: {len(issues)} проблема ({issues_str})")
 
-        # Placeholder responses by intent
-        if intent == "generate_schedule":
-            return (
-                f"**Разпознат намерение:** {intent_label}\n\n"
-                "Разбрах, че искате да генерирате график. "
-                "За да продължа, ще ми трябва:\n"
-                "1. Път до проектната папка с документация\n"
-                "2. Тип на проекта (разпределителна мрежа, довеждащ, единичен, инженеринг)\n"
-                "3. Основни параметри (DN, дължини, срокове)\n\n"
-                "*Тази функция ще бъде свързана с Claude API в следваща стъпка.*"
-            )
-        elif intent == "load_project":
-            return (
-                f"**Разпознат намерение:** {intent_label}\n\n"
-                "Моля, въведете пътя до проектната папка "
-                "в страничната лента (вляво).\n\n"
-                "*Тази функция ще бъде свързана с Claude API в следваща стъпка.*"
-            )
-        elif intent == "ask_question":
-            stats = {}
-            if self.knowledge_manager:
-                stats = self.knowledge_manager.get_knowledge_stats()
-            return (
-                f"**Разпознат намерение:** {intent_label}\n\n"
-                f"Търся отговор в базата знания "
-                f"({stats.get('lessons', 0)} урока, "
-                f"{stats.get('methodologies', 0)} методики)...\n\n"
-                "*Тази функция ще бъде свързана с Claude API в следваща стъпка.*"
-            )
-        elif intent == "export":
-            return (
-                f"**Разпознат намерение:** {intent_label}\n\n"
-                "Форматите за експорт са:\n"
-                "- **PDF** (A3 landscape Gantt диаграма)\n"
-                "- **MSPDI XML** (за MS Project)\n\n"
-                "Използвайте таб '💾 Експорт' вдясно.\n\n"
-                "*Тази функция ще бъде свързана с Claude API в следваща стъпка.*"
-            )
-        elif intent == "modify_schedule":
-            return (
-                f"**Разпознат намерение:** {intent_label}\n\n"
-                "Промяната на графика ще бъде достъпна след генериране.\n\n"
-                "*Тази функция ще бъде свързана с Claude API в следваща стъпка.*"
-            )
-        else:
-            return (
-                f"**Разпознат намерение:** {intent_label}\n\n"
-                f"Получих вашето съобщение: *\"{message}\"*\n\n"
-                "Мога да помогна с:\n"
-                "- Генериране на строителен график\n"
-                "- Въпроси за методология и правила\n"
-                "- Експорт в PDF или XML\n\n"
-                "*Тази функция ще бъде свързана с Claude API в следваща стъпка.*"
-            )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # History management
+    # ------------------------------------------------------------------
+
+    def get_chat_history(self) -> list[dict[str, str]]:
+        """Get the full chat history."""
+        return self.history
+
+    def clear_history(self) -> None:
+        """Clear all chat history and schedule data."""
+        self.history = []
+        self.current_schedule = None
+        self.correction_history = []

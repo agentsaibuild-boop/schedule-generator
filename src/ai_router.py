@@ -1,0 +1,859 @@
+"""Dual AI routing — DeepSeek (worker) + Anthropic Claude (controller).
+
+DeepSeek handles: chat, document analysis, schedule generation, OCR, corrections.
+Anthropic handles: schedule verification, lesson validation, quality control.
+Both directions have automatic fallback if one API is unavailable.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import time
+from datetime import datetime
+from typing import Any
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Pricing per token (USD)
+# ---------------------------------------------------------------------------
+PRICING = {
+    "deepseek-chat": {"input": 0.14 / 1_000_000, "output": 0.28 / 1_000_000},
+    "claude-sonnet-4-6": {"input": 3.0 / 1_000_000, "output": 15.0 / 1_000_000},
+}
+
+# ---------------------------------------------------------------------------
+# Verification system prompt template
+# ---------------------------------------------------------------------------
+VERIFICATION_SYSTEM_PROMPT = """\
+Ти си контрольор на строителни графици за ВиК проекти.
+Проверяваш дали графикът спазва следните правила:
+
+{rules}
+
+Отговори САМО с валиден JSON (без markdown, без ```):
+{{
+  "approved": true/false,
+  "issues": ["проблем 1", "проблем 2"],
+  "corrections": [
+    {{"task_id": "XX", "field": "duration", "current": 10, "suggested": 15, "reason": "..."}}
+  ],
+  "summary": "Кратко обобщение"
+}}
+
+Ако графикът е коректен, approved=true и corrections=[].\
+"""
+
+CORRECTION_SYSTEM_PROMPT = """\
+Ти си строителен инженер, специалист по ВиК графици.
+Получаваш график в JSON формат и списък с корекции.
+Приложи ВСИЧКИ корекции и върни коригирания график.
+
+Отговори САМО с валиден JSON (без markdown, без ```):
+{{
+  "schedule": <коригираният график>,
+  "applied": ["описание на корекция 1", "описание на корекция 2"]
+}}
+"""
+
+LESSON_VERIFICATION_PROMPT = """\
+Ти си контрольор на база знания за строителни графици.
+Проверяваш дали новият урок е коректно формулиран и не противоречи на съществуващите.
+
+Съществуващи уроци:
+{existing_lessons}
+
+Нов урок за проверка:
+{new_lesson}
+
+Контекст: {context}
+
+Отговори САМО с валиден JSON (без markdown, без ```):
+{{
+  "approved": true/false,
+  "formatted_lesson": "Форматиран текст на урока",
+  "reason": "Защо е одобрен/отхвърлен"
+}}
+"""
+
+
+class AIRouter:
+    """Routes AI requests to DeepSeek (worker) or Anthropic (controller)."""
+
+    def __init__(self) -> None:
+        self._deepseek_key = os.getenv("DEEPSEEK_API_KEY", "")
+        self._anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+
+        self._deepseek_client: Any | None = None
+        self._anthropic_client: Any | None = None
+
+        self.deepseek_available: bool = True
+        self.anthropic_available: bool = True
+        self.fallback_active: bool = False
+        self.fallback_source: str | None = None  # which API is down
+
+        self.usage_log: list[dict] = []
+
+    # ------------------------------------------------------------------
+    # Lazy client initialization
+    # ------------------------------------------------------------------
+
+    def _get_deepseek(self):
+        """Return the DeepSeek (OpenAI-compatible) client."""
+        if self._deepseek_client is not None:
+            return self._deepseek_client
+
+        if not self._deepseek_key:
+            raise RuntimeError(
+                "DEEPSEEK_API_KEY is not set. Add it to .env."
+            )
+
+        from openai import OpenAI
+
+        self._deepseek_client = OpenAI(
+            api_key=self._deepseek_key,
+            base_url="https://api.deepseek.com",
+        )
+        return self._deepseek_client
+
+    def _get_anthropic(self):
+        """Return the Anthropic client."""
+        if self._anthropic_client is not None:
+            return self._anthropic_client
+
+        if not self._anthropic_key:
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set. Add it to .env."
+            )
+
+        import anthropic
+
+        self._anthropic_client = anthropic.Anthropic(api_key=self._anthropic_key)
+        return self._anthropic_client
+
+    # ------------------------------------------------------------------
+    # Health check
+    # ------------------------------------------------------------------
+
+    def check_health(self) -> dict:
+        """Check if both APIs are reachable. Updates availability flags.
+
+        Returns:
+            Dict with deepseek, anthropic booleans and fallback info.
+        """
+        # DeepSeek
+        try:
+            client = self._get_deepseek()
+            client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=5,
+            )
+            self.deepseek_available = True
+        except Exception as exc:
+            logger.warning("DeepSeek health check failed: %s", exc)
+            self.deepseek_available = False
+
+        # Anthropic
+        try:
+            client = self._get_anthropic()
+            client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=5,
+                messages=[{"role": "user", "content": "ping"}],
+            )
+            self.anthropic_available = True
+        except Exception as exc:
+            logger.warning("Anthropic health check failed: %s", exc)
+            self.anthropic_available = False
+
+        # Update fallback state
+        self._update_fallback_state()
+
+        return {
+            "deepseek": self.deepseek_available,
+            "anthropic": self.anthropic_available,
+            "fallback_active": self.fallback_active,
+            "fallback_source": self.fallback_source,
+        }
+
+    def _update_fallback_state(self) -> None:
+        """Update fallback flags based on current availability."""
+        if self.deepseek_available and self.anthropic_available:
+            self.fallback_active = False
+            self.fallback_source = None
+        elif not self.deepseek_available and self.anthropic_available:
+            self.fallback_active = True
+            self.fallback_source = "deepseek"
+        elif self.deepseek_available and not self.anthropic_available:
+            self.fallback_active = True
+            self.fallback_source = "anthropic"
+        else:
+            self.fallback_active = True
+            self.fallback_source = "both"
+
+    # ------------------------------------------------------------------
+    # Chat (Worker = DeepSeek, fallback = Anthropic)
+    # ------------------------------------------------------------------
+
+    def chat(self, messages: list[dict], system_prompt: str) -> dict:
+        """Send a chat message to the worker (DeepSeek). Falls back to Anthropic.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content'.
+            system_prompt: System prompt with knowledge context.
+
+        Returns:
+            Dict with content, model, usage, cost, fallback.
+        """
+        # Try DeepSeek first
+        if self.deepseek_available:
+            try:
+                return self._chat_deepseek(messages, system_prompt)
+            except Exception as exc:
+                logger.warning("DeepSeek chat failed, trying fallback: %s", exc)
+                self.deepseek_available = False
+                self._update_fallback_state()
+
+        # Fallback to Anthropic
+        if self.anthropic_available:
+            try:
+                return self._chat_anthropic(messages, system_prompt, is_fallback=True)
+            except Exception as exc:
+                logger.error("Anthropic fallback also failed: %s", exc)
+                self.anthropic_available = False
+                self._update_fallback_state()
+
+        return {
+            "content": "Грешка: И двата AI модела са недостъпни. Проверете API ключовете и интернет връзката.",
+            "model": "none",
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "cost": 0.0,
+            "fallback": False,
+            "error": True,
+        }
+
+    def _chat_deepseek(self, messages: list[dict], system_prompt: str) -> dict:
+        """Send chat to DeepSeek via OpenAI-compatible API."""
+        client = self._get_deepseek()
+        full_messages = [{"role": "system", "content": system_prompt}] + messages
+
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=full_messages,
+            max_tokens=4096,
+            temperature=0.3,
+        )
+
+        content = response.choices[0].message.content or ""
+        usage = response.usage
+        tokens_in = usage.prompt_tokens if usage else 0
+        tokens_out = usage.completion_tokens if usage else 0
+
+        self._log_usage("deepseek-chat", tokens_in, tokens_out, "chat")
+
+        return {
+            "content": content,
+            "model": "deepseek-chat",
+            "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out},
+            "cost": self._calculate_cost("deepseek-chat", tokens_in, tokens_out),
+            "fallback": False,
+        }
+
+    def _chat_anthropic(
+        self, messages: list[dict], system_prompt: str, *, is_fallback: bool = False
+    ) -> dict:
+        """Send chat to Anthropic Claude."""
+        client = self._get_anthropic()
+
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            system=system_prompt,
+            messages=messages,
+        )
+
+        content = response.content[0].text if response.content else ""
+        tokens_in = response.usage.input_tokens
+        tokens_out = response.usage.output_tokens
+
+        self._log_usage("claude-sonnet-4-6", tokens_in, tokens_out, "chat")
+
+        return {
+            "content": content,
+            "model": "claude-sonnet-4-6",
+            "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out},
+            "cost": self._calculate_cost("claude-sonnet-4-6", tokens_in, tokens_out),
+            "fallback": is_fallback,
+        }
+
+    # ------------------------------------------------------------------
+    # Schedule verification (Controller = Anthropic, fallback = DeepSeek)
+    # ------------------------------------------------------------------
+
+    def verify_schedule(self, schedule_json: str, rules: str) -> dict:
+        """Send schedule to the controller (Anthropic) for verification.
+
+        Args:
+            schedule_json: The schedule as a JSON string.
+            rules: Verification rules from knowledge/skills.
+
+        Returns:
+            Dict with approved, issues, corrections, model, cost.
+        """
+        system_prompt = VERIFICATION_SYSTEM_PROMPT.format(rules=rules)
+        user_message = f"Провери следния график:\n\n{schedule_json}"
+
+        # Try Anthropic first
+        if self.anthropic_available:
+            try:
+                return self._verify_with_model(
+                    "anthropic", system_prompt, user_message
+                )
+            except Exception as exc:
+                logger.warning("Anthropic verify failed, trying fallback: %s", exc)
+                self.anthropic_available = False
+                self._update_fallback_state()
+
+        # Fallback to DeepSeek
+        if self.deepseek_available:
+            try:
+                return self._verify_with_model(
+                    "deepseek", system_prompt, user_message
+                )
+            except Exception as exc:
+                logger.error("DeepSeek fallback verify also failed: %s", exc)
+                self.deepseek_available = False
+                self._update_fallback_state()
+
+        return {
+            "approved": False,
+            "issues": ["AI моделите са недостъпни — не може да се извърши проверка."],
+            "corrections": [],
+            "summary": "Грешка при проверка.",
+            "model": "none",
+            "cost": 0.0,
+            "error": True,
+        }
+
+    def _verify_with_model(
+        self, provider: str, system_prompt: str, user_message: str
+    ) -> dict:
+        """Run verification with a specific provider."""
+        messages = [{"role": "user", "content": user_message}]
+
+        if provider == "anthropic":
+            client = self._get_anthropic()
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=4096,
+                system=system_prompt,
+                messages=messages,
+                temperature=0.1,
+            )
+            raw = response.content[0].text if response.content else "{}"
+            tokens_in = response.usage.input_tokens
+            tokens_out = response.usage.output_tokens
+            model = "claude-sonnet-4-6"
+        else:
+            client = self._get_deepseek()
+            full_msgs = [{"role": "system", "content": system_prompt}] + messages
+            response = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=full_msgs,
+                max_tokens=4096,
+                temperature=0.1,
+            )
+            raw = response.choices[0].message.content or "{}"
+            usage = response.usage
+            tokens_in = usage.prompt_tokens if usage else 0
+            tokens_out = usage.completion_tokens if usage else 0
+            model = "deepseek-chat"
+
+        self._log_usage(model, tokens_in, tokens_out, "verify")
+        cost = self._calculate_cost(model, tokens_in, tokens_out)
+
+        # Parse JSON response
+        parsed = self._parse_json_response(raw)
+
+        return {
+            "approved": parsed.get("approved", False),
+            "issues": parsed.get("issues", []),
+            "corrections": parsed.get("corrections", []),
+            "summary": parsed.get("summary", ""),
+            "model": model,
+            "cost": cost,
+        }
+
+    # ------------------------------------------------------------------
+    # Apply corrections (Worker = DeepSeek, fallback = Anthropic)
+    # ------------------------------------------------------------------
+
+    def apply_corrections(
+        self, schedule_json: str, corrections: list[dict]
+    ) -> dict:
+        """Send corrections to the worker (DeepSeek) for application.
+
+        Args:
+            schedule_json: Current schedule JSON string.
+            corrections: List of correction dicts from verification.
+
+        Returns:
+            Dict with corrected_schedule, applied, model, cost.
+        """
+        user_message = (
+            f"Ето текущият график:\n{schedule_json}\n\n"
+            f"Приложи следните корекции:\n{json.dumps(corrections, ensure_ascii=False, indent=2)}"
+        )
+        messages = [{"role": "user", "content": user_message}]
+
+        # Try DeepSeek first
+        if self.deepseek_available:
+            try:
+                return self._apply_with_model("deepseek", messages)
+            except Exception as exc:
+                logger.warning("DeepSeek corrections failed: %s", exc)
+                self.deepseek_available = False
+                self._update_fallback_state()
+
+        # Fallback to Anthropic
+        if self.anthropic_available:
+            try:
+                return self._apply_with_model("anthropic", messages)
+            except Exception as exc:
+                logger.error("Anthropic corrections fallback failed: %s", exc)
+
+        return {
+            "corrected_schedule": schedule_json,
+            "applied": [],
+            "model": "none",
+            "cost": 0.0,
+            "error": True,
+        }
+
+    def _apply_with_model(self, provider: str, messages: list[dict]) -> dict:
+        """Apply corrections using a specific provider."""
+        if provider == "deepseek":
+            client = self._get_deepseek()
+            full_msgs = [
+                {"role": "system", "content": CORRECTION_SYSTEM_PROMPT}
+            ] + messages
+            response = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=full_msgs,
+                max_tokens=8192,
+                temperature=0.1,
+            )
+            raw = response.choices[0].message.content or "{}"
+            usage = response.usage
+            tokens_in = usage.prompt_tokens if usage else 0
+            tokens_out = usage.completion_tokens if usage else 0
+            model = "deepseek-chat"
+        else:
+            client = self._get_anthropic()
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=8192,
+                system=CORRECTION_SYSTEM_PROMPT,
+                messages=messages,
+                temperature=0.1,
+            )
+            raw = response.content[0].text if response.content else "{}"
+            tokens_in = response.usage.input_tokens
+            tokens_out = response.usage.output_tokens
+            model = "claude-sonnet-4-6"
+
+        self._log_usage(model, tokens_in, tokens_out, "correct")
+        cost = self._calculate_cost(model, tokens_in, tokens_out)
+
+        parsed = self._parse_json_response(raw)
+
+        return {
+            "corrected_schedule": parsed.get("schedule", schedule_json),
+            "applied": parsed.get("applied", []),
+            "model": model,
+            "cost": cost,
+        }
+
+    # ------------------------------------------------------------------
+    # Correction cycle (auto: generate -> verify -> correct -> verify...)
+    # ------------------------------------------------------------------
+
+    def run_correction_cycle(
+        self,
+        schedule_json: str,
+        rules: str,
+        max_cycles: int = 3,
+        progress_callback: Any | None = None,
+    ) -> dict:
+        """Automatic correction cycle: verify -> correct -> verify (max N times).
+
+        Args:
+            schedule_json: Initial schedule JSON string.
+            rules: Verification rules.
+            max_cycles: Maximum correction attempts.
+            progress_callback: Optional callable(message: str) for progress updates.
+
+        Returns:
+            Dict with status, schedule, cycles, total_cost, history.
+        """
+        cycle = 0
+        current_schedule = schedule_json
+        all_issues: list[dict] = []
+        total_cost = 0.0
+
+        while cycle < max_cycles:
+            # Verify
+            if progress_callback:
+                model_label = "Anthropic" if self.anthropic_available else "DeepSeek"
+                progress_callback(
+                    f"Проверявам правилата... ({model_label}) [опит {cycle + 1}]"
+                )
+
+            verification = self.verify_schedule(current_schedule, rules)
+            total_cost += verification.get("cost", 0.0)
+
+            if verification.get("error"):
+                return {
+                    "status": "error",
+                    "schedule": current_schedule,
+                    "cycles": cycle + 1,
+                    "total_cost": total_cost,
+                    "history": all_issues,
+                    "error": "AI моделите са недостъпни.",
+                }
+
+            if verification["approved"]:
+                return {
+                    "status": "approved",
+                    "schedule": current_schedule,
+                    "cycles": cycle + 1,
+                    "total_cost": total_cost,
+                    "history": all_issues,
+                    "summary": verification.get("summary", ""),
+                }
+
+            # Has issues — log them
+            all_issues.append({
+                "cycle": cycle + 1,
+                "issues": verification["issues"],
+                "corrections_count": len(verification["corrections"]),
+            })
+
+            if progress_callback:
+                issues_str = ", ".join(verification["issues"][:3])
+                progress_callback(
+                    f"Коригирам: {issues_str}..."
+                )
+
+            # Apply corrections
+            result = self.apply_corrections(
+                current_schedule, verification["corrections"]
+            )
+            total_cost += result.get("cost", 0.0)
+
+            if result.get("error"):
+                return {
+                    "status": "error",
+                    "schedule": current_schedule,
+                    "cycles": cycle + 1,
+                    "total_cost": total_cost,
+                    "history": all_issues,
+                    "error": "Грешка при прилагане на корекции.",
+                }
+
+            current_schedule = (
+                json.dumps(result["corrected_schedule"], ensure_ascii=False)
+                if isinstance(result["corrected_schedule"], dict)
+                else result["corrected_schedule"]
+            )
+            cycle += 1
+
+        # Exhausted attempts
+        return {
+            "status": "needs_human_review",
+            "schedule": current_schedule,
+            "cycles": max_cycles,
+            "total_cost": total_cost,
+            "remaining_issues": verification["issues"],
+            "history": all_issues,
+        }
+
+    # ------------------------------------------------------------------
+    # OCR (Worker = DeepSeek vision, fallback = Anthropic vision)
+    # ------------------------------------------------------------------
+
+    def ocr_pdf_page(self, image_base64: str) -> str:
+        """OCR a single page image via DeepSeek vision. Falls back to Anthropic.
+
+        Args:
+            image_base64: Base64-encoded PNG image.
+
+        Returns:
+            Extracted text string.
+        """
+        ocr_prompt = (
+            "Извлечи ЦЕЛИЯ текст от това изображение. "
+            "Текстът е на български. Запази структурата — заглавия, параграфи, таблици. "
+            "Отговори САМО с извлечения текст, без коментари."
+        )
+
+        # Try DeepSeek first
+        if self.deepseek_available:
+            try:
+                return self._ocr_deepseek(image_base64, ocr_prompt)
+            except Exception as exc:
+                logger.warning("DeepSeek OCR failed: %s", exc)
+                self.deepseek_available = False
+                self._update_fallback_state()
+
+        # Fallback to Anthropic
+        if self.anthropic_available:
+            try:
+                return self._ocr_anthropic(image_base64, ocr_prompt)
+            except Exception as exc:
+                logger.error("Anthropic OCR fallback failed: %s", exc)
+
+        return "[OCR ГРЕШКА: И двата AI модела са недостъпни]"
+
+    def _ocr_deepseek(self, image_base64: str, prompt: str) -> str:
+        """OCR via DeepSeek vision."""
+        client = self._get_deepseek()
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image_base64}",
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+            max_tokens=4096,
+        )
+        text = response.choices[0].message.content or ""
+        usage = response.usage
+        tokens_in = usage.prompt_tokens if usage else 0
+        tokens_out = usage.completion_tokens if usage else 0
+        self._log_usage("deepseek-chat", tokens_in, tokens_out, "ocr")
+        return text
+
+    def _ocr_anthropic(self, image_base64: str, prompt: str) -> str:
+        """OCR via Anthropic vision."""
+        client = self._get_anthropic()
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": image_base64,
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+        text = response.content[0].text if response.content else ""
+        self._log_usage(
+            "claude-sonnet-4-6",
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+            "ocr",
+        )
+        return text
+
+    # ------------------------------------------------------------------
+    # Lesson verification (Controller = Anthropic)
+    # ------------------------------------------------------------------
+
+    def save_lesson(
+        self, lesson_text: str, context: str, existing_lessons: str = ""
+    ) -> dict:
+        """Validate a lesson via the controller before saving.
+
+        Args:
+            lesson_text: The new lesson to validate.
+            context: Context about when/why this lesson was learned.
+            existing_lessons: Summary of existing lessons.
+
+        Returns:
+            Dict with approved, formatted_lesson, reason.
+        """
+        system_prompt = LESSON_VERIFICATION_PROMPT.format(
+            existing_lessons=existing_lessons or "(няма)",
+            new_lesson=lesson_text,
+            context=context,
+        )
+        messages = [{"role": "user", "content": f"Провери този урок: {lesson_text}"}]
+
+        # Try Anthropic first (controller)
+        if self.anthropic_available:
+            try:
+                client = self._get_anthropic()
+                response = client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=1024,
+                    system=system_prompt,
+                    messages=messages,
+                    temperature=0.1,
+                )
+                raw = response.content[0].text if response.content else "{}"
+                self._log_usage(
+                    "claude-sonnet-4-6",
+                    response.usage.input_tokens,
+                    response.usage.output_tokens,
+                    "lesson",
+                )
+                parsed = self._parse_json_response(raw)
+                return {
+                    "approved": parsed.get("approved", False),
+                    "formatted_lesson": parsed.get("formatted_lesson", lesson_text),
+                    "reason": parsed.get("reason", ""),
+                    "model": "claude-sonnet-4-6",
+                }
+            except Exception as exc:
+                logger.warning("Anthropic lesson check failed: %s", exc)
+
+        # Fallback: DeepSeek
+        if self.deepseek_available:
+            try:
+                client = self._get_deepseek()
+                full_msgs = [{"role": "system", "content": system_prompt}] + messages
+                response = client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=full_msgs,
+                    max_tokens=1024,
+                    temperature=0.1,
+                )
+                raw = response.choices[0].message.content or "{}"
+                usage = response.usage
+                self._log_usage(
+                    "deepseek-chat",
+                    usage.prompt_tokens if usage else 0,
+                    usage.completion_tokens if usage else 0,
+                    "lesson",
+                )
+                parsed = self._parse_json_response(raw)
+                return {
+                    "approved": parsed.get("approved", False),
+                    "formatted_lesson": parsed.get("formatted_lesson", lesson_text),
+                    "reason": parsed.get("reason", ""),
+                    "model": "deepseek-chat",
+                }
+            except Exception as exc:
+                logger.error("DeepSeek lesson fallback failed: %s", exc)
+
+        # Both failed — approve by default, let user review
+        return {
+            "approved": True,
+            "formatted_lesson": lesson_text,
+            "reason": "AI проверката е недостъпна — урокът е записан без валидация.",
+            "model": "none",
+        }
+
+    # ------------------------------------------------------------------
+    # Usage tracking
+    # ------------------------------------------------------------------
+
+    def get_usage_stats(self) -> dict:
+        """Get usage statistics grouped by model.
+
+        Returns:
+            Dict with per-model stats and totals.
+        """
+        deepseek_stats = {"calls": 0, "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}
+        anthropic_stats = {"calls": 0, "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}
+        fallback_events = 0
+
+        for entry in self.usage_log:
+            model = entry["model"]
+            if model == "deepseek-chat":
+                target = deepseek_stats
+            else:
+                target = anthropic_stats
+
+            target["calls"] += 1
+            target["tokens_in"] += entry["tokens_in"]
+            target["tokens_out"] += entry["tokens_out"]
+            target["cost_usd"] += entry["cost_usd"]
+
+        # Count fallback events from log
+        for entry in self.usage_log:
+            if entry.get("is_fallback"):
+                fallback_events += 1
+
+        return {
+            "deepseek": deepseek_stats,
+            "anthropic": anthropic_stats,
+            "total_cost_usd": deepseek_stats["cost_usd"] + anthropic_stats["cost_usd"],
+            "fallback_events": fallback_events,
+            "total_calls": deepseek_stats["calls"] + anthropic_stats["calls"],
+        }
+
+    def _log_usage(
+        self, model: str, tokens_in: int, tokens_out: int, task_type: str
+    ) -> None:
+        """Log an API call for usage tracking."""
+        self.usage_log.append({
+            "timestamp": datetime.now().isoformat(),
+            "model": model,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "cost_usd": self._calculate_cost(model, tokens_in, tokens_out),
+            "task_type": task_type,
+        })
+
+    @staticmethod
+    def _calculate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+        """Calculate cost for a specific API call."""
+        rate = PRICING.get(model, PRICING["deepseek-chat"])
+        return tokens_in * rate["input"] + tokens_out * rate["output"]
+
+    # ------------------------------------------------------------------
+    # JSON parsing helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_json_response(raw: str) -> dict:
+        """Parse a JSON response from AI, handling common formatting issues."""
+        text = raw.strip()
+
+        # Remove markdown code fences if present
+        if text.startswith("```"):
+            lines = text.split("\n")
+            # Remove first and last lines (``` markers)
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            text = "\n".join(lines)
+
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Try to find JSON object in the text
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                pass
+
+        logger.warning("Failed to parse JSON response: %.200s", text)
+        return {"approved": False, "issues": ["Невалиден JSON отговор от AI"], "corrections": []}

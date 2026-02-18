@@ -2,6 +2,8 @@
 
 A local web application for generating construction schedules (Gantt)
 for water and sewage infrastructure projects in Bulgaria.
+
+Dual AI system: DeepSeek (worker) + Anthropic Claude (controller).
 """
 
 import json
@@ -14,11 +16,13 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from src.ai_processor import AIProcessor
+from src.ai_router import AIRouter
 from src.chat_handler import ChatHandler
 from src.file_manager import FileManager
 from src.gantt_chart import create_gantt_chart
 from src.knowledge_manager import KnowledgeManager
 from src.schedule_builder import ScheduleBuilder
+from src.self_evolution import SelfEvolution
 
 # ---------------------------------------------------------------------------
 # Environment & Paths
@@ -82,19 +86,86 @@ if "conversion_done" not in st.session_state:
 if "welcome_shown" not in st.session_state:
     st.session_state.welcome_shown = False
 
-# ---------------------------------------------------------------------------
-# Initialize managers
-# ---------------------------------------------------------------------------
-knowledge_mgr = KnowledgeManager(str(KNOWLEDGE_DIR))
-file_mgr = FileManager()
-chat_handler = ChatHandler(knowledge_manager=knowledge_mgr)
+if "ai_health" not in st.session_state:
+    st.session_state.ai_health = None
 
-api_key = os.getenv("ANTHROPIC_API_KEY", "")
-ai_processor = AIProcessor(api_key=api_key) if api_key else None
+if "usage_stats" not in st.session_state:
+    st.session_state.usage_stats = {
+        "deepseek": {"calls": 0, "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0},
+        "anthropic": {"calls": 0, "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0},
+        "total_cost_usd": 0.0,
+        "total_calls": 0,
+    }
+
+if "current_model" not in st.session_state:
+    st.session_state.current_model = None
+
+if "pending_changes" not in st.session_state:
+    st.session_state.pending_changes = None
+
+if "evolution_history" not in st.session_state:
+    st.session_state.evolution_history = []
+
+# ---------------------------------------------------------------------------
+# Initialize managers (cached in session state to survive reruns)
+# ---------------------------------------------------------------------------
+if "router" not in st.session_state:
+    st.session_state.router = AIRouter()
+
+if "knowledge_mgr" not in st.session_state:
+    st.session_state.knowledge_mgr = KnowledgeManager(str(KNOWLEDGE_DIR))
+
+if "file_mgr" not in st.session_state:
+    st.session_state.file_mgr = FileManager()
+
+if "ai_processor" not in st.session_state:
+    st.session_state.ai_processor = AIProcessor(
+        router=st.session_state.router,
+        knowledge_manager=st.session_state.knowledge_mgr,
+    )
+
+if "self_evolution" not in st.session_state:
+    st.session_state.self_evolution = SelfEvolution(
+        app_root=str(APP_DIR),
+        router=st.session_state.router,
+    )
+
+if "chat_handler" not in st.session_state:
+    st.session_state.chat_handler = ChatHandler(
+        ai_processor=st.session_state.ai_processor,
+        file_manager=st.session_state.file_mgr,
+        knowledge_manager=st.session_state.knowledge_mgr,
+        evolution=st.session_state.self_evolution,
+    )
+
+router: AIRouter = st.session_state.router
+knowledge_mgr: KnowledgeManager = st.session_state.knowledge_mgr
+file_mgr: FileManager = st.session_state.file_mgr
+ai_processor: AIProcessor = st.session_state.ai_processor
+evolution: SelfEvolution = st.session_state.self_evolution
+chat_handler: ChatHandler = st.session_state.chat_handler
+
+# ---------------------------------------------------------------------------
+# Health check on first load
+# ---------------------------------------------------------------------------
+if st.session_state.ai_health is None:
+    with st.spinner("Проверка на AI модели..."):
+        try:
+            st.session_state.ai_health = router.check_health()
+        except Exception:
+            st.session_state.ai_health = {
+                "deepseek": False,
+                "anthropic": False,
+                "fallback_active": True,
+                "fallback_source": "both",
+            }
+
+ai_health = st.session_state.ai_health
 
 # ---------------------------------------------------------------------------
 # Helper: run file conversion with progress in chat
 # ---------------------------------------------------------------------------
+
 
 def _run_conversion(force: bool = False) -> None:
     """Execute file conversion and write progress to chat messages."""
@@ -102,7 +173,6 @@ def _run_conversion(force: bool = False) -> None:
     if total_files == 0:
         return
 
-    # Initial chat message
     status_lines: list[str] = []
 
     progress_bar = st.sidebar.progress(0, text="Конвертиране...")
@@ -142,7 +212,6 @@ def _run_conversion(force: bool = False) -> None:
     if failed_count > 0:
         lines.append(f"Грешки: **{failed_count}**")
 
-    # Details per file
     details = []
     for r in result.get("results", []):
         if r["action"] == "converted":
@@ -153,7 +222,7 @@ def _run_conversion(force: bool = False) -> None:
             }.get(ext, ext)
             method = r.get("method", "")
             detail = r.get("detail", "")
-            method_str = f" (OCR)" if method == "ocr_vision" else ""
+            method_str = " (OCR)" if method == "ocr_vision" else ""
             details.append(f"- {r['file']} → {ext_label}{method_str}: {detail}")
         elif r["action"] == "failed":
             details.append(f"- {r['file']} → ❌ {r.get('error', '')}")
@@ -171,7 +240,6 @@ def _run_conversion(force: bool = False) -> None:
         "content": "\n".join(lines),
     })
 
-    # Update state
     st.session_state.conversion_done = True
     new_info = file_mgr.set_project_path(st.session_state.project_path)
     st.session_state.project_info = new_info
@@ -182,7 +250,60 @@ def _run_conversion(force: bool = False) -> None:
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("# 📐 ВиК График Генератор")
-    st.caption("РАИ Комерс | v0.1")
+    st.caption("РАИ Комерс | v0.2 — Dual AI")
+
+    st.divider()
+
+    # --- AI Status ---
+    st.subheader("🤖 AI Статус")
+
+    ds_status = "🟢 Работи" if ai_health.get("deepseek") else "🔴 Недостъпен"
+    an_status = "🟢 Работи" if ai_health.get("anthropic") else "🔴 Недостъпен"
+    st.caption(f"DeepSeek (работник): {ds_status}")
+    st.caption(f"Anthropic (контрольор): {an_status}")
+
+    if ai_health.get("fallback_active"):
+        src = ai_health.get("fallback_source", "")
+        if src == "deepseek":
+            st.warning("DeepSeek е недостъпен — Anthropic поема всички задачи")
+        elif src == "anthropic":
+            st.warning("Anthropic е недостъпен — DeepSeek поема всички задачи")
+        elif src == "both":
+            st.error("И двата AI модела са недостъпни!")
+
+    if st.session_state.current_model:
+        st.caption(f"Текущ модел: {st.session_state.current_model}")
+
+    # Re-check button
+    if st.button("🔄 Провери отново", use_container_width=True, key="health_check"):
+        with st.spinner("Проверка..."):
+            try:
+                st.session_state.ai_health = router.check_health()
+            except Exception:
+                st.session_state.ai_health = {
+                    "deepseek": False, "anthropic": False,
+                    "fallback_active": True, "fallback_source": "both",
+                }
+        st.rerun()
+
+    st.divider()
+
+    # --- Cost tracking ---
+    st.subheader("💰 Разходи")
+    stats = router.get_usage_stats()
+    st.session_state.usage_stats = stats
+
+    col_ds, col_an = st.columns(2)
+    with col_ds:
+        ds_cost = stats["deepseek"]["cost_usd"]
+        ds_calls = stats["deepseek"]["calls"]
+        st.metric("DeepSeek", f"${ds_cost:.4f}", f"{ds_calls} заявки")
+    with col_an:
+        an_cost = stats["anthropic"]["cost_usd"]
+        an_calls = stats["anthropic"]["calls"]
+        st.metric("Anthropic", f"${an_cost:.4f}", f"{an_calls} заявки")
+
+    st.caption(f"**Общо: ${stats['total_cost_usd']:.4f}**")
 
     st.divider()
 
@@ -233,9 +354,10 @@ with st.sidebar:
                 st.session_state.project_path = path_to_load
                 st.session_state.project_loaded = True
                 st.session_state.project_info = info
-                st.session_state.conversion_done = (info["needs_conversion"] == 0 and info["converted_count"] > 0)
+                st.session_state.conversion_done = (
+                    info["needs_conversion"] == 0 and info["converted_count"] > 0
+                )
 
-                # Chat notification
                 folder_name = Path(path_to_load).name
                 msg = (
                     f"📁 Проект **{folder_name}** зареден.\n\n"
@@ -273,7 +395,6 @@ with st.sidebar:
             )
             st.caption(f"Файлове: {type_str}")
 
-        # Conversion status
         needs = info.get("needs_conversion", 0)
         converted = info.get("converted_count", 0)
         total = info.get("files_count", 0)
@@ -288,7 +409,6 @@ with st.sidebar:
         elif total > 0:
             st.info(f"{total} файла намерени")
 
-        # Force reconvert
         if converted > 0:
             if st.button("🔁 Преконвертирай всичко", use_container_width=True):
                 _run_conversion(force=True)
@@ -298,18 +418,111 @@ with st.sidebar:
 
     # --- Knowledge stats ---
     st.subheader("🧠 Знания")
-    stats = knowledge_mgr.get_knowledge_stats()
+    k_stats = knowledge_mgr.get_knowledge_stats()
     col_a, col_b = st.columns(2)
     with col_a:
-        st.metric("Уроци", stats["lessons"])
+        st.metric("Уроци", k_stats["lessons"])
     with col_b:
-        st.metric("Методики", stats["methodologies"])
+        st.metric("Методики", k_stats["methodologies"])
 
     col_c, col_d = st.columns(2)
     with col_c:
-        st.metric("Чакащи", stats["pending"])
+        st.metric("Чакащи", k_stats["pending"])
     with col_d:
-        st.metric("Референции", stats["skill_references"])
+        st.metric("Референции", k_stats["skill_references"])
+
+    st.divider()
+
+    # --- Self-evolution ---
+    st.subheader("🔧 Еволюция")
+    evo_history = evolution.get_change_history()
+    if evo_history:
+        last_change = evo_history[-1]
+        last_ts = last_change.get("timestamp", "?")[:16].replace("T", " ")
+        last_desc = last_change.get("description", "?")[:40]
+        st.caption(f"Последна промяна: {last_ts}")
+        st.caption(f"— {last_desc}")
+    else:
+        st.caption("Няма направени промени.")
+
+    evo_col1, evo_col2 = st.columns(2)
+    with evo_col1:
+        if st.button("📜 История", use_container_width=True, key="evo_history_btn"):
+            if evo_history:
+                history_lines = ["**📜 История на промените:**\n"]
+                for entry in reversed(evo_history[-10:]):
+                    ts = entry.get("timestamp", "?")[:16].replace("T", " ")
+                    lvl = entry.get("level", "?")
+                    desc = entry.get("description", "?")
+                    status = entry.get("status", "?")
+                    emoji = {"green": "🟢", "yellow": "🟡", "red": "🔴", "rollback": "⏪"}.get(lvl, "⚪")
+                    history_lines.append(f"{emoji} [{ts}] {desc} ({status})")
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": "\n".join(history_lines),
+                })
+                st.rerun()
+            else:
+                st.info("Няма история.")
+    with evo_col2:
+        if st.button("⏪ Върни", use_container_width=True, key="evo_rollback_btn"):
+            st.session_state["show_rollback_dialog"] = True
+            st.rerun()
+
+    # Rollback dialog
+    if st.session_state.get("show_rollback_dialog"):
+        if evo_history:
+            # Find last backup commit
+            last_backup = None
+            for entry in reversed(evo_history):
+                if entry.get("backup_commit") and entry.get("status") == "applied":
+                    last_backup = entry
+                    break
+
+            if last_backup:
+                commit_short = last_backup["backup_commit"][:8]
+                desc = last_backup.get("description", "")
+                st.warning(
+                    f"⚠️ Ще се върнете към: {commit_short} — {desc}"
+                )
+                rollback_code = st.text_input(
+                    "Въведете админ код:",
+                    type="password",
+                    key="rollback_admin_code",
+                )
+                rb_col1, rb_col2 = st.columns(2)
+                with rb_col1:
+                    if st.button("✅ Потвърди", key="confirm_rollback", use_container_width=True):
+                        if evolution.verify_admin_code(rollback_code):
+                            rb_result = evolution.rollback(last_backup["backup_commit"])
+                            if rb_result["success"]:
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": f"⏪ Успешен rollback към {commit_short}. Рестартирайте приложението.",
+                                })
+                            else:
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": f"❌ Rollback неуспешен: {rb_result.get('error', '?')}",
+                                })
+                            st.session_state["show_rollback_dialog"] = False
+                            st.rerun()
+                        else:
+                            st.error("❌ Невалиден админ код.")
+                with rb_col2:
+                    if st.button("❌ Откажи", key="cancel_rollback", use_container_width=True):
+                        st.session_state["show_rollback_dialog"] = False
+                        st.rerun()
+            else:
+                st.info("Няма backup за възстановяване.")
+                if st.button("OK", key="no_backup_ok"):
+                    st.session_state["show_rollback_dialog"] = False
+                    st.rerun()
+        else:
+            st.info("Няма история за възстановяване.")
+            if st.button("OK", key="no_history_ok"):
+                st.session_state["show_rollback_dialog"] = False
+                st.rerun()
 
     st.divider()
 
@@ -326,16 +539,12 @@ with st.sidebar:
 
     st.divider()
 
-    # --- API status ---
-    if ai_processor and ai_processor.is_configured:
-        st.caption("🟢 Anthropic API: свързан")
-    else:
-        st.caption("🔴 Anthropic API: няма ключ (.env)")
-
     # --- Clear chat ---
     if st.button("🗑️ Изчисти чата", use_container_width=True):
         st.session_state.messages = []
         st.session_state.welcome_shown = False
+        st.session_state.pending_changes = None
+        chat_handler.clear_history()
         st.rerun()
 
 # ---------------------------------------------------------------------------
@@ -351,12 +560,27 @@ with chat_col:
 
     # Welcome message (shown once)
     if not st.session_state.welcome_shown:
+        # Build welcome with AI status
+        ai_note = ""
+        if ai_health.get("deepseek") and ai_health.get("anthropic"):
+            ai_note = "🟢 Двата AI модела са готови (DeepSeek + Anthropic)."
+        elif ai_health.get("fallback_active"):
+            src = ai_health.get("fallback_source", "")
+            if src == "deepseek":
+                ai_note = "⚠️ DeepSeek не е достъпен — работя чрез Anthropic."
+            elif src == "anthropic":
+                ai_note = "⚠️ Anthropic не е достъпен — работя чрез DeepSeek."
+            else:
+                ai_note = "🔴 AI моделите не са достъпни. Проверете .env файла."
+
         welcome = (
             "Здравейте! Аз съм вашият асистент за строителни графици.\n\n"
+            f"{ai_note}\n\n"
             "Можете да:\n"
             "- 📁 Заредите проектна папка от страничната лента\n"
             "- 📊 Опишете какъв график ви трябва\n"
-            "- ❓ Зададете въпрос за методология или правила\n\n"
+            "- ❓ Зададете въпрос за методология или правила\n"
+            "- 🔧 Поискате нова функционалност (самоеволюция)\n\n"
             "С какво мога да помогна?"
         )
         st.session_state.messages.append(
@@ -374,27 +598,76 @@ with chat_col:
     # Chat input
     user_input = st.chat_input("Напишете съобщение...")
 
+    # Show pending changes indicator
+    if st.session_state.pending_changes:
+        pending_lvl = st.session_state.pending_changes.get("level", "?")
+        lvl_emoji = {"green": "🟢", "yellow": "🟡", "red": "🔴"}.get(pending_lvl, "⚪")
+        if pending_lvl == "red":
+            st.info(f"{lvl_emoji} Очаква се **админ код** за прилагане на промени...")
+        else:
+            st.info(f"{lvl_emoji} Очаква се **потвърждение** за прилагане на промени...")
+
     if user_input:
         st.session_state.messages.append(
             {"role": "user", "content": user_input}
         )
 
-        # Build context about loaded project files
-        context_note = ""
-        if st.session_state.project_loaded and st.session_state.conversion_done:
-            if file_mgr.base_path:
-                converted = file_mgr.get_converted_files()
-                if converted:
-                    flist = ", ".join(c["original"] for c in converted)
-                    context_note = f"\n\n*[Налични документи: {flist}]*"
+        # Build project context
+        project_context = None
+        if st.session_state.project_loaded:
+            project_context = {
+                "path": st.session_state.project_path,
+                "info": st.session_state.project_info,
+                "conversion_done": st.session_state.conversion_done,
+            }
 
-        response = chat_handler.process_message(user_input)
-        if context_note:
-            response += context_note
+        # Process through ChatHandler (real AI)
+        with st.spinner("Обработвам..."):
+            result = chat_handler.process_message(
+                user_input,
+                project_loaded=st.session_state.project_loaded,
+                conversion_done=st.session_state.conversion_done,
+                project_context=project_context,
+                pending_changes=st.session_state.pending_changes,
+            )
+
+        # Track which model was used
+        st.session_state.current_model = result.get("model_used")
+
+        # Handle evolution pending changes
+        if result.get("evolution_pending"):
+            st.session_state.pending_changes = result["evolution_pending"]
+        if result.get("evolution_cleared") or result.get("evolution_applied"):
+            st.session_state.pending_changes = None
+
+        # Build response with fallback notice
+        response_text = result["response"]
+
+        # Check for fallback notice
+        if router.fallback_active and result.get("model_used") not in ("none", None):
+            src = router.fallback_source
+            if src == "deepseek" and result.get("model_used") == "claude-sonnet-4-6":
+                response_text = (
+                    "⚠️ _DeepSeek не отговаря. Превключвам към Anthropic._\n\n"
+                    + response_text
+                )
+            elif src == "anthropic" and result.get("model_used") == "deepseek-chat":
+                response_text = (
+                    "⚠️ _Anthropic не отговаря. Превключвам към DeepSeek._\n\n"
+                    + response_text
+                )
 
         st.session_state.messages.append(
-            {"role": "assistant", "content": response}
+            {"role": "assistant", "content": response_text}
         )
+
+        # Update schedule if changed
+        if result.get("schedule_updated") and result.get("schedule_data"):
+            st.session_state.schedule_data = result["schedule_data"]
+
+        # Update usage stats
+        st.session_state.usage_stats = router.get_usage_stats()
+
         st.rerun()
 
 # ---------------------------------------------------------------------------
@@ -423,8 +696,8 @@ with viz_col:
                     "DN": task.get("dn", "-"),
                     "L (м)": task.get("length_m", "-"),
                     "Екип": task.get("team", "-"),
-                    "Начало": task["start"].strftime("%d.%m.%Y"),
-                    "Край": task["end"].strftime("%d.%m.%Y"),
+                    "Начало": task["start"].strftime("%d.%m.%Y") if hasattr(task.get("start"), "strftime") else str(task.get("start", "-")),
+                    "Край": task["end"].strftime("%d.%m.%Y") if hasattr(task.get("end"), "strftime") else str(task.get("end", "-")),
                     "Дни": task.get("duration", "-"),
                 })
             st.dataframe(table_data, use_container_width=True, hide_index=True)
@@ -461,11 +734,12 @@ with viz_col:
         else:
             st.caption("📂 Няма зареден проект")
     with status_cols[1]:
-        st.caption(f"📊 Задачи: {len(schedule)}")
+        st.caption(f"📊 Задачи: {len(schedule) if schedule else 0}")
     with status_cols[2]:
         if schedule:
             total_days = max(
-                t.get("start_day", 0) + t.get("duration", 0) - 1 for t in schedule
+                (t.get("start_day", 0) + t.get("duration", 0) - 1 for t in schedule),
+                default=0,
             )
             st.caption(f"📅 Общо: {total_days} дни")
         else:

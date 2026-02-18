@@ -1,7 +1,19 @@
-"""Knowledge manager for the 3-tier knowledge system (Lessons, Methodologies, Skills)."""
+"""Knowledge manager for the 3-tier knowledge system (Lessons, Methodologies, Skills).
 
+Supports AI-verified lesson saving via AIRouter (Anthropic controller).
+"""
+
+from __future__ import annotations
+
+import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.ai_router import AIRouter
+
+logger = logging.getLogger(__name__)
 
 
 class KnowledgeManager:
@@ -224,3 +236,74 @@ class KnowledgeManager:
                 parts.append(lesson)
 
         return "\n\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # AI-verified lesson saving
+    # ------------------------------------------------------------------
+
+    def add_lesson_with_verification(
+        self, lesson: str, router: AIRouter, context: str = ""
+    ) -> dict:
+        """Save a new lesson after verification by the controller (Anthropic).
+
+        The controller checks that the lesson is clearly formulated and
+        does not contradict existing lessons.
+
+        Args:
+            lesson: The new lesson text.
+            router: AIRouter instance for AI verification.
+            context: Context about when/why this lesson was learned.
+
+        Returns:
+            Dict with saved, file, formatted, feedback.
+        """
+        # Get existing lessons for context
+        existing_lessons = self.get_lessons()
+        existing_summary = "\n".join(existing_lessons[-20:]) if existing_lessons else ""
+
+        # Verify via AI controller
+        result = router.save_lesson(lesson, context, existing_summary)
+
+        if result["approved"]:
+            formatted = result["formatted_lesson"]
+
+            # Add to approved lessons
+            next_num = len(existing_lessons) + 1
+            learned_path = self.lessons_path / "lessons_learned.md"
+
+            if learned_path.exists():
+                content = learned_path.read_text(encoding="utf-8")
+            else:
+                content = "# Научени уроци\n"
+
+            content += f"\n**#{next_num}**: {formatted}"
+            learned_path.write_text(content, encoding="utf-8")
+
+            logger.info("Lesson #%d saved: %s", next_num, formatted[:80])
+
+            return {
+                "saved": True,
+                "file": str(learned_path),
+                "formatted": formatted,
+                "feedback": result["reason"],
+                "model": result.get("model", "unknown"),
+            }
+
+        # Not approved — save to pending with feedback
+        pending_path = self.lessons_path / "pending_lessons.md"
+        if not pending_path.exists():
+            pending_path.write_text("# Нови уроци за преглед\n\n", encoding="utf-8")
+
+        pending_content = pending_path.read_text(encoding="utf-8")
+        pending_content += f"\n- {lesson} (ОТХВЪРЛЕН: {result['reason']})"
+        pending_path.write_text(pending_content, encoding="utf-8")
+
+        logger.info("Lesson rejected: %s — %s", lesson[:80], result["reason"])
+
+        return {
+            "saved": False,
+            "file": str(pending_path),
+            "formatted": result["formatted_lesson"],
+            "feedback": result["reason"],
+            "model": result.get("model", "unknown"),
+        }
