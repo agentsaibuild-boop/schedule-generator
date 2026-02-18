@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from typing import Any
+
+import pandas as pd
+
+from src.gantt_chart import day_to_date, generate_demo_schedule, get_type_label
 
 
 class ScheduleBuilder:
@@ -15,10 +19,17 @@ class ScheduleBuilder:
             ai_data: Dict with schedule data from AI processor.
 
         Returns:
-            List of task dicts with name, start, end, duration, etc.
+            List of task dicts in the standard schedule format.
         """
-        # Placeholder — returns demo data
-        return self._get_demo_schedule()
+        if not ai_data:
+            return generate_demo_schedule()
+
+        # When AI provides schedule data, convert to standard format
+        tasks = ai_data.get("tasks", [])
+        if tasks:
+            return tasks
+
+        return generate_demo_schedule()
 
     def validate_schedule(self, schedule: list[dict]) -> dict:
         """Validate a schedule for errors and warnings.
@@ -36,13 +47,22 @@ class ScheduleBuilder:
             errors.append("Графикът е празен.")
             return {"valid": False, "errors": errors, "warnings": warnings}
 
+        ids_seen: set[str] = set()
         for i, task in enumerate(schedule):
             if not task.get("name"):
                 errors.append(f"Задача #{i + 1} няма име.")
+            tid = task.get("id", "")
+            if tid in ids_seen:
+                errors.append(f"Дублирано ID: {tid}")
+            ids_seen.add(tid)
             if task.get("start_day", 0) < 0:
-                errors.append(f"Задача '{task.get('name')}' има отрицателен начален ден.")
-            if task.get("duration", 0) <= 0:
-                warnings.append(f"Задача '{task.get('name')}' има нулева продължителност.")
+                errors.append(
+                    f"Задача '{task.get('name')}' има отрицателен начален ден."
+                )
+            if task.get("duration", 0) < 0:
+                warnings.append(
+                    f"Задача '{task.get('name')}' има отрицателна продължителност."
+                )
 
         return {
             "valid": len(errors) == 0,
@@ -62,82 +82,38 @@ class ScheduleBuilder:
         Returns:
             Updated task list.
         """
-        # Placeholder
         return schedule
 
-    @staticmethod
-    def _get_demo_schedule() -> list[dict]:
-        """Generate demo schedule data for display.
+    def to_dataframe(
+        self, schedule: list[dict], start_date: str
+    ) -> pd.DataFrame:
+        """Convert schedule to a pandas DataFrame for table display.
+
+        Args:
+            schedule: List of task dicts.
+            start_date: Project start date (ISO format).
 
         Returns:
-            List of demo task dicts.
+            DataFrame with columns: №, Дейност, Тип, DN, L(м), Екип,
+            Начало, Край, Дни, Критичен.
         """
-        base = datetime(2025, 1, 1)
-        return [
-            {
-                "name": "Проектиране",
-                "category": "Проектиране",
-                "start": base,
-                "end": base + timedelta(days=179),
-                "start_day": 1,
-                "duration": 180,
-                "dn": "-",
-                "length_m": "-",
-                "team": "Проектант",
-            },
-            {
-                "name": "Мобилизация",
-                "category": "Строителство",
-                "start": base + timedelta(days=180),
-                "end": base + timedelta(days=189),
-                "start_day": 181,
-                "duration": 10,
-                "dn": "-",
-                "length_m": "-",
-                "team": "Всички",
-            },
-            {
-                "name": "Водопровод Кл.1",
-                "category": "Водопровод",
-                "start": base + timedelta(days=190),
-                "end": base + timedelta(days=229),
-                "start_day": 191,
-                "duration": 40,
-                "dn": "DN110",
-                "length_m": "520",
-                "team": "Екип 1",
-            },
-            {
-                "name": "Канализация Гл.Кл",
-                "category": "Канализация",
-                "start": base + timedelta(days=200),
-                "end": base + timedelta(days=259),
-                "start_day": 201,
-                "duration": 60,
-                "dn": "DN315",
-                "length_m": "740",
-                "team": "Екип 2",
-            },
-            {
-                "name": "Пътни работи",
-                "category": "Пътни работи",
-                "start": base + timedelta(days=219),
-                "end": base + timedelta(days=279),
-                "start_day": 220,
-                "duration": 61,
-                "dn": "-",
-                "length_m": "-",
-                "team": "Пътна бригада",
-            },
-            {
-                "name": "Авторски надзор",
-                "category": "Авт. надзор",
-                "start": base + timedelta(days=180),
-                "end": base + timedelta(days=279),
-                "start_day": 181,
-                "duration": 100,
-                "dn": "-",
-                "length_m": "-",
-                "team": "Проектант",
-            },
-        ]
+        rows: list[dict[str, Any]] = []
+        for i, task in enumerate(schedule):
+            duration = task.get("duration", 0)
+            end_day = task.get(
+                "end_day",
+                task.get("start_day", 0) + max(duration, 1) - 1,
+            )
+            rows.append({
+                "№": i + 1,
+                "Дейност": task["name"],
+                "Тип": get_type_label(task.get("type", "")),
+                "DN": task.get("diameter", "—"),
+                "L(м)": task.get("length_m", "—"),
+                "Екип": task.get("team", "—"),
+                "Начало": day_to_date(task["start_day"], start_date),
+                "Край": day_to_date(end_day, start_date),
+                "Дни": duration,
+                "Критичен": "🔴" if task.get("is_critical") else "",
+            })
+        return pd.DataFrame(rows)

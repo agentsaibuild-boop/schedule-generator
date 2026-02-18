@@ -19,7 +19,15 @@ from src.ai_processor import AIProcessor
 from src.ai_router import AIRouter
 from src.chat_handler import ChatHandler
 from src.file_manager import FileManager
-from src.gantt_chart import create_gantt_chart
+from src.gantt_chart import (
+    DEFAULT_LAYERS,
+    TYPE_LABELS,
+    create_gantt_chart,
+    create_task_detail_panel,
+    day_to_date,
+    get_schedule_stats,
+    get_type_label,
+)
 from src.knowledge_manager import KnowledgeManager
 from src.schedule_builder import ScheduleBuilder
 from src.self_evolution import SelfEvolution
@@ -71,6 +79,9 @@ if "schedule_data" not in st.session_state:
     builder = ScheduleBuilder()
     st.session_state.schedule_data = builder.build_from_ai_response({})
 
+if "current_schedule" not in st.session_state:
+    st.session_state.current_schedule = st.session_state.schedule_data
+
 if "project_path" not in st.session_state:
     st.session_state.project_path = ""
 
@@ -105,6 +116,15 @@ if "pending_changes" not in st.session_state:
 
 if "evolution_history" not in st.session_state:
     st.session_state.evolution_history = []
+
+if "gantt_layers" not in st.session_state:
+    st.session_state.gantt_layers = DEFAULT_LAYERS.copy()
+
+if "selected_task_id" not in st.session_state:
+    st.session_state.selected_task_id = None
+
+if "project_start_date" not in st.session_state:
+    st.session_state.project_start_date = "2025-04-01"
 
 # ---------------------------------------------------------------------------
 # Initialize managers (cached in session state to survive reruns)
@@ -664,6 +684,7 @@ with chat_col:
         # Update schedule if changed
         if result.get("schedule_updated") and result.get("schedule_data"):
             st.session_state.schedule_data = result["schedule_data"]
+            st.session_state.current_schedule = result["schedule_data"]
 
         # Update usage stats
         st.session_state.usage_stats = router.get_usage_stats()
@@ -674,57 +695,312 @@ with chat_col:
 # RIGHT COLUMN — Visualization
 # ---------------------------------------------------------------------------
 with viz_col:
-    tab_gantt, tab_table, tab_export = st.tabs(
-        ["📊 Gantt диаграма", "📋 Таблица", "💾 Експорт"]
+    st.markdown("### 📊 Визуализация")
+    schedule = st.session_state.get("current_schedule") or []
+
+    # ── Layer toggles (row 1) ─────────────────────────────────────────
+    st.caption("**Слоеве:**")
+    lc1, lc2, lc3, lc4 = st.columns(4)
+    with lc1:
+        ly_crit = st.checkbox(
+            "Критичен път",
+            value=st.session_state.gantt_layers.get("critical_path", True),
+            key="ly_crit",
+        )
+    with lc2:
+        ly_deps = st.checkbox(
+            "Зависимости",
+            value=st.session_state.gantt_layers.get("dependencies", False),
+            key="ly_deps",
+        )
+    with lc3:
+        ly_teams = st.checkbox(
+            "Екипи",
+            value=st.session_state.gantt_layers.get("team_labels", True),
+            key="ly_teams",
+        )
+    with lc4:
+        ly_dur = st.checkbox(
+            "Дни",
+            value=st.session_state.gantt_layers.get("duration_labels", False),
+            key="ly_dur",
+        )
+
+    # ── Layer toggles (row 2) ─────────────────────────────────────────
+    lc5, lc6, lc7, lc8 = st.columns(4)
+    with lc5:
+        ly_phase = st.checkbox(
+            "Фазови линии",
+            value=st.session_state.gantt_layers.get("phase_separators", True),
+            key="ly_phase",
+        )
+    with lc6:
+        ly_today = st.checkbox(
+            "Днес",
+            value=st.session_state.gantt_layers.get("today_line", True),
+            key="ly_today",
+        )
+    with lc7:
+        ly_ms = st.checkbox(
+            "Етапи",
+            value=st.session_state.gantt_layers.get("milestones", True),
+            key="ly_ms",
+        )
+    with lc8:
+        ly_sub = st.checkbox(
+            "Поддейности",
+            value=st.session_state.gantt_layers.get("subtasks", False),
+            key="ly_sub",
+        )
+
+    layers = {
+        "bars": True,
+        "critical_path": ly_crit,
+        "dependencies": ly_deps,
+        "team_labels": ly_teams,
+        "duration_labels": ly_dur,
+        "phase_separators": ly_phase,
+        "today_line": ly_today,
+        "milestones": ly_ms,
+        "subtasks": ly_sub,
+    }
+    st.session_state.gantt_layers = layers
+
+    # ── Filters ───────────────────────────────────────────────────────
+    _phase_labels = {
+        "design": "Проектиране",
+        "construction": "Строителство",
+        "supervision": "Авт. надзор",
+    }
+    all_teams = sorted(
+        {t.get("team", "") for t in schedule
+         if t.get("team") and t.get("team") != "—"}
+    )
+    all_phases = sorted(
+        {t.get("phase", "") for t in schedule if t.get("phase")}
+    )
+    all_types = sorted(
+        {t.get("type", "") for t in schedule if t.get("type")}
     )
 
-    schedule = st.session_state.schedule_data
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    with fc1:
+        _view_opts = {"Месеци": "months", "Седмици": "weeks", "Дни": "days"}
+        view_label = st.selectbox(
+            "Изглед", list(_view_opts.keys()), key="view_sel"
+        )
+        view_mode = _view_opts[view_label]
+    with fc2:
+        phase_display = ["Всички"] + [
+            _phase_labels.get(p, p) for p in all_phases
+        ]
+        phase_sel = st.selectbox("Фаза", phase_display, key="phase_sel")
+        filter_phase = None
+        if phase_sel != "Всички":
+            filter_phase = next(
+                (k for k, v in _phase_labels.items() if v == phase_sel),
+                phase_sel,
+            )
+    with fc3:
+        type_display = ["Всички"] + [
+            get_type_label(t) for t in all_types
+        ]
+        type_sel = st.selectbox("Тип", type_display, key="type_sel")
+        filter_type = None
+        if type_sel != "Всички":
+            filter_type = next(
+                (k for k, v in TYPE_LABELS.items() if v == type_sel),
+                type_sel,
+            )
+    with fc4:
+        team_display = ["Всички"] + all_teams
+        team_sel = st.selectbox("Екип", team_display, key="team_sel")
+        filter_team = team_sel if team_sel != "Всички" else None
 
-    with tab_gantt:
-        if schedule:
-            fig = create_gantt_chart(schedule)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Няма генериран график. Използвайте чата за да създадете един.")
+    # ── Gantt chart ───────────────────────────────────────────────────
+    if schedule:
+        start_date = st.session_state.get("project_start_date", "2025-04-01")
 
-    with tab_table:
-        if schedule:
-            table_data = []
-            for task in schedule:
-                table_data.append({
-                    "Дейност": task["name"],
-                    "DN": task.get("dn", "-"),
-                    "L (м)": task.get("length_m", "-"),
-                    "Екип": task.get("team", "-"),
-                    "Начало": task["start"].strftime("%d.%m.%Y") if hasattr(task.get("start"), "strftime") else str(task.get("start", "-")),
-                    "Край": task["end"].strftime("%d.%m.%Y") if hasattr(task.get("end"), "strftime") else str(task.get("end", "-")),
-                    "Дни": task.get("duration", "-"),
-                })
-            st.dataframe(table_data, use_container_width=True, hide_index=True)
-        else:
-            st.info("Няма данни за показване.")
+        # Auto-disable dependencies for large schedules
+        effective_layers = layers.copy()
+        if len(schedule) > 100:
+            effective_layers["dependencies"] = False
 
-    with tab_export:
-        st.markdown("#### Експорт на графика")
+        fig = create_gantt_chart(
+            schedule,
+            layers=effective_layers,
+            view_mode=view_mode,
+            selected_task_id=st.session_state.get("selected_task_id"),
+            filter_team=filter_team,
+            filter_phase=filter_phase,
+            filter_type=filter_type,
+            project_start_date=start_date,
+        )
 
-        if not schedule:
-            st.info("Първо генерирайте график чрез чата.")
-        else:
-            exp_col1, exp_col2 = st.columns(2)
+        # Render chart (with click event handling)
+        try:
+            event = st.plotly_chart(
+                fig,
+                use_container_width=True,
+                key="gantt_main",
+                on_select="rerun",
+                selection_mode="points",
+            )
+            if (
+                event
+                and hasattr(event, "selection")
+                and event.selection
+                and hasattr(event.selection, "points")
+                and event.selection.points
+            ):
+                p = event.selection.points[0]
+                cdata = (
+                    p.get("customdata")
+                    if isinstance(p, dict)
+                    else getattr(p, "customdata", None)
+                )
+                if cdata and len(cdata) > 0 and cdata[0]:
+                    st.session_state.selected_task_id = cdata[0]
+        except TypeError:
+            # Fallback for older Streamlit without on_select
+            st.plotly_chart(fig, use_container_width=True, key="gantt_main")
 
-            with exp_col1:
-                st.markdown("**PDF (A3 Landscape)**")
+        # ── Tabs ──────────────────────────────────────────────────────
+        tab_table, tab_stats, tab_export, tab_details = st.tabs(
+            ["📋 Таблица", "📊 Статистика", "💾 Експорт", "🔍 Детайли"]
+        )
+
+        with tab_table:
+            # Apply same filters as Gantt
+            filtered = schedule
+            if filter_team:
+                filtered = [
+                    t for t in filtered if t.get("team") == filter_team
+                ]
+            if filter_phase:
+                filtered = [
+                    t for t in filtered if t.get("phase") == filter_phase
+                ]
+            if filter_type:
+                filtered = [
+                    t for t in filtered if t.get("type") == filter_type
+                ]
+
+            if filtered:
+                tbl_builder = ScheduleBuilder()
+                df = tbl_builder.to_dataframe(filtered, start_date)
+
+                def _highlight_critical(row):
+                    if row["Критичен"] == "🔴":
+                        return ["background-color: #FFF0F0"] * len(row)
+                    return [""] * len(row)
+
+                st.dataframe(
+                    df.style.apply(_highlight_critical, axis=1),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(400, len(df) * 35 + 40),
+                )
+            else:
+                st.info("Няма данни за показване с текущите филтри.")
+
+        with tab_stats:
+            stats = get_schedule_stats(schedule)
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            with mc1:
+                st.metric("Дейности", stats["total_tasks"])
+            with mc2:
+                st.metric("Критични", stats["critical_count"])
+            with mc3:
+                st.metric("Общо дни", stats["total_days"])
+            with mc4:
+                st.metric("Екипи", len(stats["teams"]))
+
+            if stats["teams"]:
+                st.caption(f"Екипи: {', '.join(stats['teams'])}")
+
+            if stats["type_breakdown"]:
+                st.markdown("**Разбивка по тип:**")
+                for type_code, bd in stats["type_breakdown"].items():
+                    label = get_type_label(type_code)
+                    st.caption(
+                        f"• {label}: {bd['count']} дейности ({bd['days']}д)"
+                    )
+
+        with tab_export:
+            st.markdown("#### Експорт на графика")
+            exp_c1, exp_c2, exp_c3 = st.columns(3)
+            with exp_c1:
+                st.markdown("**PDF (A3)**")
                 st.caption("Gantt диаграма за печат")
-                if st.button("📄 Свали PDF (A3)", use_container_width=True):
-                    st.warning("PDF експортът ще бъде наличен в следваща версия.")
+                if st.button(
+                    "📄 Свали PDF",
+                    use_container_width=True,
+                    disabled=not schedule,
+                ):
+                    st.warning(
+                        "PDF експортът ще бъде наличен в следваща версия."
+                    )
+            with exp_c2:
+                st.markdown("**MSPDI XML**")
+                st.caption("MS Project формат")
+                if st.button(
+                    "📋 Свали XML",
+                    use_container_width=True,
+                    disabled=not schedule,
+                ):
+                    st.warning(
+                        "XML експортът ще бъде наличен в следваща версия."
+                    )
+            with exp_c3:
+                st.markdown("**JSON**")
+                st.caption("Суровите данни")
+                json_str = json.dumps(
+                    schedule, ensure_ascii=False, indent=2, default=str
+                )
+                st.download_button(
+                    label="📦 Свали JSON",
+                    data=json_str,
+                    file_name="schedule.json",
+                    mime="application/json",
+                    use_container_width=True,
+                )
 
-            with exp_col2:
-                st.markdown("**MSPDI XML (MS Project)**")
-                st.caption("Отваря се директно в MS Project")
-                if st.button("📋 Свали XML (MS Project)", use_container_width=True):
-                    st.warning("XML експортът ще бъде наличен в следваща версия.")
+        with tab_details:
+            sel_id = st.session_state.get("selected_task_id")
+            if sel_id:
+                task_map = {t["id"]: t for t in schedule}
+                sel_task = task_map.get(sel_id)
+                if sel_task:
+                    detail_md = create_task_detail_panel(
+                        sel_task, schedule, start_date
+                    )
+                    st.markdown(detail_md)
 
-    # --- Status bar ---
+                    if st.button("💬 Промени в чата", key="edit_in_chat"):
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": (
+                                f"Избрана дейност **{sel_task['id']}: "
+                                f"{sel_task['name']}** за промяна.\n\n"
+                                f"Опишете каква промяна желаете "
+                                f"(напр. 'Промени продължителността на "
+                                f"{sel_task['name']} на 45 дни')."
+                            ),
+                        })
+                        st.rerun()
+                else:
+                    st.info("Избраната дейност не е намерена в графика.")
+            else:
+                st.info(
+                    "Кликнете върху дейност в графика за да видите детайли."
+                )
+    else:
+        st.info(
+            "Няма генериран график. Използвайте чата за да създадете един."
+        )
+
+    # ── Status bar ────────────────────────────────────────────────────
     st.divider()
     status_cols = st.columns([3, 2, 2])
     with status_cols[0]:
@@ -738,7 +1014,13 @@ with viz_col:
     with status_cols[2]:
         if schedule:
             total_days = max(
-                (t.get("start_day", 0) + t.get("duration", 0) - 1 for t in schedule),
+                (
+                    t.get(
+                        "end_day",
+                        t.get("start_day", 0) + t.get("duration", 0),
+                    )
+                    for t in schedule
+                ),
                 default=0,
             )
             st.caption(f"📅 Общо: {total_days} дни")
