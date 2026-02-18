@@ -28,6 +28,8 @@ from src.gantt_chart import (
     get_schedule_stats,
     get_type_label,
 )
+from src.export_pdf import export_to_pdf
+from src.export_xml import export_to_mspdi_xml
 from src.knowledge_manager import KnowledgeManager
 from src.project_manager import ProjectManager
 from src.schedule_builder import ScheduleBuilder
@@ -1085,41 +1087,126 @@ with viz_col:
 
         with tab_export:
             st.markdown("#### Експорт на графика")
-            exp_c1, exp_c2, exp_c3 = st.columns(3)
-            with exp_c1:
-                st.markdown("**PDF (A3)**")
-                st.caption("Gantt диаграма за печат")
-                if st.button(
-                    "\U0001f4c4 Свали PDF",
-                    use_container_width=True,
-                    disabled=not schedule,
-                ):
-                    st.warning(
-                        "PDF експортът ще бъде наличен в следваща версия."
+            if schedule:
+                project_name = st.session_state.get("project_name", "ВиК Проект")
+                export_start_date = st.session_state.get("project_start_date", "2026-06-01")
+
+                st.caption("**Налични формати:**")
+                exp_c1, exp_c2, exp_c3 = st.columns(3)
+
+                with exp_c1:
+                    st.markdown("**\U0001f4c4 PDF (A3 Gantt)**")
+                    st.caption("За печат и представяне")
+                    show_critical = st.checkbox(
+                        "Критичен път в PDF",
+                        value=True,
+                        key="pdf_critical",
                     )
-            with exp_c2:
-                st.markdown("**MSPDI XML**")
-                st.caption("MS Project формат")
-                if st.button(
-                    "\U0001f4cb Свали XML",
-                    use_container_width=True,
-                    disabled=not schedule,
-                ):
-                    st.warning(
-                        "XML експортът ще бъде наличен в следваща версия."
+                    if st.button(
+                        "Генерирай PDF",
+                        type="primary",
+                        key="btn_pdf",
+                        use_container_width=True,
+                    ):
+                        with st.spinner("Генерирам PDF..."):
+                            try:
+                                pdf_bytes = export_to_pdf(
+                                    schedule,
+                                    project_name,
+                                    start_date=export_start_date,
+                                    show_critical_path=show_critical,
+                                )
+                                if pdf_bytes:
+                                    st.session_state["pdf_ready"] = pdf_bytes
+                                else:
+                                    st.error("PDF генерирането не успя.")
+                            except Exception as e:
+                                st.error(f"Грешка при PDF: {e}")
+
+                    if st.session_state.get("pdf_ready"):
+                        st.download_button(
+                            label="\u2b07\ufe0f Свали PDF",
+                            data=st.session_state["pdf_ready"],
+                            file_name=f"\u0433\u0440\u0430\u0444\u0438\u043a_{project_name}.pdf",
+                            mime="application/pdf",
+                            use_container_width=True,
+                        )
+                        pdf_size = len(st.session_state["pdf_ready"])
+                        st.caption(f"\u2705 {pdf_size:,} bytes")
+
+                with exp_c2:
+                    st.markdown("**\U0001f4cb XML (MS Project)**")
+                    st.caption("За отваряне в MS Project")
+                    st.info(
+                        "MS Project \u2192 File \u2192 Open \u2192 XML Format",
+                        icon="\U0001f4a1",
                     )
-            with exp_c3:
-                st.markdown("**JSON**")
-                st.caption("Суровите данни")
-                json_str = json.dumps(
-                    schedule, ensure_ascii=False, indent=2, default=str
+                    if st.button(
+                        "Генерирай XML",
+                        type="primary",
+                        key="btn_xml",
+                        use_container_width=True,
+                    ):
+                        with st.spinner("Генерирам XML..."):
+                            try:
+                                xml_bytes = export_to_mspdi_xml(
+                                    schedule,
+                                    project_name,
+                                    start_date=export_start_date,
+                                )
+                                if xml_bytes:
+                                    st.session_state["xml_ready"] = xml_bytes
+                                else:
+                                    st.error("XML генерирането не успя.")
+                            except Exception as e:
+                                st.error(f"Грешка при XML: {e}")
+
+                    if st.session_state.get("xml_ready"):
+                        st.download_button(
+                            label="\u2b07\ufe0f Свали XML",
+                            data=st.session_state["xml_ready"],
+                            file_name=f"\u0433\u0440\u0430\u0444\u0438\u043a_{project_name}.xml",
+                            mime="application/xml",
+                            use_container_width=True,
+                        )
+                        xml_size = len(st.session_state["xml_ready"])
+                        st.caption(f"\u2705 {xml_size:,} bytes")
+
+                with exp_c3:
+                    st.markdown("**\U0001f527 JSON (суров)**")
+                    st.caption("За програмна обработка")
+                    from datetime import datetime as _dt_export
+
+                    json_data = json.dumps(
+                        {
+                            "metadata": {
+                                "project_name": project_name,
+                                "start_date": export_start_date,
+                                "total_activities": len(schedule),
+                                "exported": _dt_export.now().isoformat(),
+                            },
+                            "activities": schedule,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    )
+                    st.download_button(
+                        label="\u2b07\ufe0f Свали JSON",
+                        data=json_data.encode("utf-8"),
+                        file_name=f"\u0433\u0440\u0430\u0444\u0438\u043a_{project_name}.json",
+                        mime="application/json",
+                        use_container_width=True,
+                    )
+
+                st.divider()
+                st.caption(
+                    "\U0001f4a1 За .mpp файл: отворете XML в MS Project \u2192 "
+                    "File \u2192 Save As \u2192 .mpp"
                 )
-                st.download_button(
-                    label="\U0001f4e6 Свали JSON",
-                    data=json_str,
-                    file_name="schedule.json",
-                    mime="application/json",
-                    use_container_width=True,
+            else:
+                st.info(
+                    "\U0001f4ca Генерирайте график първо, за да можете да го експортирате."
                 )
 
         with tab_details:

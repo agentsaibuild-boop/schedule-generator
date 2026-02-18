@@ -511,7 +511,7 @@ class ChatHandler:
         }
 
     def _handle_export(self, message: str) -> dict:
-        """Handle export intent."""
+        """Handle export intent — generate requested format and direct to tab."""
         if not self.current_schedule:
             return {
                 "response": (
@@ -531,14 +531,41 @@ class ChatHandler:
             if pid:
                 self.project_mgr.save_progress(pid, {"status": "exported"})
 
+        # Detect requested format
+        msg_lower = message.lower()
+        wants_pdf = any(w in msg_lower for w in ("pdf", "пдф", "печат"))
+        wants_xml = any(w in msg_lower for w in ("xml", "mspdi", "project", "mpp"))
+
+        # Generate export info message
+        if wants_pdf or wants_xml:
+            parts = ["\U0001f4e6 **Графикът е готов за експорт!**\n"]
+
+            if wants_pdf:
+                parts.append(
+                    "\U0001f4c4 **PDF** — Отидете в таб **Експорт** и натиснете "
+                    "**Генерирай PDF**, след което **Свали PDF**."
+                )
+            if wants_xml:
+                parts.append(
+                    "\U0001f4cb **XML** — Отидете в таб **Експорт** и натиснете "
+                    "**Генерирай XML**, след което **Свали XML**.\n"
+                    "\U0001f4a1 За .mpp: Отворете XML в MS Project \u2192 Save As \u2192 .mpp"
+                )
+
+            response = "\n\n".join(parts)
+        else:
+            response = (
+                "\U0001f4e6 **Графикът е готов за експорт!**\n\n"
+                "Налични формати в таб **Експорт**:\n"
+                "- \U0001f4c4 **PDF** — A3 landscape Gantt диаграма за печат\n"
+                "- \U0001f4cb **MSPDI XML** — за отваряне в MS Project\n"
+                "- \U0001f527 **JSON** — суровите данни\n\n"
+                "\U0001f4a1 За .mpp файл: отворете XML в MS Project \u2192 "
+                "File \u2192 Save As \u2192 .mpp"
+            )
+
         return {
-            "response": (
-                "Графикът е готов за експорт.\n\n"
-                "Форматите за експорт са:\n"
-                "- **PDF** (A3 landscape Gantt диаграма)\n"
-                "- **MSPDI XML** (за MS Project)\n\n"
-                "Използвайте таб **Експорт** вдясно."
-            ),
+            "response": response,
             "schedule_updated": False,
             "schedule_data": None,
             "correction_info": None,
