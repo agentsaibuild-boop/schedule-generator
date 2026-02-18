@@ -322,6 +322,32 @@ class AIProcessor:
         return self.router.chat(messages, system_prompt)
 
     # ------------------------------------------------------------------
+    # Text reformatting (DeepSeek text task — cheap, no vision)
+    # ------------------------------------------------------------------
+
+    def reformat_text(self, raw_text: str, source_name: str = "") -> dict:
+        """Reformat partial/messy PDF text via DeepSeek (text-only, no vision).
+
+        Used when fitz extracts some text but it's poorly structured.
+        Much cheaper than OCR — just a text cleanup task.
+
+        Args:
+            raw_text: Raw extracted text from fitz.
+            source_name: Original filename for context.
+
+        Returns:
+            Dict with 'status' and 'text' keys.
+        """
+        if not self.router:
+            return {"status": "error", "error": "AI Router not initialized."}
+
+        if not raw_text or len(raw_text.strip()) < 20:
+            return {"status": "error", "error": "Text too short to reformat."}
+
+        result = self.router.reformat_text(raw_text, source_name)
+        return result
+
+    # ------------------------------------------------------------------
     # OCR (delegates to router, which handles fallback)
     # ------------------------------------------------------------------
 

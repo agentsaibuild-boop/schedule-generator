@@ -440,35 +440,38 @@ class FileManager:
     ) -> dict:
         """Convert a PDF file to structured JSON.
 
-        Step 1: Try text extraction with PyPDF2.
-        Step 2: If avg chars/page < threshold -> treat as scanned.
-        Step 3a: Normal text -> structure as JSON.
-        Step 3b: Scanned + ai_processor -> OCR via vision API.
-        Step 3c: Scanned without ai_processor -> mark as failed_no_api.
+        Strategy (optimized for speed and cost):
+        1. Extract text with PyMuPDF/fitz (best quality, local, free)
+        2. If good text (>=50 avg chars/page) -> use directly
+        3. If partial text (10-49 avg chars/page) -> send to DeepSeek
+           for reformatting (cheap text task, no vision needed)
+        4. If no text (<10 avg chars/page) -> truly scanned -> OCR via
+           DeepSeek vision (last resort, expensive)
         """
-        from PyPDF2 import PdfReader
+        import fitz  # PyMuPDF — much better than PyPDF2
 
-        reader = PdfReader(filepath)
+        doc = fitz.open(filepath)
         pages_text: list[dict] = []
         total_chars = 0
 
-        for i, page in enumerate(reader.pages):
-            text = (page.extract_text() or "").strip()
+        for i, page in enumerate(doc):
+            text = page.get_text().strip()
             total_chars += len(text)
             pages_text.append({"page": i + 1, "text": text})
 
-        num_pages = len(reader.pages) or 1
+        num_pages = len(doc) or 1
         avg_chars = total_chars / num_pages
+        doc.close()
 
         source_name = Path(filepath).name
 
-        # Check if text extraction produced meaningful content
+        # --- GOOD TEXT (>=50 chars/page avg) — use directly ---
         if avg_chars >= _MIN_CHARS_PER_PAGE:
             full_text = "\n\n".join(p["text"] for p in pages_text if p["text"])
             data = {
                 "source_file": source_name,
                 "type": "pdf",
-                "extraction_method": "text",
+                "extraction_method": "fitz_text",
                 "pages": num_pages,
                 "content": pages_text,
                 "full_text": full_text,
@@ -476,12 +479,55 @@ class FileManager:
             return {
                 "status": "ok",
                 "data": data,
-                "method": "text",
-                "detail": f"{num_pages} стр.",
+                "method": "fitz_text",
+                "detail": f"{num_pages} стр., {avg_chars:.0f} симв/стр",
                 "pages_or_rows": num_pages,
             }
 
-        # Scanned PDF — try OCR
+        # --- PARTIAL TEXT (10-49 chars/page) — reformat via DeepSeek ---
+        if avg_chars >= 10:
+            raw_text = "\n\n".join(p["text"] for p in pages_text if p["text"])
+
+            if ai_processor is not None and hasattr(ai_processor, "reformat_text"):
+                try:
+                    reformatted = ai_processor.reformat_text(raw_text, source_name)
+                    if reformatted.get("status") == "ok":
+                        data = {
+                            "source_file": source_name,
+                            "type": "pdf",
+                            "extraction_method": "fitz_reformat",
+                            "pages": num_pages,
+                            "content": pages_text,
+                            "full_text": reformatted["text"],
+                        }
+                        return {
+                            "status": "ok",
+                            "data": data,
+                            "method": "fitz_reformat",
+                            "detail": f"{num_pages} стр., преформатиран (DeepSeek)",
+                            "pages_or_rows": num_pages,
+                        }
+                except Exception as exc:
+                    logger.warning("Reformat failed for %s: %s", source_name, exc)
+
+            # Reformat failed or no API — save raw partial text
+            data = {
+                "source_file": source_name,
+                "type": "pdf",
+                "extraction_method": "fitz_partial",
+                "pages": num_pages,
+                "content": pages_text,
+                "full_text": raw_text,
+            }
+            return {
+                "status": "ok",
+                "data": data,
+                "method": "fitz_partial",
+                "detail": f"{num_pages} стр., частичен текст ({avg_chars:.0f} симв/стр)",
+                "pages_or_rows": num_pages,
+            }
+
+        # --- NO TEXT (<10 chars/page) — truly scanned, try OCR ---
         if ai_processor is not None and hasattr(ai_processor, "ocr_pdf"):
             try:
                 ocr_result = ai_processor.ocr_pdf(filepath)
@@ -490,7 +536,7 @@ class FileManager:
                         "status": "ok",
                         "data": ocr_result["data"],
                         "method": "ocr_vision",
-                        "detail": f"OCR {num_pages} стр.",
+                        "detail": f"OCR {num_pages} стр. (DeepSeek)",
                         "pages_or_rows": num_pages,
                     }
                 else:
@@ -502,11 +548,11 @@ class FileManager:
                 logger.exception("OCR failed for %s", source_name)
                 return {"status": "error", "error": f"OCR error: {exc}"}
 
-        # No API available
+        # No API available — save empty placeholder
         data = {
             "source_file": source_name,
             "type": "pdf",
-            "extraction_method": "failed_no_api",
+            "extraction_method": "no_text",
             "pages": num_pages,
             "content": [],
             "full_text": "",
@@ -514,7 +560,7 @@ class FileManager:
         return {
             "status": "ok",
             "data": data,
-            "method": "failed_no_api",
+            "method": "no_text",
             "detail": f"Сканиран, {num_pages} стр. (нужен API за OCR)",
             "pages_or_rows": num_pages,
         }

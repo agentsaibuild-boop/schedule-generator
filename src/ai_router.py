@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Pricing per token (USD)
 # ---------------------------------------------------------------------------
 PRICING = {
-    "deepseek-chat": {"input": 0.14 / 1_000_000, "output": 0.28 / 1_000_000},
+    "deepseek-chat": {"input": 0.28 / 1_000_000, "output": 0.42 / 1_000_000},  # V3.2, Feb 2026
     "claude-sonnet-4-6": {"input": 3.0 / 1_000_000, "output": 15.0 / 1_000_000},
 }
 
@@ -641,6 +641,62 @@ class AIRouter:
             "remaining_issues": verification.get("issues", []),
             "history": all_issues,
         }
+
+    # ------------------------------------------------------------------
+    # Text reformatting (Worker = DeepSeek, text-only, cheap)
+    # ------------------------------------------------------------------
+
+    def reformat_text(self, raw_text: str, source_name: str = "") -> dict:
+        """Reformat messy PDF text via DeepSeek (text-only, no vision).
+
+        Used when fitz extracts partial text. Much cheaper than OCR.
+
+        Args:
+            raw_text: Raw extracted text from PDF.
+            source_name: Original filename for context.
+
+        Returns:
+            Dict with 'status' and 'text' keys.
+        """
+        system_prompt = (
+            "Ти си асистент за преформатиране на текст от PDF документи "
+            "за ВиК (водоснабдяване и канализация) проекти на български.\n\n"
+            "Правила:\n"
+            "- Оправи структурата: заглавия, параграфи, таблици\n"
+            "- Запази ТОЧНО числата, мерните единици (м, м², DN, бр.)\n"
+            "- Не добавяй информация — само преформатирай\n"
+            "- Ако има таблици, подреди ги с | разделители\n"
+            "- Отговори САМО с преформатирания текст"
+        )
+
+        context = f" от файл '{source_name}'" if source_name else ""
+        user_msg = (
+            f"Преформатирай следния текст{context}. "
+            "Запази цялата информация, оправи структурата:\n\n"
+            f"{raw_text[:8000]}"  # Limit to ~8K chars to save tokens
+        )
+
+        messages = [{"role": "user", "content": user_msg}]
+
+        # DeepSeek only — this is a cheap text task
+        if self.deepseek_available:
+            try:
+                result = self._chat_deepseek(messages, system_prompt)
+                return {"status": "ok", "text": result["content"]}
+            except Exception as exc:
+                logger.warning("DeepSeek reformat failed: %s", exc)
+
+        # Fallback to Anthropic if DeepSeek is down
+        if self.anthropic_available:
+            try:
+                result = self._chat_anthropic(
+                    messages, system_prompt, is_fallback=True
+                )
+                return {"status": "ok", "text": result["content"]}
+            except Exception as exc:
+                logger.warning("Anthropic reformat fallback failed: %s", exc)
+
+        return {"status": "error", "error": "AI models unavailable for reformatting."}
 
     # ------------------------------------------------------------------
     # OCR (Worker = DeepSeek vision, fallback = Anthropic vision)

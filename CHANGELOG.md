@@ -3,6 +3,21 @@
 Всички значими промени по проекта са документирани тук.
 Форматът следва [Keep a Changelog](https://keepachangelog.com/bg/1.0.0/).
 
+## [0.7.1] — 2026-02-18
+
+### Подобрено
+- PDF конвертиране: PyMuPDF/fitz вместо PyPDF2 — значително по-добро извличане на текст
+- 3-степенна стратегия за PDF: GOOD (fitz директно) → PARTIAL (DeepSeek reformat) → SCANNED (DeepSeek OCR)
+- Тест с Герман (31 PDF): 27 GOOD, 1 PARTIAL, 3 SCANNED — 0 API извиквания за 90% от файловете
+
+### Добавено
+- `AIProcessor.reformat_text()` — преформатиране на частичен текст чрез DeepSeek (евтино, text-only)
+- `AIRouter.reformat_text()` — DeepSeek-first с Anthropic fallback за текстови задачи
+
+### Поправено
+- DeepSeek V3.2 pricing: $0.28/$0.42 per 1M tokens (актуализирано от старите цени)
+- PDF конвертирането вече не задейства скъп OCR за файлове с добър текст
+
 ## [0.7.0] — 2026-02-18
 
 ### Добавено
