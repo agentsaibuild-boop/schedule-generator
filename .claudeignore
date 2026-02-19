@@ -1,0 +1,21 @@
+# Бинарни файлове
+fonts/
+
+# Runtime данни (генерират се автоматично)
+converted/
+config/cumulative_usage.json
+config/projects_history.json
+knowledge/evolution_log.json
+
+# Тестови резултати
+tests/output/
+
+# Голяма knowledge база (използва се от app-а, не от разработката)
+knowledge/lessons/
+knowledge/methodologies/
+knowledge/skills/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
