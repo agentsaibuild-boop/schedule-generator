@@ -21,6 +21,12 @@ output/
 # Installer tools
 tools/python-installer.exe
 
+# Runtime data (user-specific, not shared)
+config/cumulative_usage.json
+
+# Test artifacts
+tests/e2e/screenshots/
+
 # Note: config/projects_history.json is NOT ignored — it's needed for persistence
 # Note: These files ARE tracked (needed for installer):
 #   install.bat, start.bat, update.bat

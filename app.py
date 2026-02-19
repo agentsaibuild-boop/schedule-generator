@@ -275,18 +275,30 @@ if not st.session_state.recent_projects and st.session_state.welcome_shown is Fa
 
 
 def _save_chat_history() -> None:
-    """Persist last 10 message pairs (20 entries) to project history."""
+    """Persist last 10 message pairs (20 entries) to project history.
+
+    Only saves messages that contain actual user interaction (user+assistant pairs).
+    Skips system-generated welcome/status messages to prevent duplication on reload.
+    """
     proj = st.session_state.get("current_project")
     if not proj:
         return
     pid = proj.get("id")
     if not pid:
         return
-    # Combine restored + current messages for full context
-    all_msgs = list(st.session_state.get("restored_history", []))
-    all_msgs.extend(st.session_state.get("messages", []))
+    # Only save messages from actual chat interactions (not welcome/status).
+    # A valid conversation starts with a user message.
+    all_msgs = list(st.session_state.get("messages", []))
+    # Filter: keep only messages that are part of user-initiated exchanges
+    filtered: list[dict] = []
+    seen_user = False
+    for msg in all_msgs:
+        if msg.get("role") == "user":
+            seen_user = True
+        if seen_user:
+            filtered.append(msg)
     # Keep last 20 entries (≈10 pairs)
-    trimmed = all_msgs[-20:]
+    trimmed = filtered[-20:]
     project_mgr.save_progress(pid, {"chat_history": trimmed})
 
 
@@ -341,7 +353,9 @@ def _load_project_by_path(path: str) -> None:
         if project.get("status") == "new":
             project_mgr.save_progress(project["id"], {"status": "analyzed"})
 
-    # Generate welcome message
+    # Generate welcome/status message (only if NOT auto-restoring from saved history)
+    # When restoring from saved history, the old messages are shown in the expander,
+    # so we only show a brief status — not a full welcome that would get duplicated.
     project = project_mgr.load_project(project["id"])
     if project:
         welcome = project_mgr.get_welcome_message(project)
@@ -360,10 +374,13 @@ def _load_project_by_path(path: str) -> None:
     elif info["converted_count"] > 0 and not last_schedule:
         msg_parts.append("\nВсички файлове са конвертирани и готови за анализ.")
 
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": "\n".join(msg_parts),
-    })
+    # Only append to messages if this is a fresh load (not auto-restore on refresh).
+    # For auto-restore, the welcome_shown flag is set by the main welcome block.
+    if not saved_history:
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": "\n".join(msg_parts),
+        })
 
     # Refresh recent projects list
     st.session_state.recent_projects = project_mgr.get_recent_projects(5)
@@ -487,12 +504,9 @@ if not st.session_state.project_loaded:
             st.session_state.current_schedule = _parsed
             st.session_state.schedule_data = _parsed
             chat_handler.current_schedule = _parsed
-        # Restore chat history (also handled in _load_project_by_path,
-        # but ensure consistency after page refresh)
-        _saved_chat = _last_active.get("progress", {}).get("chat_history", [])
-        if _saved_chat:
-            st.session_state.restored_history = _saved_chat
-            chat_handler.restore_history(_saved_chat)
+        # Note: chat history restore is already handled in _load_project_by_path
+        # Mark welcome as shown to prevent duplicate welcome message on refresh
+        st.session_state.welcome_shown = True
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +651,7 @@ with st.sidebar:
         project_path_input = st.text_input(
             "Път до проектна папка",
             value=st.session_state.project_path,
-            placeholder=r"D:\Projects\Горица",
+            placeholder=r"D:\Проекти\Име на проект",
             help="Пълен път до папката с тендерна документация",
             label_visibility="collapsed",
         )
@@ -646,26 +660,36 @@ with st.sidebar:
             ps_script = (
                 "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
                 "Add-Type -AssemblyName System.Windows.Forms; "
+                "[System.Windows.Forms.Application]::EnableVisualStyles(); "
                 "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
-                "$f.Description = 'Izberi proektna papka'; "
+                "$f.Description = 'Изберете проектна папка'; "
                 "$f.ShowNewFolderButton = $false; "
+                "$f.RootFolder = [System.Environment+SpecialFolder]::MyComputer; "
                 "$owner = New-Object System.Windows.Forms.Form; "
                 "$owner.TopMost = $true; "
+                "$owner.StartPosition = 'CenterScreen'; "
                 "$result = $f.ShowDialog($owner); "
                 "$owner.Dispose(); "
                 "if ($result -eq 'OK') { $f.SelectedPath }"
             )
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_script],
-                capture_output=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=120,
-            )
-            chosen = result.stdout.strip()
-            if chosen:
-                st.session_state.project_path = chosen
-                st.rerun()
+            try:
+                result = subprocess.run(
+                    ["powershell", "-STA", "-NoProfile", "-Command", ps_script],
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=120,
+                )
+                chosen = result.stdout.strip()
+                if chosen:
+                    st.session_state.project_path = chosen
+                    st.rerun()
+                elif result.returncode != 0:
+                    st.warning("Диалогът не можа да се отвори. Въведете пътя ръчно.")
+            except subprocess.TimeoutExpired:
+                st.warning("Диалогът изтече. Въведете пътя ръчно.")
+            except Exception as exc:
+                st.warning(f"Грешка при отваряне на диалог: {exc}")
 
     # --- Load project button ---
     if st.button("Зареди проект", use_container_width=True):

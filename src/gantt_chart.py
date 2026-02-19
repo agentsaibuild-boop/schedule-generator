@@ -397,8 +397,8 @@ def create_gantt_chart(
         dtick = _MS_PER_DAY
 
     fig.update_layout(
-        height=max(400, len(display) * 28 + 120),
-        margin=dict(l=250, r=50, t=60, b=80),
+        height=max(400, len(display) * 30 + 120),
+        margin=dict(l=420, r=50, t=60, b=80),
         xaxis=dict(
             title="",
             type="date",
@@ -409,7 +409,7 @@ def create_gantt_chart(
         ),
         yaxis=dict(
             autorange="reversed",
-            tickfont=dict(size=10),
+            tickfont=dict(size=11),
             categoryorder="array",
             categoryarray=y_labels,
         ),
@@ -660,6 +660,9 @@ def get_schedule_stats(schedule_data: list[dict]) -> dict[str, Any]:
 def generate_demo_schedule() -> list[dict]:
     """Generate a realistic engineering project demo schedule (~35 tasks).
 
+    Uses КСС-style naming with real street names, DN diameters, and
+    О.Т. (осови точки) references matching Bulgarian tender conventions.
+
     Covers: Design → Mobilization → Protocol obr.2 → Water (3 branches) →
     Sewage (2 collectors) → KPS → Road works (3 zones) → Electrical →
     Completion → Act obr.15, plus Supervision.
@@ -684,11 +687,11 @@ def generate_demo_schedule() -> list[dict]:
         "dependencies": [],
         "is_critical": True,
         "sub_activities": [
-            {"id": "П01", "name": "Геодезия", "type": "design",
+            {"id": "П01", "name": "Геодезия и трасиране", "type": "design",
              "start_day": 1, "end_day": 40, "duration": 40, "parent_id": "П00"},
             {"id": "П02", "name": "ИГ проучвания", "type": "design",
              "start_day": 20, "end_day": 80, "duration": 61, "parent_id": "П00"},
-            {"id": "П03", "name": "Работни проекти", "type": "design",
+            {"id": "П03", "name": "Работни проекти ВиК", "type": "design",
              "start_day": 70, "end_day": 200, "duration": 131, "parent_id": "П00"},
             {"id": "П04", "name": "ВОБД и съгласуване", "type": "design",
              "start_day": 190, "end_day": 240, "duration": 51, "parent_id": "П00"},
@@ -702,7 +705,7 @@ def generate_demo_schedule() -> list[dict]:
     # =====================================================================
     tasks.append({
         "id": "М01",
-        "name": "Мобилизация",
+        "name": "Мобилизация на техника и персонал",
         "type": "mobilization",
         "phase": "construction",
         "start_day": 261,
@@ -719,24 +722,24 @@ def generate_demo_schedule() -> list[dict]:
     # =====================================================================
     tasks.append({
         "id": "МС01",
-        "name": "Протокол обр.2",
+        "name": "Протокол обр.2 — Откриване строителна площадка",
         "type": "completion",
         "phase": "construction",
         "start_day": 271,
         "end_day": 271,
         "duration": 0,
-        "team": "—",
+        "team": "\u2014",
         "parent_id": None,
         "dependencies": ["М01"],
         "is_critical": True,
     })
 
     # =====================================================================
-    # WATER SUPPLY — 3 parallel branches
+    # WATER SUPPLY — 3 parallel branches (КСС naming)
     # =====================================================================
     tasks.append({
         "id": "В01",
-        "name": "Ф225 Главен водопровод",
+        "name": "Кл.1 Водопровод PE-HD Ф225 ул. Ал. Стамболийски (О.Т.45\u2013О.Т.62)",
         "type": "water_pipe",
         "phase": "construction",
         "start_day": 271,
@@ -749,24 +752,24 @@ def generate_demo_schedule() -> list[dict]:
         "dependencies": ["МС01"],
         "is_critical": False,
         "sub_activities": [
-            {"id": "В01.1", "name": "Изкопи", "type": "water_pipe",
+            {"id": "В01.1", "name": "Изкопи и укрепване", "type": "water_pipe",
              "start_day": 271, "end_day": 298, "duration": 28, "parent_id": "В01"},
-            {"id": "В01.2", "name": "Полагане тръби", "type": "water_pipe",
+            {"id": "В01.2", "name": "Полагане PE-HD Ф225", "type": "water_pipe",
              "start_day": 296, "end_day": 328, "duration": 33, "parent_id": "В01"},
-            {"id": "В01.3", "name": "Засипка", "type": "water_pipe",
+            {"id": "В01.3", "name": "Засипка и уплътняване", "type": "water_pipe",
              "start_day": 326, "end_day": 342, "duration": 17, "parent_id": "В01"},
-            {"id": "В01.4", "name": "Изпитване", "type": "water_pipe",
+            {"id": "В01.4", "name": "Изпитване на водоплътност", "type": "water_pipe",
              "start_day": 343, "end_day": 346, "duration": 4, "parent_id": "В01"},
-            {"id": "В01.5", "name": "Дезинфекция", "type": "water_pipe",
+            {"id": "В01.5", "name": "Дезинфекция и промиване", "type": "water_pipe",
              "start_day": 347, "end_day": 351, "duration": 5, "parent_id": "В01"},
-            {"id": "В01.6", "name": "Почистване", "type": "water_pipe",
+            {"id": "В01.6", "name": "Почистване и СВО", "type": "water_pipe",
              "start_day": 352, "end_day": 355, "duration": 4, "parent_id": "В01"},
         ],
     })
 
     tasks.append({
         "id": "В02",
-        "name": "Ф110 Клон 2",
+        "name": "Кл.2 Водопровод PE-HD Ф110 ул. Хр. Ботев (О.Т.62\u2013О.Т.78)",
         "type": "water_pipe",
         "phase": "construction",
         "start_day": 271,
@@ -779,20 +782,20 @@ def generate_demo_schedule() -> list[dict]:
         "dependencies": ["МС01"],
         "is_critical": False,
         "sub_activities": [
-            {"id": "В02.1", "name": "Изкопи", "type": "water_pipe",
+            {"id": "В02.1", "name": "Изкопи и укрепване", "type": "water_pipe",
              "start_day": 271, "end_day": 293, "duration": 23, "parent_id": "В02"},
-            {"id": "В02.2", "name": "Полагане тръби", "type": "water_pipe",
+            {"id": "В02.2", "name": "Полагане PE-HD Ф110", "type": "water_pipe",
              "start_day": 291, "end_day": 312, "duration": 22, "parent_id": "В02"},
-            {"id": "В02.3", "name": "Засипка", "type": "water_pipe",
+            {"id": "В02.3", "name": "Засипка и уплътняване", "type": "water_pipe",
              "start_day": 310, "end_day": 317, "duration": 8, "parent_id": "В02"},
-            {"id": "В02.4", "name": "Дезинфекция", "type": "water_pipe",
+            {"id": "В02.4", "name": "Дезинфекция и промиване", "type": "water_pipe",
              "start_day": 318, "end_day": 320, "duration": 3, "parent_id": "В02"},
         ],
     })
 
     tasks.append({
         "id": "В03",
-        "name": "Ф90 Клон 3",
+        "name": "Кл.3 Водопровод PE-HD Ф90 ул. В. Левски (О.Т.78\u2013О.Т.95)",
         "type": "water_pipe",
         "phase": "construction",
         "start_day": 271,
@@ -805,23 +808,23 @@ def generate_demo_schedule() -> list[dict]:
         "dependencies": ["МС01"],
         "is_critical": False,
         "sub_activities": [
-            {"id": "В03.1", "name": "Изкопи", "type": "water_pipe",
+            {"id": "В03.1", "name": "Изкопи и укрепване", "type": "water_pipe",
              "start_day": 271, "end_day": 288, "duration": 18, "parent_id": "В03"},
-            {"id": "В03.2", "name": "Полагане тръби", "type": "water_pipe",
+            {"id": "В03.2", "name": "Полагане PE-HD Ф90", "type": "water_pipe",
              "start_day": 286, "end_day": 298, "duration": 13, "parent_id": "В03"},
-            {"id": "В03.3", "name": "Засипка", "type": "water_pipe",
+            {"id": "В03.3", "name": "Засипка и уплътняване", "type": "water_pipe",
              "start_day": 297, "end_day": 301, "duration": 5, "parent_id": "В03"},
-            {"id": "В03.4", "name": "Дезинфекция", "type": "water_pipe",
+            {"id": "В03.4", "name": "Дезинфекция и промиване", "type": "water_pipe",
              "start_day": 302, "end_day": 304, "duration": 3, "parent_id": "В03"},
         ],
     })
 
     # =====================================================================
-    # SEWAGE — 2 collectors (sequential, bottom-up)
+    # SEWAGE — 2 collectors (sequential, bottom-up) (КСС naming)
     # =====================================================================
     tasks.append({
         "id": "К01",
-        "name": "DN400 Главен колектор",
+        "name": "Главен колектор I DN400 PVC ул. Ал. Стамболийски (РШ1\u2013РШ15)",
         "type": "sewer",
         "phase": "construction",
         "start_day": 271,
@@ -834,18 +837,18 @@ def generate_demo_schedule() -> list[dict]:
         "dependencies": ["МС01"],
         "is_critical": True,
         "sub_activities": [
-            {"id": "К01.1", "name": "Подготовка", "type": "sewer",
+            {"id": "К01.1", "name": "Подготовка и разкъртване", "type": "sewer",
              "start_day": 271, "end_day": 290, "duration": 20, "parent_id": "К01"},
-            {"id": "К01.2", "name": "Монтаж канал", "type": "sewer",
+            {"id": "К01.2", "name": "Монтаж DN400 PVC + РШ", "type": "sewer",
              "start_day": 288, "end_day": 535, "duration": 248, "parent_id": "К01"},
-            {"id": "К01.3", "name": "Засипка и изпитване", "type": "sewer",
+            {"id": "К01.3", "name": "Засипка и изпитване канал", "type": "sewer",
              "start_day": 533, "end_day": 560, "duration": 28, "parent_id": "К01"},
         ],
     })
 
     tasks.append({
         "id": "К02",
-        "name": "DN315 Вторичен колектор",
+        "name": "Вторичен колектор DN315 PVC ул. Хр. Ботев (РШ15\u2013РШ22)",
         "type": "sewer",
         "phase": "construction",
         "start_day": 561,
@@ -858,11 +861,11 @@ def generate_demo_schedule() -> list[dict]:
         "dependencies": ["К01"],
         "is_critical": False,
         "sub_activities": [
-            {"id": "К02.1", "name": "Подготовка", "type": "sewer",
+            {"id": "К02.1", "name": "Подготовка и разкъртване", "type": "sewer",
              "start_day": 561, "end_day": 572, "duration": 12, "parent_id": "К02"},
-            {"id": "К02.2", "name": "Монтаж канал", "type": "sewer",
+            {"id": "К02.2", "name": "Монтаж DN315 PVC + РШ", "type": "sewer",
              "start_day": 570, "end_day": 628, "duration": 59, "parent_id": "К02"},
-            {"id": "К02.3", "name": "Засипка и изпитване", "type": "sewer",
+            {"id": "К02.3", "name": "Засипка и изпитване канал", "type": "sewer",
              "start_day": 626, "end_day": 640, "duration": 15, "parent_id": "К02"},
         ],
     })
@@ -872,7 +875,7 @@ def generate_demo_schedule() -> list[dict]:
     # =====================================================================
     tasks.append({
         "id": "КПС01",
-        "name": "КПС с тласкател",
+        "name": "КПС + Тласкател DN110 PE-HD (до ПСОВ)",
         "type": "kps",
         "phase": "construction",
         "start_day": 561,
@@ -885,11 +888,11 @@ def generate_demo_schedule() -> list[dict]:
     })
 
     # =====================================================================
-    # ROAD WORKS — 3 zones (Rolling Wave with LAG)
+    # ROAD WORKS — 3 zones (Rolling Wave with LAG) (КСС naming)
     # =====================================================================
     tasks.append({
         "id": "Р01",
-        "name": "Пътни работи зона 1",
+        "name": "Възстановяване настилки ул. Ал. Стамболийски",
         "type": "road",
         "phase": "construction",
         "start_day": 375,
@@ -903,7 +906,7 @@ def generate_demo_schedule() -> list[dict]:
 
     tasks.append({
         "id": "Р02",
-        "name": "Пътни работи зона 2",
+        "name": "Възстановяване настилки ул. Хр. Ботев",
         "type": "road",
         "phase": "construction",
         "start_day": 650,
@@ -917,7 +920,7 @@ def generate_demo_schedule() -> list[dict]:
 
     tasks.append({
         "id": "Р03",
-        "name": "Пътни работи зона 3",
+        "name": "Възстановяване настилки ул. В. Левски",
         "type": "road",
         "phase": "construction",
         "start_day": 681,
@@ -934,7 +937,7 @@ def generate_demo_schedule() -> list[dict]:
     # =====================================================================
     tasks.append({
         "id": "Е01",
-        "name": "ЕЛ/ТТ кабели",
+        "name": "Преместване ЕЛ/ТТ кабели (ул. Ал. Стамболийски)",
         "type": "electrical",
         "phase": "construction",
         "start_day": 380,
@@ -951,7 +954,7 @@ def generate_demo_schedule() -> list[dict]:
     # =====================================================================
     tasks.append({
         "id": "З01",
-        "name": "Пусково-наладъчни работи",
+        "name": "Пусково-наладъчни работи и 72ч проби",
         "type": "completion",
         "phase": "construction",
         "start_day": 741,
@@ -968,13 +971,13 @@ def generate_demo_schedule() -> list[dict]:
     # =====================================================================
     tasks.append({
         "id": "МС02",
-        "name": "Констативен акт обр.15",
+        "name": "Констативен акт обр.15 — Годност за приемане",
         "type": "completion",
         "phase": "construction",
         "start_day": 780,
         "end_day": 780,
         "duration": 0,
-        "team": "—",
+        "team": "\u2014",
         "parent_id": None,
         "dependencies": ["З01"],
         "is_critical": True,

@@ -3,6 +3,29 @@
 Всички значими промени по проекта са документирани тук.
 Форматът следва [Keep a Changelog](https://keepachangelog.com/bg/1.0.0/).
 
+## [0.9.0] — 2026-02-19
+
+### Добавено
+- **Playwright E2E тестове**: 23 теста в 6 файла, 100% pass rate (2 последователни рунда)
+  - test_page_load (3), test_sidebar (8), test_chat (3), test_visualization (4), test_export (3), test_project_flow (2)
+- **UI Wireframe**: `docs/UI_WIREFRAME.md` — ASCII wireframe + пълен регистър на 40+ UI елемента
+- **Pre-commit hook**: автоматично стартира всички тестове преди commit
+- **Screenshot на failure**: автоматично capture при fail на E2E тест за бързо дебъгване
+- `conftest.py`: Streamlit server fixture (port 8502, .env управление, spinner wait до 60с)
+- `pytest.ini`, `install-hooks.bat`, `hooks/pre-commit`
+
+### Подобрено
+- Gantt chart: по-широк ляв margin (420px) за дълги КСС имена на задачи
+- Gantt chart: по-голям шрифт за labels (11px)
+- Демо график: КСС-style naming с реални улици, DN, О.Т. (осови точки)
+- Browse бутон: `-STA` flag за PowerShell + error handling
+
+### Поправено
+- **Дублирана чат история**: 3 бъга причиняваха натрупване на welcome съобщения
+  - Премахнат double restore, пренаписана `_save_chat_history()`, skip status при auto-restore
+- Премахнати "Горица" placeholder референции (заменени с generic текст)
+- `projects_history.json` изчистен от корумпирана чат история
+
 ## [0.8.0] — 2026-02-18
 
 ### Добавено

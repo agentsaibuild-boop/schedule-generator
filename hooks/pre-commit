@@ -1,0 +1,37 @@
+#!/bin/bash
+# Pre-commit hook: Run unit tests + E2E tests before allowing commit
+# Install with: ./install-hooks.bat (Windows) or cp hooks/pre-commit .git/hooks/pre-commit
+
+set -e
+
+echo "============================================"
+echo "  Pre-commit: Running tests..."
+echo "============================================"
+
+# Change to repo root
+cd "$(git rev-parse --show-toplevel)"
+
+# --- Step 1: Run existing unit/integration tests ---
+echo ""
+echo "[1/2] Running unit tests (test_exports.py)..."
+python -m pytest tests/test_exports.py -v --tb=short --no-header -q
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "UNIT TESTS FAILED. Commit aborted."
+    exit 1
+fi
+
+# --- Step 2: Run Playwright E2E tests ---
+echo ""
+echo "[2/2] Running E2E tests (Playwright)..."
+python -m pytest tests/e2e/ -v --tb=short --no-header -q
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "E2E TESTS FAILED. Commit aborted."
+    exit 1
+fi
+
+echo ""
+echo "============================================"
+echo "  All tests passed! Proceeding with commit."
+echo "============================================"
