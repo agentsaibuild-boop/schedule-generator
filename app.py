@@ -1023,16 +1023,25 @@ with chat_col:
         st.session_state.stop_requested = False
         router.stop_requested = False
 
-        # Process through ChatHandler (real AI)
-        with st.spinner("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0432\u0430\u043c..."):
-            result = chat_handler.process_message(
-                user_input,
-                project_loaded=st.session_state.project_loaded,
-                conversion_done=st.session_state.conversion_done,
-                project_context=project_context,
-                pending_changes=st.session_state.pending_changes,
-                recent_projects=st.session_state.recent_projects,
-            )
+        # Process through ChatHandler with live progress bar
+        _prog_bar = st.progress(0, text="Обработвам...")
+        _prog_text = st.empty()
+
+        def _on_progress(pct: float, text: str) -> None:
+            _prog_bar.progress(min(int(pct * 100), 100), text=text)
+
+        result = chat_handler.process_message(
+            user_input,
+            project_loaded=st.session_state.project_loaded,
+            conversion_done=st.session_state.conversion_done,
+            project_context=project_context,
+            pending_changes=st.session_state.pending_changes,
+            recent_projects=st.session_state.recent_projects,
+            progress_callback=_on_progress,
+        )
+
+        _prog_bar.empty()
+        _prog_text.empty()
 
         # Clear processing flag
         st.session_state.processing = False
@@ -1047,6 +1056,20 @@ with chat_col:
                     "content": result["response"] + "\n\n\u23f9 _\u041e\u043f\u0435\u0440\u0430\u0446\u0438\u044f\u0442\u0430 \u0435 \u0441\u043f\u0440\u044f\u043d\u0430._",
                 })
             st.rerun()
+
+        # Handle close project from chat
+        if result.get("close_project"):
+            _save_chat_history()
+            st.session_state.project_loaded = False
+            st.session_state.current_project = None
+            st.session_state.project_path = ""
+            st.session_state.project_info = {}
+            st.session_state.conversion_done = False
+            st.session_state.restored_history = []
+            st.session_state.welcome_shown = False
+            st.session_state.recent_projects = project_mgr.get_recent_projects(5)
+            chat_handler.clear_history()
+            project_mgr.clear_last_active()
 
         # Handle project loading from chat
         if result.get("load_project_path"):

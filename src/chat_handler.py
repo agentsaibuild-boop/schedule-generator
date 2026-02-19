@@ -23,7 +23,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 INTENT_KEYWORDS: dict[str, list[str]] = {
-    "load_project": ["зареди", "папка", "проект", "път", "директория", "отвори"],
+    "load_project": ["зареди", "папка", "проект", "път", "директория", "отвори",
+                     "затвори", "закрий"],
     "generate_schedule": [
         "генерирай", "график", "създай", "направи", "gantt",
         "линеен", "графика", "нов график",
@@ -86,6 +87,7 @@ class ChatHandler:
         project_context: dict | None = None,
         pending_changes: dict | None = None,
         recent_projects: list[dict] | None = None,
+        progress_callback: Any | None = None,
     ) -> dict:
         """Process a user message and return a structured response.
 
@@ -96,6 +98,8 @@ class ChatHandler:
             project_context: Optional dict with current project info.
             pending_changes: Pending self-evolution changes awaiting confirmation.
             recent_projects: List of recent projects for number selection.
+            progress_callback: Optional callable(pct: float, text: str) for
+                progress updates (0.0–1.0).
 
         Returns:
             Dict with response, schedule_updated, schedule_data,
@@ -103,6 +107,7 @@ class ChatHandler:
             evolution_pending / evolution_applied / evolution_cleared /
             load_project_path / load_project_id.
         """
+        self._progress = progress_callback or (lambda pct, txt: None)
         # Check if there are pending evolution changes waiting for confirmation
         if pending_changes:
             return self._handle_confirm_change(user_message, pending_changes)
@@ -120,6 +125,7 @@ class ChatHandler:
         self.history.append({"role": "user", "content": user_message})
 
         intent = self._detect_intent(user_message)
+        self._progress(0.05, "Разпознаване на заявката...")
 
         try:
             result = self._handle_intent(
@@ -136,6 +142,7 @@ class ChatHandler:
                 "model_used": "none",
             }
 
+        self._progress(1.0, "Готово!")
         self.history.append({"role": "assistant", "content": result["response"]})
 
         # Track message in project manager
@@ -239,36 +246,85 @@ class ChatHandler:
     def _handle_load_project(self, message: str) -> dict:
         """Handle project loading intent.
 
-        Tries to extract a path from the message for direct loading.
+        Tries to extract a path from the message, or match a project by name.
+        Also handles close/switch project commands.
         """
-        # Try to extract path from the message
-        import re
-        path_match = re.search(r'[A-Za-z]:\\[^\s"\']+|/[^\s"\']+', message)
-        if path_match:
-            path = path_match.group(0)
-            return {
-                "response": f"Зареждам проект от **{path}**...",
-                "schedule_updated": False,
-                "schedule_data": None,
-                "correction_info": None,
-                "intent": "load_project",
-                "model_used": "none",
-                "load_project_path": path,
-            }
-
-        return {
-            "response": (
-                "Моля, въведете пътя до проектната папка.\n\n"
-                "Примери:\n"
-                "- `Зареди D:\\Projects\\Горица`\n"
-                "- Или изберете папка от бутона 📂 в страничната лента."
-            ),
+        base = {
             "schedule_updated": False,
             "schedule_data": None,
             "correction_info": None,
             "intent": "load_project",
             "model_used": "none",
         }
+
+        msg_lower = message.lower()
+
+        # 0) Handle close/switch project
+        if any(w in msg_lower for w in ("затвори", "закрий")):
+            return {**base, "response":
+                    "За да затворите текущия проект, натиснете "
+                    "**Смени проект** в страничната лента.",
+                    "close_project": True}
+
+        # 1) Try full file path
+        import re
+        path_match = re.search(r'[A-Za-z]:\\[^\s"\']+|/[^\s"\']+', message)
+        if path_match:
+            path = path_match.group(0)
+            return {**base, "response": f"Зареждам проект от **{path}**...",
+                    "load_project_path": path}
+
+        # 2) Try to find project by name in recent projects
+        if self.project_mgr:
+            recent = self.project_mgr.get_recent_projects(10)
+            if recent:
+                # Strip known command words to isolate the project name
+                msg_lower = message.lower()
+                for word in ("зареди", "отвори", "проект", "папка", "път",
+                             "директория", "смени", "на"):
+                    msg_lower = msg_lower.replace(word, "")
+                query = msg_lower.strip()
+
+                if query:
+                    # Exact name match first, then substring
+                    for proj in recent:
+                        name = proj.get("name", "").lower()
+                        if name == query:
+                            if not proj.get("exists", True):
+                                return {**base, "response":
+                                        f"Папката за **{proj['name']}** не съществува."}
+                            return {**base,
+                                    "response": f"Зареждам проект **{proj['name']}**...",
+                                    "load_project_path": proj["path"]}
+
+                    for proj in recent:
+                        name = proj.get("name", "").lower()
+                        if query in name or name in query:
+                            if not proj.get("exists", True):
+                                return {**base, "response":
+                                        f"Папката за **{proj['name']}** не съществува."}
+                            return {**base,
+                                    "response": f"Зареждам проект **{proj['name']}**...",
+                                    "load_project_path": proj["path"]}
+
+                # Show available projects (no match, or empty query = "смени проект")
+                names = ", ".join(f"**{p['name']}**" for p in recent[:5]
+                                 if p.get("exists", True))
+                if query:
+                    msg = f"Не намерих проект с това име."
+                else:
+                    msg = "Кой проект да заредя?"
+                return {**base, "response":
+                        f"{msg}\n\nНалични проекти: {names}\n\n"
+                        "Напишете името или пълен път: `Зареди D:\\Projects\\Горица`"}
+
+        return {**base, "response": (
+            "Моля, въведете пътя до проектната папка.\n\n"
+            "Примери:\n"
+            "- `Зареди D:\\Projects\\Горица`\n"
+            "- `Отвори проект герман`\n"
+            "- Или изберете папка от бутона 📂 в страничната лента."
+        )}
 
     def _handle_generate_schedule(
         self,
@@ -354,6 +410,7 @@ class ChatHandler:
             }
 
         # Step 1: Analyze documents
+        self._progress(0.10, "Анализ на документите...")
         analysis = self.ai.analyze_documents(converted_files)
 
         if analysis.get("status") == "error":
@@ -367,14 +424,22 @@ class ChatHandler:
             }
 
         # Step 2: Generate schedule with verification
+        self._progress(0.25, "Генериране на график...")
         project_type = ""
         if project_context:
             project_type = project_context.get("type", "")
 
         progress_messages: list[str] = []
 
+        # Progress steps: generate=25%, verify cycles up to 90%
+        _cycle_pcts = [0.45, 0.60, 0.75, 0.85, 0.90, 0.92]
+        _cycle_idx = [0]
+
         def _progress(msg: str) -> None:
             progress_messages.append(msg)
+            pct = _cycle_pcts[min(_cycle_idx[0], len(_cycle_pcts) - 1)]
+            _cycle_idx[0] += 1
+            self._progress(pct, msg)
 
         gen_result = self.ai.generate_schedule(analysis, project_type, _progress)
 
@@ -489,14 +554,21 @@ class ChatHandler:
             ),
         }]
 
+        self._progress(0.15, "Изпращане на промяната към AI...")
         system_prompt = self.ai.build_system_prompt()
         result = self.ai.router.chat(messages, system_prompt)
 
         # Re-verify after modification
+        self._progress(0.50, "Проверка на промените...")
         rules = self.ai.build_verification_prompt()
+
+        def _mod_progress(msg: str) -> None:
+            self._progress(0.70, msg)
+
         verification = self.ai.router.run_correction_cycle(
             result["content"], rules, max_cycles=2,
             knowledge_prompt=system_prompt,
+            progress_callback=_mod_progress,
         )
 
         new_schedule = verification.get("schedule")
@@ -1059,9 +1131,11 @@ class ChatHandler:
             return self._offline_response(message)
 
         # Build conversation for AI (last 10 messages for context)
+        self._progress(0.20, "Изпращане към AI...")
         recent_history = self.history[-10:]
 
         result = self.ai.chat_response(recent_history, project_context)
+        self._progress(0.90, "Получаване на отговор...")
 
         fallback_note = ""
         if result.get("fallback"):
