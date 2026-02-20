@@ -22,16 +22,48 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# AI Intent Detection — prompt template
+# ---------------------------------------------------------------------------
+INTENT_DETECTION_PROMPT = """\
+Ти си рутер на команди. Потребителят пише на свободен български.
+Твоята задача е да разбереш какво иска и да върнеш САМО валиден JSON.
+
+Налични команди (intent):
+- load_project    : зареди/отвори/смени/затвори проект
+- generate_schedule : генерирай/създай строителен график (Gantt)
+- modify_schedule : промени/коригирай вече генериран график
+- export          : свали/експортирай в PDF/XML/JSON
+- ask_question    : въпрос за проект, правила, обобщение, статус
+- save_lesson     : запиши научен урок
+- evolve          : промени самото приложение (нова функция, модул)
+- chat            : общ разговор, поздрав, нещо извън горните
+
+{state_context}
+
+Отговори САМО с JSON (без ``` , без коментари):
+{{"intent": "...", "params": {{...}}}}
+
+За load_project добави:  "params": {{"action": "open"|"close", "query": "..."}}
+  query = САМО ключовата дума за името (без "моля", "зареди", "проект" и т.н.)
+За generate_schedule:    "params": {{"instructions": "..."}}
+За modify_schedule:      "params": {{"change": "..."}}
+За export:               "params": {{"format": "pdf"|"xml"|"json"}}
+За ask_question/chat:    "params": {{"topic": "..."}}\
+"""
+
+# ---------------------------------------------------------------------------
+# Fallback keyword matching (used when AI is unavailable)
+# ---------------------------------------------------------------------------
 INTENT_KEYWORDS: dict[str, list[str]] = {
-    "load_project": ["зареди", "папка", "проект", "път", "директория", "отвори",
-                     "затвори", "закрий"],
+    "load_project": ["зареди", "отвори", "затвори", "закрий"],
     "generate_schedule": [
         "генерирай", "график", "създай", "направи", "gantt",
         "линеен", "графика", "нов график",
     ],
     "ask_question": [
-        "какво", "как", "защо", "кога", "колко", "обясни",
-        "правило", "методика", "урок",
+        "какво", "какви", "как", "защо", "кога", "колко", "обясни",
+        "правило", "методика", "урок", "обобщение", "покажи",
     ],
     "export": ["свали", "експорт", "pdf", "xml", "mspdi", "export", "изтегли"],
     "modify_schedule": [
@@ -45,6 +77,11 @@ INTENT_KEYWORDS: dict[str, list[str]] = {
         "нов тип проект", "нова възможност", "самоеволюция", "evolution",
     ],
 }
+
+LOAD_PROJECT_PHRASES: list[str] = [
+    "зареди проект", "отвори проект", "смени проект", "затвори проект",
+    "закрий проект", "зареди папка", "отвори папка",
+]
 
 
 class ChatHandler:
@@ -124,8 +161,24 @@ class ChatHandler:
 
         self.history.append({"role": "user", "content": user_message})
 
-        intent = self._detect_intent(user_message)
+        # --- AI-powered intent detection ---
         self._progress(0.05, "Разпознаване на заявката...")
+        ai_result = self._detect_intent_ai(
+            user_message, project_loaded, conversion_done,
+            project_context, recent_projects,
+        )
+        intent = ai_result.get("intent", "chat")
+        intent_params = ai_result.get("params", {})
+
+        # If AI detected load_project with a clean query, use it directly
+        if intent == "load_project" and intent_params.get("query"):
+            load_result = self._handle_load_project_smart(
+                user_message, intent_params, recent_projects,
+            )
+            if load_result:
+                self._progress(1.0, "Готово!")
+                self.history.append({"role": "assistant", "content": load_result["response"]})
+                return load_result
 
         try:
             result = self._handle_intent(
@@ -279,11 +332,11 @@ class ChatHandler:
             recent = self.project_mgr.get_recent_projects(10)
             if recent:
                 # Strip known command words to isolate the project name
-                msg_lower = message.lower()
+                stripped_msg = msg_lower
                 for word in ("зареди", "отвори", "проект", "папка", "път",
                              "директория", "смени", "на"):
-                    msg_lower = msg_lower.replace(word, "")
-                query = msg_lower.strip()
+                    stripped_msg = stripped_msg.replace(word, "")
+                query = stripped_msg.strip()
 
                 if query:
                     # Exact name match first, then substring
@@ -307,16 +360,18 @@ class ChatHandler:
                                     "response": f"Зареждам проект **{proj['name']}**...",
                                     "load_project_path": proj["path"]}
 
-                # Show available projects (no match, or empty query = "смени проект")
-                names = ", ".join(f"**{p['name']}**" for p in recent[:5]
-                                 if p.get("exists", True))
+                # No match found — show available projects with numbers
+                names = ", ".join(
+                    f"**{i+1}. {p['name']}**" for i, p in enumerate(recent[:5])
+                    if p.get("exists", True)
+                )
                 if query:
-                    msg = f"Не намерих проект с това име."
+                    msg = f"Не намерих проект '{query}'."
                 else:
                     msg = "Кой проект да заредя?"
                 return {**base, "response":
                         f"{msg}\n\nНалични проекти: {names}\n\n"
-                        "Изберете от списъка или въведете пълен път до папката."}
+                        "Изберете с номер (напр. **1**) или въведете пълен път до папката."}
 
         return {**base, "response": (
             "Моля, въведете пътя до проектната папка.\n\n"
@@ -1171,23 +1226,86 @@ class ChatHandler:
         }
 
     # ------------------------------------------------------------------
-    # Intent detection
+    # AI-powered intent detection
     # ------------------------------------------------------------------
 
-    def _detect_intent(self, message: str) -> str:
-        """Detect the user's intent from keywords.
+    def _detect_intent_ai(
+        self,
+        message: str,
+        project_loaded: bool,
+        conversion_done: bool,
+        project_context: dict | None,
+        recent_projects: list[dict] | None,
+    ) -> dict:
+        """Detect intent via DeepSeek AI — understands natural Bulgarian.
 
-        Args:
-            message: The user's message.
+        Sends a cheap, fast call to DeepSeek that translates free-form user
+        input into a structured {intent, params} JSON. Falls back to keyword
+        matching if AI is unavailable.
 
         Returns:
-            Intent string.
+            Dict with 'intent' and 'params' keys.
         """
+        # Build state context for the AI
+        state_parts: list[str] = []
+        if project_loaded:
+            proj_name = ""
+            if project_context:
+                from pathlib import Path
+                proj_name = Path(project_context.get("path", "")).name
+            state_parts.append(f"Текущ проект: '{proj_name}' (зареден)")
+            if conversion_done:
+                state_parts.append("Файлове: конвертирани, готови за анализ")
+            else:
+                state_parts.append("Файлове: НЕ са конвертирани")
+            if self.current_schedule:
+                state_parts.append("График: генериран")
+            else:
+                state_parts.append("График: няма")
+        else:
+            state_parts.append("Няма зареден проект.")
+
+        if recent_projects:
+            names = [f"  {i+1}. {p.get('name', '?')}" for i, p in enumerate(recent_projects[:5])]
+            state_parts.append("Налични проекти:\n" + "\n".join(names))
+
+        state_context = "\n".join(state_parts)
+
+        # Try AI detection
+        if self.ai and self.ai.router and (
+            self.ai.router.deepseek_available or self.ai.router.anthropic_available
+        ):
+            try:
+                prompt = INTENT_DETECTION_PROMPT.format(state_context=state_context)
+                messages = [{"role": "user", "content": message}]
+                result = self.ai.router.chat(messages, prompt)
+                parsed = self.ai.router._parse_json_response(result.get("content", "{}"))
+                intent = parsed.get("intent", "chat")
+                # Normalize: 'chat' → 'general' for handler compatibility
+                if intent == "chat":
+                    intent = "general"
+                logger.info("AI intent: %s, params: %s", intent, parsed.get("params"))
+                return {"intent": intent, "params": parsed.get("params", {})}
+            except Exception as exc:
+                logger.warning("AI intent detection failed, using keywords: %s", exc)
+
+        # Fallback to keyword matching
+        return {"intent": self._detect_intent_keywords(message), "params": {}}
+
+    def _detect_intent_keywords(self, message: str) -> str:
+        """Fallback keyword-based intent detection (no AI needed)."""
         message_lower = message.lower()
+
+        for phrase in LOAD_PROJECT_PHRASES:
+            if phrase in message_lower:
+                return "load_project"
+
+        import re
+        if re.search(r'[A-Za-z]:\\[^\s"\']+|/[^\s"\']+', message):
+            return "load_project"
 
         best_intent = "general"
         best_score = 0
-
         for intent, keywords in INTENT_KEYWORDS.items():
             score = sum(1 for kw in keywords if kw in message_lower)
             if score > best_score:
@@ -1195,6 +1313,100 @@ class ChatHandler:
                 best_intent = intent
 
         return best_intent
+
+    # ------------------------------------------------------------------
+    # Smart project loading (uses AI-extracted params)
+    # ------------------------------------------------------------------
+
+    def _handle_load_project_smart(
+        self,
+        message: str,
+        params: dict,
+        recent_projects: list[dict] | None,
+    ) -> dict | None:
+        """Load a project using the AI-extracted query parameter.
+
+        The AI has already cleaned 'зареди проект Плевен моля' → query='плевен'.
+        We just need to match against recent projects.
+
+        Returns:
+            Response dict, or None to fall through to _handle_load_project.
+        """
+        base = {
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "load_project",
+            "model_used": "none",
+        }
+
+        action = params.get("action", "open")
+        query = (params.get("query") or "").strip().lower()
+
+        # Close project
+        if action == "close":
+            return {**base,
+                    "response": "За да затворите текущия проект, натиснете "
+                    "**Смени проект** в страничната лента.",
+                    "close_project": True}
+
+        if not query:
+            return None  # Fall through to original handler
+
+        # Check for file path in the query
+        import re
+        path_match = re.search(r'[A-Za-z]:\\[^\s"\']+|/[^\s"\']+', message)
+        if path_match:
+            path = path_match.group(0)
+            return {**base, "response": f"Зареждам проект от **{path}**...",
+                    "load_project_path": path}
+
+        # Match against recent projects
+        if not recent_projects and self.project_mgr:
+            recent_projects = self.project_mgr.get_recent_projects(10)
+
+        if not recent_projects:
+            return None  # Fall through
+
+        # Exact match
+        for proj in recent_projects:
+            name = proj.get("name", "").lower()
+            if name == query:
+                if not proj.get("exists", True):
+                    return {**base, "response":
+                            f"Папката за **{proj['name']}** не съществува."}
+                return {**base,
+                        "response": f"Зареждам проект **{proj['name']}**...",
+                        "load_project_path": proj["path"]}
+
+        # Word-level fuzzy match: any query word in project name
+        query_words = [w for w in query.split() if len(w) > 1]
+        best_match = None
+        best_score = 0
+        for proj in recent_projects:
+            name = proj.get("name", "").lower()
+            score = sum(1 for w in query_words if w in name)
+            if score > best_score:
+                best_score = score
+                best_match = proj
+
+        if best_match and best_score > 0:
+            if not best_match.get("exists", True):
+                return {**base, "response":
+                        f"Папката за **{best_match['name']}** не съществува."}
+            return {**base,
+                    "response": f"Зареждам проект **{best_match['name']}**...",
+                    "load_project_path": best_match["path"]}
+
+        # No match — show list
+        names = ", ".join(
+            f"**{i+1}. {p['name']}**" for i, p in enumerate(recent_projects[:5])
+            if p.get("exists", True)
+        )
+        return {**base, "response":
+                f"Не намерих проект '{query}'.\n\n"
+                f"Налични проекти: {names}\n\n"
+                "Изберете с номер (напр. **1**) или въведете пълен път."}
 
     # ------------------------------------------------------------------
     # Correction summary

@@ -478,7 +478,7 @@ class AIRouter:
         # Try DeepSeek first
         if self.deepseek_available:
             try:
-                return self._apply_with_model("deepseek", messages, full_system)
+                return self._apply_with_model("deepseek", messages, full_system, schedule_json)
             except Exception as exc:
                 logger.warning("DeepSeek corrections failed: %s", exc)
                 self.deepseek_available = False
@@ -487,7 +487,7 @@ class AIRouter:
         # Fallback to Anthropic
         if self.anthropic_available:
             try:
-                return self._apply_with_model("anthropic", messages, full_system)
+                return self._apply_with_model("anthropic", messages, full_system, schedule_json)
             except Exception as exc:
                 logger.error("Anthropic corrections fallback failed: %s", exc)
 
@@ -500,7 +500,8 @@ class AIRouter:
         }
 
     def _apply_with_model(
-        self, provider: str, messages: list[dict], system_prompt: str
+        self, provider: str, messages: list[dict], system_prompt: str,
+        schedule_json: str = "{}",
     ) -> dict:
         """Apply corrections using a specific provider."""
         if provider == "deepseek":

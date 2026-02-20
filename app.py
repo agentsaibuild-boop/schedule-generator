@@ -1052,23 +1052,35 @@ with chat_col:
         _prog_text = st.empty()
 
         def _on_progress(pct: float, text: str) -> None:
-            _prog_bar.progress(min(int(pct * 100), 100), text=text)
+            try:
+                _prog_bar.progress(min(int(pct * 100), 100), text=text)
+            except Exception:
+                pass  # Don't let progress bar errors break the flow
 
-        result = chat_handler.process_message(
-            user_input,
-            project_loaded=st.session_state.project_loaded,
-            conversion_done=st.session_state.conversion_done,
-            project_context=project_context,
-            pending_changes=st.session_state.pending_changes,
-            recent_projects=st.session_state.recent_projects,
-            progress_callback=_on_progress,
-        )
-
-        _prog_bar.empty()
-        _prog_text.empty()
-
-        # Clear processing flag
-        st.session_state.processing = False
+        try:
+            result = chat_handler.process_message(
+                user_input,
+                project_loaded=st.session_state.project_loaded,
+                conversion_done=st.session_state.conversion_done,
+                project_context=project_context,
+                pending_changes=st.session_state.pending_changes,
+                recent_projects=st.session_state.recent_projects,
+                progress_callback=_on_progress,
+            )
+        except Exception as exc:
+            result = {
+                "response": f"Възникна грешка: {exc}",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "error",
+                "model_used": "none",
+            }
+        finally:
+            _prog_bar.empty()
+            _prog_text.empty()
+            # Always clear processing flag to prevent stuck state
+            st.session_state.processing = False
 
         # Check if stopped mid-operation
         if st.session_state.get("stop_requested"):
