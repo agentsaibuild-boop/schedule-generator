@@ -3,7 +3,22 @@
 Всички значими промени по проекта са документирани тук.
 Форматът следва [Keep a Changelog](https://keepachangelog.com/bg/1.0.0/).
 
-## [0.9.0] — 2026-02-19
+## [0.9.0] — 2026-02-20
+
+### Добавено
+- **CLAUDE.md** — ръководство за разработчика, чете се автоматично от Claude Code
+- **.claudeignore** — изключва fonts/, converted/, knowledge/, tests/output/ от Claude Code контекста
+- **10 реални Playwright E2E теста** заменят 23 фалшиви (test_gantt.py, test_chat_interaction.py, test_export_functional.py, test_sidebar_structure.py)
+- **Pre-commit hook** изпълнява 11 теста (1 unit + 10 E2E) преди всеки commit
+
+### Променено
+- E2E тестове: от 23 теста с fallback-ове → 10 теста без fallback, всеки с "FAILURE означава:" коментар
+- conftest.py: изисква реален .env с истински API ключове (не dummy)
+
+### Премахнато
+- test_chat.py, test_sidebar.py, test_visualization.py, test_export.py, test_page_load.py, test_project_flow.py — заменени с реални тестове
+
+## [0.8.1] — 2026-02-19
 
 ### Добавено
 - **Playwright E2E тестове**: 23 теста в 6 файла, 100% pass rate (2 последователни рунда)

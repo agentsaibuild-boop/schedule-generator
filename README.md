@@ -90,14 +90,12 @@ schedule-generator/
 │   └── DejaVuSans-Bold.ttf
 ├── tests/
 │   ├── test_exports.py       # Unit тестове за PDF и XML експорт
-│   └── e2e/                  # Playwright E2E тестове (23 теста)
-│       ├── conftest.py       # Streamlit server fixture
-│       ├── test_page_load.py # Зареждане на страницата
-│       ├── test_sidebar.py   # Sidebar елементи (8 теста)
-│       ├── test_chat.py      # Чат колона
-│       ├── test_visualization.py # Визуализация (checkboxes, filters, Gantt)
-│       ├── test_export.py    # Експорт бутони (PDF, XML, JSON)
-│       └── test_project_flow.py  # Проект и layout
+│   └── e2e/                  # Playwright E2E тестове (10 теста)
+│       ├── conftest.py       # Streamlit server fixture (реални API ключове)
+│       ├── test_gantt.py     # Gantt chart: render, слоеве, филтри (3 теста)
+│       ├── test_chat_interaction.py  # Чат: AI отговор, input clear (2 теста)
+│       ├── test_export_functional.py # Експорт: PDF, XML download (2 теста)
+│       └── test_sidebar_structure.py # Sidebar: секции, AI providers, бутони (3 теста)
 ├── tools/
 │   └── README.md             # Инструкции за python-installer.exe
 ├── hooks/
@@ -182,14 +180,14 @@ streamlit run app.py
 # Unit тестове (PDF + XML export)
 python -m pytest tests/test_exports.py
 
-# E2E тестове (Playwright — стартира Streamlit сървър на port 8502)
+# E2E тестове (10 теста — изискват реален .env с API ключове)
 python -m pytest tests/e2e/ -v
 
 # Всички тестове
 python -m pytest tests/ -v
 ```
 
-> **Pre-commit hook**: При `git commit` автоматично се стартират всички тестове.
+> **Pre-commit hook**: При `git commit` автоматично се пускат 11 теста (1 unit + 10 E2E).
 > Инсталация: `install-hooks.bat`
 
 ## Версия и промени

@@ -30,7 +30,11 @@ src/
 start.bat  ← стартира app на localhost:8501
 
 ## Тестове
-pytest tests/test_exports.py       ← unit тестове
-pytest tests/e2e/ --headed         ← E2E Playwright тестове
+pytest tests/test_exports.py       ← unit тестове (1 тест)
+pytest tests/e2e/ -v               ← E2E Playwright тестове (10 теста)
+
+- Тестовете са реални — изискват стартирано приложение и реални API ключове (.env)
+- Pre-commit hook: автоматично пуска 11 теста (1 unit + 10 E2E) при всеки git commit
+- Всеки E2E тест има "FAILURE означава:" коментар — показва кой модул е счупен
 
 ## Текуща версия: 0.9.0
