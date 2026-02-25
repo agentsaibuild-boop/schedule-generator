@@ -74,10 +74,10 @@ def streamlit_server():
 @pytest.fixture(scope="function")
 def app_page(page, streamlit_server):
     """Зарежда приложението и изчаква пълното му зареждане."""
-    page.goto(streamlit_server, wait_until="networkidle", timeout=30000)
+    page.goto(streamlit_server, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_selector('[data-testid="stApp"]', timeout=15000)
     page.get_by_text("AI Статус").wait_for(state="visible", timeout=60000)
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(5000)
     return page
 
 

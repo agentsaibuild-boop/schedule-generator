@@ -336,8 +336,9 @@ def _load_project_by_path(path: str) -> None:
     last_schedule = project.get("progress", {}).get("last_schedule")
     if last_schedule:
         parsed = _ensure_schedule_list(last_schedule)
-        st.session_state.current_schedule = parsed
-        st.session_state.schedule_data = parsed
+        if parsed:  # Only override demo data if we actually parsed a valid schedule
+            st.session_state.current_schedule = parsed
+            st.session_state.schedule_data = parsed
 
     # Restore chat history from previous sessions
     saved_history = project.get("progress", {}).get("chat_history", [])
@@ -501,9 +502,10 @@ if not st.session_state.project_loaded:
         _restored_sched = _last_active.get("progress", {}).get("last_schedule")
         if _restored_sched:
             _parsed = _ensure_schedule_list(_restored_sched)
-            st.session_state.current_schedule = _parsed
-            st.session_state.schedule_data = _parsed
-            chat_handler.current_schedule = _parsed
+            if _parsed:  # Only override demo data if we actually parsed a valid schedule
+                st.session_state.current_schedule = _parsed
+                st.session_state.schedule_data = _parsed
+                chat_handler.current_schedule = _parsed
         # Note: chat history restore is already handled in _load_project_by_path
         # Mark welcome as shown to prevent duplicate welcome message on refresh
         st.session_state.welcome_shown = True

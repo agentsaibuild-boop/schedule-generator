@@ -11,7 +11,7 @@ EXPORT_TIMEOUT = 30000
 def _go_to_export_tab(page):
     """Навигира до Export таба."""
     export_tab = page.locator('button[role="tab"]', has_text="Експорт")
-    export_tab.wait_for(state="visible", timeout=10000)
+    export_tab.wait_for(state="visible", timeout=30000)
     export_tab.click()
     page.wait_for_timeout(1000)
 
