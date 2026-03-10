@@ -33,3 +33,4 @@ tests/e2e/screenshots/
 #   .env.example, .env.company.example
 #   README_INSTALL.md, .streamlit/config.toml
 #   tools/README.md
+API's.env.txt

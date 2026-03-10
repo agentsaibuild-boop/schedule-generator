@@ -153,13 +153,16 @@ class AIProcessor:
     # Document analysis
     # ------------------------------------------------------------------
 
-    def analyze_documents(self, converted_files: list[dict]) -> dict:
+    def analyze_documents(
+        self, converted_files: list[dict], all_text: str = ""
+    ) -> dict:
         """Analyze converted documents via the worker (DeepSeek).
 
         IMPORTANT: Only accepts converted .json files (Rule #0).
 
         Args:
             converted_files: List of file info dicts from FileManager.get_converted_files().
+            all_text: Combined text content from all converted files (from FileManager.get_all_text()).
 
         Returns:
             Analysis dict with project_type, scope, quantities, etc.
@@ -173,28 +176,53 @@ class AIProcessor:
         # Validate: only JSON files allowed
         self._validate_json_inputs(converted_files)
 
-        # Build a summary of all files
+        # Build file index for reference
         file_summaries = []
         for f in converted_files:
             name = f.get("original", f.get("name", "unknown"))
             method = f.get("method", "")
             file_summaries.append(f"- {name} ({method})")
+        files_index = "\n".join(file_summaries)
 
-        files_text = "\n".join(file_summaries)
+        # Use actual document content if available, fall back to index only
+        if all_text.strip():
+            # Truncate to ~120k chars to stay within token limits
+            content_block = all_text[:120_000]
+            if len(all_text) > 120_000:
+                content_block += "\n\n[... съдържанието е съкратено ...]"
+            doc_section = f"ФАЙЛОВЕ:\n{files_index}\n\nСЪДЪРЖАНИЕ:\n{content_block}"
+        else:
+            doc_section = f"ФАЙЛОВЕ (без съдържание — конвертирането не е успяло):\n{files_index}"
 
         system_prompt = self.build_system_prompt()
         messages = [{
             "role": "user",
             "content": (
                 "Анализирай следните конвертирани документи от тендерна процедура за ВиК:\n\n"
-                f"{files_text}\n\n"
+                f"{doc_section}\n\n"
+                "ВАЖНО: Документите в папката се допълват взаимно — информацията в един файл "
+                "може да липсва или да е непълна в друг. "
+                "Изгради консолидирана картина като кръстосаш ВСИЧКИ файлове:\n"
+                "- Ако в единия файл има улица без метраж → търси метража в останалите\n"
+                "- Ако в единия файл има метраж без улица → търси улицата в останалите\n"
+                "- Ако данните липсват навсякъде → маркирай като 'неизвестно', НЕ измисляй\n"
+                "- Ако данните си ПРОТИВОРЕЧАТ между файлове → НЕ избирай сам. "
+                "Запиши в conflicts[] като: "
+                "'[обект]: [стойност от файл А] vs [стойност от файл Б]'\n\n"
                 "Определи:\n"
                 "1. Тип проект (разпределителна мрежа, довеждащ, единичен, инженеринг, mega)\n"
                 "2. Обхват — какви мрежи се строят (водопровод, канализация, пътни)\n"
-                "3. Количества — DN, дължини на клонове/участъци\n"
+                "3. Количества — DN, дължини на клонове/участъци (консолидирани от всички файлове)\n"
                 "4. Срокове — ако са споменати\n"
-                "5. Специфики — терен, материали, брой екипи\n\n"
-                "Отговори в JSON формат."
+                "5. Специфики — терен, материали, брой екипи\n"
+                "6. locations — ИЗЧЕРПАТЕЛЕН списък на ВСИЧКИ имена на улици, квартали, "
+                "местности, обекти и топоними, намерени буквално в документите. "
+                "Включи само имена, които реално присъстват в текста. "
+                "НЕ добавяй имена по предположение.\n"
+                "7. conflicts — списък с противоречия между файлове, изискващи човешко решение\n\n"
+                "Отговори в JSON формат с полета: "
+                "project_type, scope, quantities, deadlines, specifics, "
+                "locations (list[str]), conflicts (list[str])."
             ),
         }]
 
@@ -217,6 +245,9 @@ class AIProcessor:
         analysis: dict,
         project_type: str,
         progress_callback: Any | None = None,
+        all_text: str = "",
+        extra_locations: list[str] | None = None,
+        sequence_constraints: dict | None = None,
     ) -> dict:
         """Generate a schedule via worker, then verify via controller.
 
@@ -246,11 +277,71 @@ class AIProcessor:
             else json.dumps(analysis, ensure_ascii=False)
         )
 
+        # Extract locations whitelist from analysis
+        locations: list[str] = []
+        raw_analysis = analysis.get("analysis", "")
+        if isinstance(raw_analysis, str):
+            try:
+                parsed_analysis = json.loads(raw_analysis)
+                locations = parsed_analysis.get("locations", [])
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        elif isinstance(raw_analysis, dict):
+            locations = raw_analysis.get("locations", [])
+
+        # Merge situation-derived locations (ground-truth from site plans)
+        if extra_locations:
+            existing_lower = {loc.lower() for loc in locations}
+            for loc in extra_locations:
+                if loc.lower() not in existing_lower:
+                    locations.append(loc)
+                    existing_lower.add(loc.lower())
+            logger.info("Locations after situation merge: %d total", len(locations))
+
+        locations_section = ""
+        if locations:
+            loc_list = "\n".join(f"  - {loc}" for loc in locations)
+            locations_section = (
+                f"\n\nДОПУСТИМИ ИМЕНА НА МЕСТА (само тези са намерени в документите):\n"
+                f"{loc_list}\n"
+                "ПРАВИЛО: Използвай САМО горните имена в заглавията на задачите. "
+                "Ако дадено място не е в списъка — НЕ го измисляй. "
+                "Пиши 'Участък X' или 'Клон Y' вместо измислено название."
+            )
+
+        # Build sequence constraints section
+        sequence_section = ""
+        if sequence_constraints:
+            default = sequence_constraints.get("default", "")
+            default_label = (
+                "Водопровод → Канализация" if default == "water_first"
+                else "Канализация → Водопровод" if default == "sewer_first"
+                else ""
+            )
+            lines = ["ЗАДЪЛЖИТЕЛНА ПОСЛЕДОВАТЕЛНОСТ (потвърдена от потребителя):"]
+            if default_label:
+                lines.append(f"  По подразбиране: {default_label}")
+            for section, order in sequence_constraints.items():
+                if section == "default":
+                    continue
+                order_label = (
+                    "Водопровод → Канализация" if order == "water_first"
+                    else "Канализация → Водопровод"
+                )
+                lines.append(f"  {section}: {order_label}")
+            lines.append(
+                "ПРАВИЛО: Спазвай горната последователност стриктно. "
+                "НЕ я променяй дори ако смяташ, че друг ред е по-добър."
+            )
+            sequence_section = "\n\n" + "\n".join(lines)
+
         messages = [{
             "role": "user",
             "content": (
                 f"Генерирай строителен линеен график за следния проект:\n\n"
-                f"{analysis_text}\n\n"
+                f"{analysis_text}"
+                f"{locations_section}"
+                f"{sequence_section}\n\n"
                 f"Тип: {project_type}\n\n"
                 "Отговори в JSON формат с:\n"
                 "- tasks: масив от задачи с id, name, duration, start_day, "
@@ -281,6 +372,15 @@ class AIProcessor:
         gen_cost = gen_result.get("cost", 0.0)
         cycle_cost = cycle_result.get("total_cost", 0.0)
 
+        # Step 3: Location hallucination check
+        hallucination_warnings: list[str] = []
+        if locations or all_text:
+            schedule_tasks = cycle_result.get("schedule", [])
+            if isinstance(schedule_tasks, list):
+                hallucination_warnings = self._validate_task_locations(
+                    schedule_tasks, locations, all_text
+                )
+
         return {
             "status": cycle_result["status"],
             "schedule": cycle_result["schedule"],
@@ -289,7 +389,78 @@ class AIProcessor:
             "history": cycle_result.get("history", []),
             "remaining_issues": cycle_result.get("remaining_issues", []),
             "gen_model": gen_result["model"],
+            "hallucination_warnings": hallucination_warnings,
         }
+
+    # ------------------------------------------------------------------
+    # Location hallucination validation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_task_locations(
+        tasks: list[dict],
+        locations_whitelist: list[str],
+        all_text: str,
+    ) -> list[str]:
+        """Check task names for location names not found in source documents.
+
+        Strategy:
+        - Extract capitalised Bulgarian/Latin tokens from each task name
+          (likely street/place names, e.g. "Витоша", "Илиенци")
+        - A token is suspicious if it appears in neither the whitelist nor
+          the full document text
+        - Returns list of human-readable warning strings
+
+        Args:
+            tasks: Generated schedule task list.
+            locations_whitelist: Locations extracted by analyze_documents().
+            all_text: Raw combined document text for broad substring search.
+
+        Returns:
+            List of warning strings (empty = no issues detected).
+        """
+        import re
+
+        # Build a single searchable corpus: whitelist + full document text
+        whitelist_lower = {loc.lower() for loc in locations_whitelist}
+        corpus_lower = all_text.lower()
+
+        # Regex: capitalised tokens of 4+ chars (avoids "DN", "РЕ", etc.)
+        _PLACE_TOKEN = re.compile(r"\b[А-ЯA-ZЁ][а-яa-zёА-ЯA-Z]{3,}\b")
+
+        # Common Bulgarian construction words to skip (not place names)
+        _SKIP_WORDS = {
+            "водопровод", "канализация", "участък", "клон", "фаза", "етап",
+            "дейност", "монтаж", "полагане", "изкоп", "засипване", "уплътняване",
+            "дезинфекция", "проба", "приемане", "проектиране", "надзор",
+            "подготовка", "демонтаж", "рехабилитация", "реконструкция",
+            "екип", "бригада", "доставка", "инсталация", "свързване",
+            "разрешение", "съгласуване", "въвеждане", "експлоатация",
+        }
+
+        warnings: list[str] = []
+
+        for task in tasks:
+            name = task.get("name", "")
+            if not name:
+                continue
+
+            tokens = _PLACE_TOKEN.findall(name)
+            for token in tokens:
+                if token.lower() in _SKIP_WORDS:
+                    continue
+                token_lower = token.lower()
+                # Check whitelist and full document corpus
+                in_whitelist = any(token_lower in loc.lower() for loc in locations_whitelist)
+                in_corpus = token_lower in corpus_lower
+                if not in_whitelist and not in_corpus:
+                    task_id = task.get("id", "?")
+                    warnings.append(
+                        f"Задача {task_id} '{name}': "
+                        f"'{token}' не е намерено в документите — възможна халюцинация."
+                    )
+
+        return warnings
 
     # ------------------------------------------------------------------
     # Chat response
@@ -415,6 +586,125 @@ class AIProcessor:
             "full_text": full_text,
         }
         return {"status": "ok", "data": data}
+
+    # ------------------------------------------------------------------
+    # Situation / site-plan location extraction
+    # ------------------------------------------------------------------
+
+    def extract_situation_locations(self, filepath: str) -> list[str]:
+        """Extract street/quarter/locality names from a situation (site-plan) PDF.
+
+        Sends each page as a vision image with a focused prompt that asks for
+        ONLY place names — not OCR of all text.  Returns de-duplicated list.
+
+        Why vision even for vector PDFs: AutoCAD-generated PDFs may have
+        extractable text but it comes out as fragmented coordinates/numbers.
+        Vision correctly reads the human-readable labels on the drawing.
+
+        Args:
+            filepath: Absolute path to the PDF file (original, not converted).
+
+        Returns:
+            List of location strings found on the drawing.  Empty on failure.
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            logger.warning("PyMuPDF not available — situation OCR skipped.")
+            return []
+
+        if not self.router:
+            return []
+
+        source_name = Path(filepath).name
+        logger.info("Extracting locations from situation file: %s", source_name)
+
+        # Read as bytes first — fitz.open(path) garbles Cyrillic paths on Windows
+        try:
+            with open(filepath, "rb") as _fh:
+                _pdf_bytes = _fh.read()
+        except OSError as exc:
+            logger.error("Cannot read situation file %s: %s", source_name, exc)
+            return []
+
+        situation_prompt = (
+            "Това е строителна ситуация (трасировъчен план) на ВиК проект в България.\n\n"
+            "ЗАДАЧА: Извлечи САМО имената на улиците, булевардите, кварталите, жилищните "
+            "комплекси, местностите и топонимите, видими на чертежа.\n\n"
+            "КАК ДА ТЪРСИШ:\n"
+            "- Имената на улиците са НАПИСАНИ ПО ОСТА на улицата — завъртян текст по "
+            "посоката на улицата. Търси такъв завъртян/наклонен текст.\n"
+            "- НА КРЪСТОПЪТИ има ДВЕ пресичащи се улици с перпендикулярни надписи — "
+            "извлечи И ДВЕТЕ.\n"
+            "- Стрелките 'посока на отвеждане' (→) могат да съдържат 'към ул. X' или "
+            "'към ПСОВ X' — извлечи само топонима X, без 'към'.\n"
+            "- Стандартни съкращения: ул., бул., кв., ж.к., м. — запази ги в резултата.\n\n"
+            "НЕ ВКЛЮЧВАЙ: числа, координати, диаметри (DN, Ф), коти, дати, "
+            "имена на фирми/проектанти, 'ПСОВ' самостоятелно без топоним.\n\n"
+            "Отговори САМО с валиден JSON:\n"
+            '{"locations": ["ул. Примерна", "бул. Витоша", "кв. Лозенец", "ж.к. Надежда"]}'
+        )
+
+        all_locations: list[str] = []
+        doc = fitz.open(stream=_pdf_bytes, filetype="pdf")
+        num_pages = len(doc)
+
+        _MAX_BYTES = 4 * 1024 * 1024  # 4 MB — Anthropic hard limit is 5 MB
+
+        for page_num in range(num_pages):
+            page = doc[page_num]
+            # Start at 100 dpi; if image is still too large drop to 72 then 50
+            img_bytes = b""
+            for dpi in (100, 72, 50):
+                pix = page.get_pixmap(dpi=dpi)
+                # JPEG is far smaller than PNG for large-format CAD drawings
+                img_bytes = pix.tobytes("jpeg", jpg_quality=85)
+                if len(img_bytes) <= _MAX_BYTES:
+                    break
+                logger.debug(
+                    "Page %d at %d dpi → %d bytes, retrying at lower dpi",
+                    page_num + 1, dpi, len(img_bytes),
+                )
+            if len(img_bytes) > _MAX_BYTES:
+                logger.warning(
+                    "Situation page %d still >4 MB after lowest dpi — skipping.", page_num + 1
+                )
+                continue
+            b64_image = base64.b64encode(img_bytes).decode("ascii")
+
+            try:
+                raw = self.router.ocr_pdf_page(b64_image, system_prompt=situation_prompt, media_type="image/jpeg")
+                # Strip markdown fences if present
+                cleaned = raw.strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
+                    if cleaned.endswith("```"):
+                        cleaned = cleaned[:-3].strip()
+                parsed = json.loads(cleaned)
+                page_locs = parsed.get("locations", [])
+                if isinstance(page_locs, list):
+                    all_locations.extend(str(loc) for loc in page_locs if loc)
+            except Exception as exc:
+                logger.warning(
+                    "Situation location extraction failed on page %d of %s: %s",
+                    page_num + 1, source_name, exc,
+                )
+
+        doc.close()
+
+        # De-duplicate while preserving order
+        seen: set[str] = set()
+        unique: list[str] = []
+        for loc in all_locations:
+            key = loc.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                unique.append(loc.strip())
+
+        logger.info(
+            "Situation '%s': extracted %d unique locations", source_name, len(unique)
+        )
+        return unique
 
     # ------------------------------------------------------------------
     # Legacy compatibility methods

@@ -203,6 +203,7 @@ class AIRouter:
                 model="deepseek-chat",
                 messages=[{"role": "user", "content": "ping"}],
                 max_tokens=5,
+                timeout=15,
             )
             self.deepseek_available = True
         except Exception as exc:
@@ -216,6 +217,7 @@ class AIRouter:
                 model="claude-sonnet-4-6",
                 max_tokens=5,
                 messages=[{"role": "user", "content": "ping"}],
+                timeout=15,
             )
             self.anthropic_available = True
         except Exception as exc:
@@ -735,13 +737,14 @@ class AIRouter:
     # ------------------------------------------------------------------
 
     def ocr_pdf_page(
-        self, image_base64: str, system_prompt: str = ""
+        self, image_base64: str, system_prompt: str = "", media_type: str = "image/png"
     ) -> str:
         """OCR a single page image via DeepSeek vision. Falls back to Anthropic.
 
         Args:
-            image_base64: Base64-encoded PNG image.
+            image_base64: Base64-encoded image.
             system_prompt: Optional knowledge context for OCR guidance.
+            media_type: MIME type of the image ("image/png" or "image/jpeg").
 
         Returns:
             Extracted text string.
@@ -760,7 +763,7 @@ class AIRouter:
         if self.deepseek_available:
             try:
                 return self._ocr_deepseek(
-                    image_base64, ocr_user_prompt, full_ocr_system
+                    image_base64, ocr_user_prompt, full_ocr_system, media_type=media_type
                 )
             except Exception as exc:
                 logger.warning("DeepSeek OCR failed: %s", exc)
@@ -771,7 +774,7 @@ class AIRouter:
         if self.anthropic_available:
             try:
                 return self._ocr_anthropic(
-                    image_base64, ocr_user_prompt, full_ocr_system
+                    image_base64, ocr_user_prompt, full_ocr_system, media_type=media_type
                 )
             except Exception as exc:
                 logger.error("Anthropic OCR fallback failed: %s", exc)
@@ -779,7 +782,7 @@ class AIRouter:
         return "[OCR ERROR: Both AI models are unavailable]"
 
     def _ocr_deepseek(
-        self, image_base64: str, prompt: str, system_prompt: str
+        self, image_base64: str, prompt: str, system_prompt: str, media_type: str = "image/png"
     ) -> str:
         """OCR via DeepSeek vision."""
         client = self._get_deepseek()
@@ -792,7 +795,7 @@ class AIRouter:
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:image/png;base64,{image_base64}",
+                        "url": f"data:{media_type};base64,{image_base64}",
                     },
                 },
                 {"type": "text", "text": prompt},
@@ -812,7 +815,7 @@ class AIRouter:
         return text
 
     def _ocr_anthropic(
-        self, image_base64: str, prompt: str, system_prompt: str
+        self, image_base64: str, prompt: str, system_prompt: str, media_type: str = "image/png"
     ) -> str:
         """OCR via Anthropic vision."""
         client = self._get_anthropic()
@@ -827,7 +830,7 @@ class AIRouter:
                         "type": "image",
                         "source": {
                             "type": "base64",
-                            "media_type": "image/png",
+                            "media_type": media_type,
                             "data": image_base64,
                         },
                     },

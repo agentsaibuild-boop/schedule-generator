@@ -11,6 +11,10 @@
 ## Експорт формати
 Виж references/export-formats.md
 
+## MS Project структура (ЗАДЪЛЖИТЕЛНО)
+Виж references/ms-project-structure.md
+— Pipeline JSON→XML→.mpp, WBS йерархия, task types, зависимости, custom fields
+
 ## Workflow правила
 Виж references/workflow-rules.md
 

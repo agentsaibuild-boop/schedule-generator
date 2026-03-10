@@ -30,3 +30,10 @@
 ## Правило #78: Авторски надзор е задължителен в ИНЖЕНЕРИНГ
 
 ## Правило #80: Само дейности от КСС
+
+## Правило #85: JSON → XML → .mpp е крайният формат
+- Клиентът получава **.mpp** (MS Project нативен)
+- Pipeline: AI генерира JSON → export_xml.py → MSPDI XML → MS Project → Save As .mpp
+- JSON трябва да съдържа WBS йерархия (summary tasks + листови задачи)
+- Summary tasks НЕ получават ресурс/екип
+- Виж ms-project-structure.md за пълна спецификация

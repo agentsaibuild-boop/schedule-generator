@@ -125,6 +125,9 @@ class ChatHandler:
         pending_changes: dict | None = None,
         recent_projects: list[dict] | None = None,
         progress_callback: Any | None = None,
+        pending_sequence: dict | None = None,
+        pending_conflicts: list[str] | None = None,
+        pending_conflicts_analysis: dict | None = None,
     ) -> dict:
         """Process a user message and return a structured response.
 
@@ -137,17 +140,28 @@ class ChatHandler:
             recent_projects: List of recent projects for number selection.
             progress_callback: Optional callable(pct: float, text: str) for
                 progress updates (0.0–1.0).
+            pending_sequence: Pending sequence questionnaire state.
 
         Returns:
             Dict with response, schedule_updated, schedule_data,
             correction_info, intent, model_used, plus optional
             evolution_pending / evolution_applied / evolution_cleared /
-            load_project_path / load_project_id.
+            load_project_path / load_project_id / pending_sequence.
         """
         self._progress = progress_callback or (lambda pct, txt: None)
         # Check if there are pending evolution changes waiting for confirmation
         if pending_changes:
             return self._handle_confirm_change(user_message, pending_changes)
+
+        # Check if we are mid-sequence questionnaire
+        if pending_sequence:
+            return self._handle_sequence_answer(user_message, pending_sequence)
+
+        # Check if user is resolving cross-document conflicts
+        if pending_conflicts and pending_conflicts_analysis:
+            return self._handle_conflict_resolution(
+                user_message, pending_conflicts, pending_conflicts_analysis
+            )
 
         # Check for recent project selection (numbers 1-5)
         stripped = user_message.strip()
@@ -466,7 +480,8 @@ class ChatHandler:
 
         # Step 1: Analyze documents
         self._progress(0.10, "Анализ на документите...")
-        analysis = self.ai.analyze_documents(converted_files)
+        all_text = self.files.get_all_text() if self.files else ""
+        analysis = self.ai.analyze_documents(converted_files, all_text=all_text)
 
         if analysis.get("status") == "error":
             return {
@@ -477,6 +492,66 @@ class ChatHandler:
                 "intent": "generate_schedule",
                 "model_used": "none",
             }
+
+        # Step 1a: Surface conflicts found during cross-document analysis
+        conflicts: list[str] = []
+        raw_analysis = analysis.get("analysis", "")
+        if isinstance(raw_analysis, str):
+            try:
+                import json as _json
+                parsed_a = _json.loads(raw_analysis)
+                conflicts = parsed_a.get("conflicts", [])
+            except Exception:
+                pass
+        elif isinstance(raw_analysis, dict):
+            conflicts = raw_analysis.get("conflicts", [])
+
+        if conflicts:
+            conflict_lines = "\n".join(f"  - {c}" for c in conflicts)
+            return {
+                "response": (
+                    f"⚠️ **Открити противоречия между файловете — необходимо е вашето решение "
+                    f"преди генерирането:**\n{conflict_lines}\n\n"
+                    "Моля, уточнете кои стойности са верни. "
+                    "След вашия отговор ще продължа с генерирането."
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "generate_schedule",
+                "model_used": analysis.get("model", "none"),
+                "pending_conflicts": conflicts,
+                "pending_analysis": analysis,
+            }
+
+        # Step 1b: Sequence questionnaire — ask before generating
+        seq_state = self._start_sequence_questionnaire(analysis)
+        if seq_state:
+            return {
+                "response": seq_state["question"],
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "generate_schedule",
+                "model_used": analysis.get("model", "none"),
+                "pending_sequence": seq_state,
+            }
+
+        # Step 1c: Extract locations from situation / site-plan files (ground-truth toponyms)
+        situation_locations: list[str] = []
+        if self.files and self.ai:
+            classification = self.files.classify_files(ai_processor=self.ai)
+            situation_paths = classification.get("situation_paths", [])
+            if situation_paths:
+                self._progress(0.20, f"Четене на ситуация ({len(situation_paths)} файл/а)...")
+                for sit_path in situation_paths:
+                    locs = self.ai.extract_situation_locations(sit_path)
+                    situation_locations.extend(locs)
+                if situation_locations:
+                    import logging as _log
+                    _log.getLogger(__name__).info(
+                        "Situation extraction added %d locations", len(situation_locations)
+                    )
 
         # Step 2: Generate schedule with verification
         self._progress(0.25, "Генериране на график...")
@@ -496,7 +571,12 @@ class ChatHandler:
             _cycle_idx[0] += 1
             self._progress(pct, msg)
 
-        gen_result = self.ai.generate_schedule(analysis, project_type, _progress)
+        gen_result = self.ai.generate_schedule(
+            analysis, project_type, _progress,
+            all_text=all_text,
+            extra_locations=situation_locations or None,
+            sequence_constraints=project_context.get("sequence_constraints") if project_context else None,
+        )
 
         # Build response
         status = gen_result.get("status", "error")
@@ -505,6 +585,16 @@ class ChatHandler:
         history = gen_result.get("history", [])
 
         response_parts = []
+
+        # Show situation location extraction result
+        if situation_locations:
+            loc_preview = ", ".join(situation_locations[:5])
+            if len(situation_locations) > 5:
+                loc_preview += f" и още {len(situation_locations) - 5}"
+            response_parts.append(
+                f"📍 **Прочетена ситуация:** {len(situation_locations)} топонима "
+                f"({loc_preview})"
+            )
 
         # Progress log
         for msg in progress_messages:
@@ -533,6 +623,20 @@ class ChatHandler:
                 issues_count = len(h["issues"])
                 issues_short = ", ".join(h["issues"][:3])
                 response_parts.append(f"  Опит {c}: {issues_count} проблема ({issues_short})")
+
+        # Hallucination warnings
+        hallucination_warnings = gen_result.get("hallucination_warnings", [])
+        if hallucination_warnings:
+            response_parts.append(
+                f"\n⚠️ **Открити {len(hallucination_warnings)} потенциални халюцинации в имена:**"
+            )
+            for w in hallucination_warnings[:10]:
+                response_parts.append(f"  - {w}")
+            if len(hallucination_warnings) > 10:
+                response_parts.append(f"  ... и още {len(hallucination_warnings) - 10}")
+            response_parts.append(
+                "\nМоля, проверете тези имена спрямо оригиналната документация преди употреба."
+            )
 
         self.current_schedule = gen_result.get("schedule")
         self.correction_history = history
@@ -1005,6 +1109,382 @@ class ChatHandler:
                     "request": message,
                 },
             }
+
+    # ------------------------------------------------------------------
+    # Conflict resolution
+    # ------------------------------------------------------------------
+
+    def _handle_conflict_resolution(
+        self,
+        user_message: str,
+        conflicts: list[str],
+        analysis: dict,
+    ) -> dict:
+        """Handle user's resolution of cross-document conflicts.
+
+        The user provides clarification (e.g. "use file A values").
+        We patch the analysis with their answer and continue generation.
+        """
+        _base = {
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "generate_schedule",
+            "model_used": "none",
+        }
+
+        if not self.ai or not self.ai.router:
+            return {**_base, "response": "AI не е инициализиран."}
+
+        # Ask AI to patch the analysis based on user clarification
+        self._progress(0.10, "Прилагане на вашите уточнения...")
+
+        conflict_text = "\n".join(f"- {c}" for c in conflicts)
+        raw_analysis = analysis.get("analysis", "")
+
+        patch_messages = [{
+            "role": "user",
+            "content": (
+                f"Имаше противоречия между документите:\n{conflict_text}\n\n"
+                f"Потребителят отговори: \"{user_message}\"\n\n"
+                f"Текущ анализ:\n{raw_analysis}\n\n"
+                "Актуализирай анализа като приложиш решенията на потребителя. "
+                "Върни САМО коригирания JSON анализ (без обяснения)."
+            ),
+        }]
+        system_prompt = self.ai.build_system_prompt()
+        patch_result = self.ai.router.chat(patch_messages, system_prompt)
+
+        if patch_result.get("error"):
+            return {**_base,
+                "response": f"Грешка при прилагане на корекциите: {patch_result['content']}"}
+
+        # Build patched analysis
+        patched_analysis = {**analysis, "analysis": patch_result["content"]}
+
+        # Check if questionnaire is needed for patched analysis
+        seq_state = self._start_sequence_questionnaire(patched_analysis)
+        if seq_state:
+            return {
+                **_base,
+                "response": (
+                    "Уточненията са приложени.\n\n" + seq_state["question"]
+                ),
+                "model_used": patch_result.get("model", "none"),
+                "pending_sequence": seq_state,
+            }
+
+        # Proceed directly to generation
+        self._progress(0.20, "Генериране на график...")
+        result = self._continue_generation(patched_analysis, {})
+        result["response"] = "Уточненията са приложени.\n\n" + result.get("response", "")
+        return result
+
+    # ------------------------------------------------------------------
+    # Sequence questionnaire
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_sections_from_analysis(analysis: dict) -> list[str]:
+        """Extract section/branch names from analysis quantities.
+
+        Returns list of section names found in the analysis, e.g.
+        ["Клон 1", "Клон 2", "ул. Витоша", ...].
+        Empty list if no sections found.
+        """
+        import json as _json
+        raw = analysis.get("analysis", "")
+        if isinstance(raw, str):
+            try:
+                parsed = _json.loads(raw)
+            except Exception:
+                return []
+        elif isinstance(raw, dict):
+            parsed = raw
+        else:
+            return []
+
+        quantities = parsed.get("quantities", {})
+        sections: list[str] = []
+
+        # quantities may be a dict {section_name: {...}} or a list
+        if isinstance(quantities, dict):
+            sections = [k for k in quantities.keys() if k and k != "total"]
+        elif isinstance(quantities, list):
+            for item in quantities:
+                if isinstance(item, dict):
+                    name = item.get("name") or item.get("section") or item.get("branch")
+                    if name:
+                        sections.append(str(name))
+
+        return sections
+
+    def _start_sequence_questionnaire(self, analysis: dict) -> dict | None:
+        """Start the sequence questionnaire if the project has both water and sewer.
+
+        Returns a pending_sequence state dict with the first question,
+        or None if the questionnaire is not needed (e.g. water-only project).
+        """
+        import json as _json
+        raw = analysis.get("analysis", "")
+        parsed: dict = {}
+        if isinstance(raw, str):
+            try:
+                parsed = _json.loads(raw)
+            except Exception:
+                pass
+        elif isinstance(raw, dict):
+            parsed = raw
+
+        # Check scope + project_type + quantities keys for network presence
+        scope = str(parsed.get("scope", "")).lower()
+        project_type_str = str(parsed.get("project_type", "")).lower()
+        quantities_str = str(parsed.get("quantities", "")).lower()
+        combined = f"{scope} {project_type_str} {quantities_str}"
+
+        _WATER_KEYWORDS = [
+            "водопровод", "вода", "water", "в/к", "вк мрежа",
+            "водоснабдяване", "питейна", "водопроводна",
+        ]
+        _SEWER_KEYWORDS = [
+            "канализация", "канал", "sewer", "в/к", "вк мрежа",
+            "отводняване", "канализационна", "фекална", "дъждовна",
+        ]
+        has_water = any(w in combined for w in _WATER_KEYWORDS)
+        has_sewer = any(w in combined for w in _SEWER_KEYWORDS)
+
+        # Only ask if BOTH networks are present
+        if not (has_water and has_sewer):
+            return None
+
+        sections = self._extract_sections_from_analysis(analysis)
+
+        return {
+            "step": "q1",
+            "analysis": analysis,
+            "sections": sections,
+            "constraints": {},  # will be filled as user answers
+            "question": (
+                "Преди да генерирам графика, имам един въпрос:\n\n"
+                "**Коя мрежа се изпълнява първа?**\n"
+                "  В — Водопровод първо\n"
+                "  К — Канализация първо"
+            ),
+        }
+
+    def _handle_sequence_answer(self, user_message: str, state: dict) -> dict:
+        """Handle user answers during the sequence questionnaire.
+
+        Returns either the next question (with pending_sequence)
+        or triggers schedule generation (without pending_sequence).
+        """
+        step = state.get("step")
+        msg = user_message.strip().upper()
+
+        _base = {
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "generate_schedule",
+            "model_used": "none",
+        }
+
+        # ── Q1: water or sewer first? ───────────────────────────────────
+        if step == "q1":
+            if msg.startswith("В") or "ВОДОПРОВОД" in msg or "ВОДА" in msg:
+                choice = "water_first"
+                choice_label = "Водопровод → Канализация"
+            elif msg.startswith("К") or "КАНАЛ" in msg:
+                choice = "sewer_first"
+                choice_label = "Канализация → Водопровод"
+            else:
+                return {**_base, "response": (
+                    "Моля, отговори с **В** (Водопровод първо) или **К** (Канализация първо)."
+                ), "pending_sequence": state}
+
+            sections = state.get("sections", [])
+            new_state = {**state, "step": "q2", "constraints": {"default": choice}}
+
+            if not sections:
+                # No named sections — apply to whole project and generate
+                return self._generate_with_sequence(new_state)
+
+            sections_list = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(sections))
+            return {**_base,
+                "response": (
+                    f"Разбрах: **{choice_label}** за целия проект.\n\n"
+                    f"Важи ли това за **всички участъци**?\n"
+                    f"  **ДА** — генерирай\n"
+                    f"  **НЕ** — ще посоча изключенията\n\n"
+                    f"Намерени участъци:\n{sections_list}"
+                ),
+                "pending_sequence": new_state,
+            }
+
+        # ── Q2: same for all sections? ──────────────────────────────────
+        if step == "q2":
+            if "ДА" in msg or msg in ("Д", "YES", "Y", "DA"):
+                return self._generate_with_sequence(state)
+
+            if "НЕ" in msg or msg in ("Н", "NO", "N", "NE"):
+                sections = state.get("sections", [])
+                sections_list = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(sections))
+                default_label = (
+                    "Водопровод → Канализация"
+                    if state["constraints"]["default"] == "water_first"
+                    else "Канализация → Водопровод"
+                )
+                opposite_label = (
+                    "Канализация → Водопровод"
+                    if state["constraints"]["default"] == "water_first"
+                    else "Водопровод → Канализация"
+                )
+                return {**_base,
+                    "response": (
+                        f"Кои участъци имат обратна последователност "
+                        f"(**{opposite_label}**)?\n"
+                        f"Напиши номерата, разделени със запетая "
+                        f"(напр. **1, 3**):\n\n{sections_list}"
+                    ),
+                    "pending_sequence": {**state, "step": "q2_exceptions"},
+                }
+
+            return {**_base, "response": (
+                "Моля, отговори с **ДА** или **НЕ**."
+            ), "pending_sequence": state}
+
+        # ── Q2 exceptions: which sections are different? ────────────────
+        if step == "q2_exceptions":
+            sections = state.get("sections", [])
+            default = state["constraints"]["default"]
+            opposite = "sewer_first" if default == "water_first" else "water_first"
+
+            # Parse numbers from user input
+            import re as _re
+            nums = [int(n) - 1 for n in _re.findall(r"\d+", msg)
+                    if 1 <= int(n) <= len(sections)]
+
+            if not nums:
+                return {**_base, "response": (
+                    "Не разпознах номера. Моля, напиши номерата на участъците "
+                    "(напр. **1, 3**)."
+                ), "pending_sequence": state}
+
+            exception_names = [sections[i] for i in nums]
+            constraints = {**state["constraints"]}
+            for name in exception_names:
+                constraints[name] = opposite
+
+            exc_label = ", ".join(exception_names)
+            return self._generate_with_sequence({**state, "constraints": constraints,
+                                                 "_exc_label": exc_label})
+
+        # Unknown step — clear and restart
+        return {**_base, "response": "Нещо се обърка. Напиши **генерирай график** отново."}
+
+    def _generate_with_sequence(self, state: dict) -> dict:
+        """Trigger schedule generation with collected sequence constraints."""
+        analysis = state["analysis"]
+        constraints = state["constraints"]
+
+        # Build human-readable summary
+        default = constraints.get("default", "water_first")
+        default_label = "Водопровод → Канализация" if default == "water_first" else "Канализация → Водопровод"
+        summary = f"Последователност: **{default_label}**"
+        exc_label = state.get("_exc_label")
+        if exc_label:
+            opposite_label = "Канализация → Водопровод" if default == "water_first" else "Водопровод → Канализация"
+            summary += f"\nИзключения ({opposite_label}): {exc_label}"
+
+        # Re-enter generation flow
+        result = self._continue_generation(analysis, constraints)
+        result["response"] = summary + "\n\n" + result.get("response", "")
+        result.pop("pending_sequence", None)
+        return result
+
+    def _continue_generation(self, analysis: dict, sequence_constraints: dict) -> dict:
+        """Run the generation steps after questionnaire is complete."""
+        all_text = self.files.get_all_text() if self.files else ""
+
+        # Situation locations
+        situation_locations: list[str] = []
+        if self.files and self.ai:
+            classification = self.files.classify_files(ai_processor=self.ai)
+            for sit_path in classification.get("situation_paths", []):
+                situation_locations.extend(self.ai.extract_situation_locations(sit_path))
+
+        project_type = ""
+        progress_messages: list[str] = []
+        _cycle_pcts = [0.45, 0.60, 0.75, 0.85, 0.90, 0.92]
+        _cycle_idx = [0]
+
+        def _progress(msg: str) -> None:
+            progress_messages.append(msg)
+            pct = _cycle_pcts[min(_cycle_idx[0], len(_cycle_pcts) - 1)]
+            _cycle_idx[0] += 1
+            self._progress(pct, msg)
+
+        gen_result = self.ai.generate_schedule(
+            analysis, project_type, _progress,
+            all_text=all_text,
+            extra_locations=situation_locations or None,
+            sequence_constraints=sequence_constraints,
+        )
+
+        status = gen_result.get("status", "error")
+        cycles = gen_result.get("cycles", 0)
+        cost = gen_result.get("total_cost", 0.0)
+        history = gen_result.get("history", [])
+        response_parts = []
+
+        for msg in progress_messages:
+            response_parts.append(f"- {msg}")
+
+        if status == "approved":
+            response_parts.append(
+                f"\n**График одобрен!** ({cycles} {'цикъл' if cycles == 1 else 'цикъла'} проверка, ${cost:.4f})"
+            )
+        elif status == "needs_human_review":
+            remaining = gen_result.get("remaining_issues", [])
+            response_parts.append(f"\nСлед {cycles} опита остават проблеми:")
+            for issue in remaining:
+                response_parts.append(f"  - {issue}")
+        else:
+            response_parts.append(f"\nГрешка: {gen_result.get('error', 'неизвестна')}")
+
+        hallucination_warnings = gen_result.get("hallucination_warnings", [])
+        if hallucination_warnings:
+            response_parts.append(
+                f"\n⚠️ **{len(hallucination_warnings)} потенциални халюцинации в имена:**"
+            )
+            for w in hallucination_warnings[:10]:
+                response_parts.append(f"  - {w}")
+
+        self.current_schedule = gen_result.get("schedule")
+        self.correction_history = history
+
+        # Save to project manager (same as _handle_generate_schedule)
+        if self.project_mgr and self.project_mgr.current_project:
+            pid = self.project_mgr.current_project.get("id")
+            if pid:
+                self.project_mgr.save_progress(pid, {
+                    "status": "schedule_generated",
+                    "last_schedule": self.current_schedule,
+                })
+
+        return {
+            "response": "\n".join(response_parts),
+            "schedule_updated": bool(self.current_schedule),
+            "schedule_data": self.current_schedule,
+            "correction_info": {
+                "status": status,
+                "cycles": cycles,
+                "cost": cost,
+                "history": history,
+            },
+            "intent": "generate_schedule",
+            "model_used": gen_result.get("gen_model", "none"),
+        }
 
     def _handle_confirm_change(self, user_message: str, pending: dict) -> dict:
         """Handle confirmation or admin code for pending evolution changes.

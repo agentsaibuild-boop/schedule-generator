@@ -8,6 +8,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+from dotenv import dotenv_values
 
 SCREENSHOTS_DIR = Path(__file__).resolve().parent / "screenshots"
 APP_DIR = Path(__file__).resolve().parent.parent.parent
@@ -16,7 +17,7 @@ APP_URL = f"http://localhost:{APP_PORT}"
 HEALTH_URL = f"{APP_URL}/_stcore/health"
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def browser_context_args(browser_context_args):
     return {
         **browser_context_args,
@@ -34,18 +35,25 @@ def streamlit_server():
             "E2E тестовете изискват истински ANTHROPIC_API_KEY и DEEPSEEK_API_KEY."
         )
 
+    import sys
+    streamlit_exe = Path(sys.executable).parent / "streamlit.exe"
+    if not streamlit_exe.exists():
+        streamlit_exe = Path(sys.executable).parent / "streamlit"
+
+    log_file = APP_DIR / "tests" / "e2e" / "streamlit_test.log"
+    _log_fh = open(log_file, "w", encoding="utf-8")
     proc = subprocess.Popen(
         [
-            "streamlit", "run", "app.py",
+            str(streamlit_exe), "run", "app.py",
             f"--server.port={APP_PORT}",
             "--server.headless=true",
             "--browser.gatherUsageStats=false",
             "--server.fileWatcherType=none",
         ],
         cwd=str(APP_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        stdout=_log_fh,
+        stderr=_log_fh,
+        env={**os.environ, **dotenv_values(APP_DIR / ".env"), "PYTHONIOENCODING": "utf-8", "APP_PASSWORD": ""},
     )
 
     for _ in range(120):
@@ -74,8 +82,17 @@ def streamlit_server():
 @pytest.fixture(scope="function")
 def app_page(page, streamlit_server):
     """Зарежда приложението и изчаква пълното му зареждане."""
-    page.goto(streamlit_server, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_selector('[data-testid="stApp"]', timeout=15000)
+    # Wait for server to be ready (it may be busy after a previous heavy operation)
+    for _ in range(90):
+        try:
+            resp = urllib.request.urlopen(f"{streamlit_server}/_stcore/health", timeout=3)
+            if resp.status == 200:
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+    page.goto(streamlit_server, wait_until="domcontentloaded", timeout=120000)
+    page.wait_for_selector('[data-testid="stApp"]', timeout=30000)
     page.get_by_text("AI Статус").wait_for(state="visible", timeout=60000)
     page.wait_for_timeout(5000)
     return page

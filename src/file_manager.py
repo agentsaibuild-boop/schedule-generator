@@ -267,6 +267,130 @@ class FileManager:
         }
 
     # ------------------------------------------------------------------
+    # File classification (pre-conversion check)
+    # ------------------------------------------------------------------
+
+    # Keywords that indicate a mandatory Bill-of-Quantities file (КСС)
+    _REQUIRED_KEYWORDS: frozenset[str] = frozenset({
+        "ксс", "кс ", "количествен", "сметка", "bill", "boq",
+    })
+
+    # Keywords that indicate useful-but-optional supporting documents
+    _USEFUL_KEYWORDS: frozenset[str] = frozenset({
+        "технич", "задание", "спецификац", "договор", "проект",
+        "обяснителн", "записка", "пояснителн", "техническо",
+    })
+
+    # Keywords that indicate a situation / site-plan drawing (трасировъчен план)
+    # These files contain street/quarter names as visual labels — ground-truth for locations.
+    _SITUATION_KEYWORDS: frozenset[str] = frozenset({
+        "ситуация", "ситуат", "трасе", "трасировъч", "situation", "site plan",
+        "генерален план", "ген.план", "генплан",
+    })
+
+    def classify_files(self, ai_processor: Any | None = None) -> dict:
+        """Classify project files as required, useful, situation, or unknown.
+
+        Step 1: keyword match on filename (free, instant).
+        Step 2: if no required file found and ai_processor available,
+                ask DeepSeek to classify by filename (cheap fallback).
+
+        Returns:
+            Dict with keys:
+                required        (list[str])   — КСС / bill-of-quantities files
+                useful          (list[str])   — tech specs, contracts, etc.
+                situation       (list[str])   — site plan / трасировъчен план filenames
+                situation_paths (list[str])   — full absolute paths to situation files
+                unknown         (list[str])   — unrecognised files
+                can_proceed     (bool)        — True if at least one required file exists
+                ai_used         (bool)        — True if AI fallback was triggered
+        """
+        files = self._list_supported_files()
+
+        required: list[str] = []
+        useful: list[str] = []
+        situation: list[str] = []
+        situation_paths: list[str] = []
+        unknown: list[str] = []
+
+        for fp in files:
+            name = fp.name
+            lower = name.lower()
+            if any(kw in lower for kw in self._SITUATION_KEYWORDS):
+                situation.append(name)
+                situation_paths.append(str(fp))
+            elif any(kw in lower for kw in self._REQUIRED_KEYWORDS):
+                required.append(name)
+            elif any(kw in lower for kw in self._USEFUL_KEYWORDS):
+                useful.append(name)
+            else:
+                unknown.append(name)
+
+        # If keyword match already found a required file — done.
+        if required:
+            return {
+                "required": required,
+                "useful": useful,
+                "situation": situation,
+                "situation_paths": situation_paths,
+                "unknown": unknown,
+                "can_proceed": True,
+                "ai_used": False,
+            }
+
+        # Fallback: ask AI to classify by filename only.
+        if ai_processor is not None and hasattr(ai_processor, "router") and ai_processor.router:
+            try:
+                names = [fp.name for fp in files]
+                file_list = "\n".join(f"- {n}" for n in names)
+                messages = [{
+                    "role": "user",
+                    "content": (
+                        "Класифицирай следните файлове от строителен проект. "
+                        "За всеки файл посочи категорията му:\n"
+                        "  required  — КСС / количествено-стойностна сметка (задължителен)\n"
+                        "  useful    — техническа спецификация, договор, проект, задание\n"
+                        "  situation — ситуация / трасировъчен план / генерален план (чертеж)\n"
+                        "  unknown   — всичко останало\n\n"
+                        f"Файлове:\n{file_list}\n\n"
+                        "Отговори само с валиден JSON:\n"
+                        '{"required": [...], "useful": [...], "situation": [...], "unknown": [...]}'
+                    ),
+                }]
+                result = ai_processor.router.chat(messages, system_prompt="")
+                import json as _json
+                classified = _json.loads(result["content"])
+                ai_required = classified.get("required", [])
+                ai_useful = classified.get("useful", [])
+                ai_situation = classified.get("situation", [])
+                ai_unknown = classified.get("unknown", [])
+                # Resolve full paths for AI-detected situation files
+                name_to_path = {fp.name: str(fp) for fp in files}
+                ai_situation_paths = [name_to_path[n] for n in ai_situation if n in name_to_path]
+                return {
+                    "required": ai_required,
+                    "useful": ai_useful,
+                    "situation": ai_situation,
+                    "situation_paths": ai_situation_paths,
+                    "unknown": ai_unknown,
+                    "can_proceed": len(ai_required) > 0,
+                    "ai_used": True,
+                }
+            except Exception:
+                logger.warning("AI file classification failed, proceeding with unknown classification.")
+
+        # No AI available and no keyword match — cannot determine required files.
+        return {
+            "required": [],
+            "useful": useful,
+            "situation": situation,
+            "situation_paths": situation_paths,
+            "unknown": unknown + required,  # required is empty here, unknown gets everything
+            "can_proceed": False,
+            "ai_used": False,
+        }
+
+    # ------------------------------------------------------------------
     # Batch conversion
     # ------------------------------------------------------------------
 

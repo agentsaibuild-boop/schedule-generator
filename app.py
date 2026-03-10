@@ -101,6 +101,24 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
+# Authentication gate
+# ---------------------------------------------------------------------------
+_APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+if _APP_PASSWORD and not st.session_state.get("authenticated"):
+    st.markdown("<br>" * 3, unsafe_allow_html=True)
+    _, col, _ = st.columns([1, 1, 1])
+    with col:
+        st.markdown("### Вход")
+        _pwd = st.text_input("Парола", type="password", key="_login_pwd")
+        if st.button("Влез", use_container_width=True):
+            if _pwd == _APP_PASSWORD:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Грешна парола.")
+    st.stop()
+
+# ---------------------------------------------------------------------------
 # Configuration check (for installer deployments)
 # ---------------------------------------------------------------------------
 def _check_configuration():
@@ -174,6 +192,15 @@ if "current_model" not in st.session_state:
 
 if "pending_changes" not in st.session_state:
     st.session_state.pending_changes = None
+
+if "pending_sequence" not in st.session_state:
+    st.session_state.pending_sequence = None
+
+if "pending_conflicts" not in st.session_state:
+    st.session_state.pending_conflicts = None
+
+if "pending_conflicts_analysis" not in st.session_state:
+    st.session_state.pending_conflicts_analysis = None
 
 if "evolution_history" not in st.session_state:
     st.session_state.evolution_history = []
@@ -425,6 +452,46 @@ def _run_conversion(force: bool = False) -> None:
         status_lines.append(f"{emoji} {filename}")
         progress_bar.progress(current / total, text=f"{current}/{total}: {filename}")
         status_area.caption("\n".join(status_lines[-5:]))
+
+    # Pre-conversion classification check
+    classification = file_mgr.classify_files(ai_processor=ai_processor)
+    ai_label = " (AI)" if classification.get("ai_used") else ""
+
+    if not classification["can_proceed"]:
+        progress_bar.empty()
+        status_area.empty()
+        warning_lines = [
+            "**⛔ Няма намерен КСС файл — генерирането е блокирано.**\n",
+            "За да продължи обработката, папката трябва да съдържа "
+            "**Количествено-стойностна сметка** (КСС).\n",
+        ]
+        if classification["unknown"]:
+            warning_lines.append("Неразпознати файлове:")
+            for f in classification["unknown"]:
+                warning_lines.append(f"  - {f}")
+        warning_lines.append(
+            "\nПреименувайте файла така, че да съдържа 'КСС' или 'количествена сметка',"
+            f" или преместете нерелевантни файлове извън папката{ai_label}."
+        )
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": "\n".join(warning_lines),
+        })
+        st.rerun()
+        return
+
+    # Warn about unknown files but allow proceeding
+    if classification["unknown"]:
+        unknown_list = "\n".join(f"  - {f}" for f in classification["unknown"])
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": (
+                f"⚠️ **Открити неразпознати файлове{ai_label}** — ще бъдат включени в анализа,"
+                " но може да съдържат нерелевантна информация:\n"
+                f"{unknown_list}\n\n"
+                "Ако не искате да ги включите, преместете ги извън папката и конвертирайте отново."
+            ),
+        })
 
     result = file_mgr.convert_all(
         ai_processor=ai_processor,
@@ -1068,6 +1135,9 @@ with chat_col:
                 pending_changes=st.session_state.pending_changes,
                 recent_projects=st.session_state.recent_projects,
                 progress_callback=_on_progress,
+                pending_sequence=st.session_state.pending_sequence,
+                pending_conflicts=st.session_state.pending_conflicts,
+                pending_conflicts_analysis=st.session_state.pending_conflicts_analysis,
             )
         except Exception as exc:
             result = {
@@ -1127,6 +1197,20 @@ with chat_col:
         if result.get("evolution_cleared") or result.get("evolution_applied"):
             st.session_state.pending_changes = None
 
+        # Handle sequence questionnaire state
+        if result.get("pending_sequence"):
+            st.session_state.pending_sequence = result["pending_sequence"]
+        else:
+            st.session_state.pending_sequence = None
+
+        # Handle conflict resolution state
+        if result.get("pending_conflicts"):
+            st.session_state.pending_conflicts = result["pending_conflicts"]
+            st.session_state.pending_conflicts_analysis = result.get("pending_analysis")
+        else:
+            st.session_state.pending_conflicts = None
+            st.session_state.pending_conflicts_analysis = None
+
         # Build response with fallback notice
         response_text = result["response"]
 
@@ -1173,6 +1257,8 @@ with viz_col:
     if schedule != st.session_state.get("current_schedule"):
         st.session_state.current_schedule = schedule
         st.session_state.schedule_data = schedule
+    # DEBUG: show schedule count for test diagnostics
+    st.caption(f"DEBUG_SCHED:{len(schedule)}")
 
     # ── Layer toggles (row 1) ─────────────────────────────────────────
     st.caption("**Слоеве:**")

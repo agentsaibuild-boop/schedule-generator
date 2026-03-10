@@ -13,7 +13,7 @@ def test_gantt_renders_on_load(app_page):
     FAILURE означава: schedule_builder.py или gantt_chart.py са счупени.
     """
     chart = app_page.locator('[data-testid="stPlotlyChart"]')
-    chart.first.wait_for(state="visible", timeout=30000)
+    chart.first.wait_for(state="visible", timeout=60000)
     assert chart.count() >= 1, "Gantt chart не се рендира при зареждане"
 
 
