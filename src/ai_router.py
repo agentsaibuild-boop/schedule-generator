@@ -320,14 +320,15 @@ class AIRouter:
         }
 
     def _chat_anthropic(
-        self, messages: list[dict], system_prompt: str, *, is_fallback: bool = False
+        self, messages: list[dict], system_prompt: str, *, is_fallback: bool = False,
+        max_tokens: int = 4096,
     ) -> dict:
         """Send chat to Anthropic Claude."""
         client = self._get_anthropic()
 
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=4096,
+            max_tokens=max_tokens,
             system=system_prompt,
             messages=messages,
         )
@@ -345,6 +346,25 @@ class AIRouter:
             "cost": self._calculate_cost("claude-sonnet-4-6", tokens_in, tokens_out),
             "fallback": is_fallback,
         }
+
+    def chat_anthropic_direct(
+        self, messages: list[dict], system_prompt: str, max_tokens: int = 4096
+    ) -> dict:
+        """Send a chat request directly to Anthropic (no fallback to DeepSeek).
+
+        Used for tasks that require structured expert reasoning — e.g. MS Project
+        enrichment — where only the controller model is appropriate.
+
+        Args:
+            messages: Chat messages list.
+            system_prompt: System prompt string.
+            max_tokens: Max output tokens (default 4096; use 8192+ for large schedules).
+
+        Returns same structure as _chat_anthropic: content, model, cost, usage.
+        """
+        return self._chat_anthropic(
+            messages, system_prompt, is_fallback=False, max_tokens=max_tokens
+        )
 
     # ------------------------------------------------------------------
     # Schedule verification (Controller = Anthropic, fallback = DeepSeek)

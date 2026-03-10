@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e \"const p = require\\(''./package.json''\\); console.log\\(''name:'', p.name\\); console.log\\(''deps:'', Object.keys\\(p.dependencies\\).join\\('', ''\\)\\);\")",
+      "Bash(cmd /c \"node -e \"\"const p = require\\(''./package.json''\\); console.log\\(p.name, Object.keys\\(p.dependencies\\).join\\('', ''\\)\\)\"\"\")",
+      "Bash(cmd /c \"cd c:\\\\Users\\\\nikolai_zarov\\\\Documents\\\\GitHub\\\\aibuild-website && npm install\")"
+    ]
+  }
+}

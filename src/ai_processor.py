@@ -381,11 +381,21 @@ class AIProcessor:
                     schedule_tasks, locations, all_text
                 )
 
+        # Step 4: MS Project expert enrichment
+        verified_schedule = cycle_result.get("schedule", {})
+        msp_cost = 0.0
+        if verified_schedule:
+            if progress_callback:
+                progress_callback("Обогатявам за MS Project... (Anthropic)")
+            enriched, msp_cost = self.enrich_for_msproject(verified_schedule)
+            if enriched:
+                verified_schedule = enriched
+
         return {
             "status": cycle_result["status"],
-            "schedule": cycle_result["schedule"],
+            "schedule": verified_schedule,
             "cycles": cycle_result["cycles"],
-            "total_cost": gen_cost + cycle_cost,
+            "total_cost": gen_cost + cycle_cost + msp_cost,
             "history": cycle_result.get("history", []),
             "remaining_issues": cycle_result.get("remaining_issues", []),
             "gen_model": gen_result["model"],
@@ -461,6 +471,174 @@ class AIProcessor:
                     )
 
         return warnings
+
+    # ------------------------------------------------------------------
+    # MS Project expert enrichment
+    # ------------------------------------------------------------------
+
+    def enrich_for_msproject(
+        self, schedule: dict | str
+    ) -> tuple[dict | None, float]:
+        """Enrich a verified schedule with MS Project structure and metadata.
+
+        This is the third AI pass in the pipeline — an MS Project expert that
+        knows the output will be refined by a human in MS Project.  It adds:
+          - WBS codes (hierarchical numbering: 1, 1.1, 1.2, 2, ...)
+          - Dependency types per link (FS / SS / FF / SF) with lag_days
+          - Milestone tasks at key phase transitions
+          - Summary (parent) tasks grouping related activities
+          - Constraint hints (ASAP / MFO / FNLT) where technically justified
+          - Per-task notes explaining the scheduling logic for the human reviewer
+          - risk_buffer_days: recommended float for critical tasks
+
+        The method uses Anthropic (controller model) because it requires
+        structured reasoning about MS Project conventions, not just text generation.
+
+        Args:
+            schedule: Verified schedule dict (or JSON string) from generate_schedule().
+
+        Returns:
+            Tuple of (enriched schedule dict | None, cost_usd).
+            Returns (None, 0.0) on failure so the caller can fall back to the
+            original verified schedule.
+        """
+        if not self.router:
+            return None, 0.0
+
+        if isinstance(schedule, str):
+            try:
+                schedule = json.loads(schedule)
+            except json.JSONDecodeError:
+                logger.warning("enrich_for_msproject: invalid JSON schedule string")
+                return None, 0.0
+
+        tasks = schedule.get("tasks", [])
+        if not tasks:
+            return None, 0.0
+
+        system_prompt = (
+            "Ти си сертифициран експерт по Microsoft Project (PMP + MCTS) с 15+ години опит "
+            "в управлението на ВиК инфраструктурни проекти в България.\n\n"
+            "КОНТЕКСТ: Получаваш верифициран строителен график (JSON), генериран от AI. "
+            "Графикът ЩЕ БЪДЕ отворен в Microsoft Project от опитен ръководител на проект, "
+            "който ще го доработи ръчно. Твоята задача е да го ОБОГАТИШ до ниво, "
+            "което максимално улеснява човека в MS Project — не да промениш логиката, "
+            "а да добавиш MS Project специфична структура и метаданни.\n\n"
+            "КАКВО ДА ДОБАВИШ КЪМ ВСЯКА ЗАДАЧА:\n"
+            "1. wbs: WBS код (напр. '1', '1.1', '2', '2.3') — йерархичен номер\n"
+            "2. dependency_type: тип на всяка зависимост — 'FS', 'SS', 'FF' или 'SF'\n"
+            "   По подразбиране е 'FS'. Използвай 'SS' когато задачите логично вървят паралелно "
+            "   (напр. изкоп и монтаж на малко разстояние). Използвай 'FF' за финализиращи задачи.\n"
+            "3. lag_days: закъснение след зависимостта в дни (0 = веднага, >0 = изчакай)\n"
+            "   Примери: между изкоп и монтаж lag=0, между монтаж и засипване lag=1 (спиране на натиск)\n"
+            "4. is_milestone: true само за задачи с duration=0 или за ключови контролни точки\n"
+            "5. constraint_type: 'ASAP' (по подразбиране), 'MFO' (Must Finish On), "
+            "   'FNLT' (Finish No Later Than) — само когато има реална техническа причина\n"
+            "6. notes_msp: кратка бележка (1-2 изречения БГ) за ръководителя на проекта — "
+            "   защо тази задача е така наредена, какво да внимава при ручна корекция\n"
+            "7. risk_buffer_days: препоръчителен буфер в дни (0 ако няма риск, 3-10 за сложни)\n"
+            "8. Ако има логически групи задачи — добави summary задача (is_summary: true, "
+            "   duration = span от първата до последната подзадача, sub_task_ids: [...])\n\n"
+            "ПРАВИЛА:\n"
+            "- НЕ ПРОМЕНЯЙ start_day, duration, dependencies на съществуващите задачи\n"
+            "- НЕ ДОБАВЯЙ нови работни задачи — само summary/milestone задачи\n"
+            "- Milestone задачите имат duration=0 и се поставят в края на фаза\n"
+            "- Summary задачите не се изпълняват — те само групират (is_summary=true)\n"
+            "- WBS кодовете трябва да са консистентни с йерархията\n"
+            "- lag_days могат да са отрицателни (lead time) — напр. -2 означава 'започни 2 дни преди края'\n\n"
+            "ФОРМАТ НА ОТГОВОРА — САМО ДЕЛТА (не повтаряй оригиналните полета):\n"
+            "{\n"
+            '  "enrichments": [\n'
+            '    {"id": 1, "wbs": "1", "dependency_type": "FS", "lag_days": 0,\n'
+            '     "constraint_type": "ASAP", "notes_msp": "...", "risk_buffer_days": 0},\n'
+            "    ...\n"
+            "  ],\n"
+            '  "milestones": [\n'
+            '    {"id": "M1", "name": "Край фаза Водопровод", "start_day": 62, "wbs": "1.M"},\n'
+            "    ...\n"
+            "  ],\n"
+            '  "summary_tasks": [\n'
+            '    {"id": "S1", "name": "Водопроводна мрежа", "wbs": "1", "start_day": 0,\n'
+            '     "duration": 62, "sub_task_ids": [1, 2, 3, 4, 5]},\n'
+            "    ...\n"
+            "  ],\n"
+            '  "msp_notes": "Обща бележка за ръководителя..."\n'
+            "}\n"
+            "НЕ включвай никакъв текст извън JSON. "
+            "НЕ повтаряй оригиналните полета (name, duration, start_day) в enrichments."
+        )
+
+        # Send slim task list (only fields needed for reasoning)
+        slim_tasks = [
+            {k: v for k, v in t.items()
+             if k in ("id", "name", "duration", "start_day", "dependencies", "team")}
+            for t in tasks
+        ]
+        slim_schedule = {
+            "tasks": slim_tasks,
+            "total_duration": schedule.get("total_duration"),
+        }
+        schedule_json = json.dumps(slim_schedule, ensure_ascii=False)
+        user_msg = (
+            "Обогати следния строителен график за MS Project. "
+            "Върни САМО делтата (enrichments по id, milestones, summary_tasks, msp_notes):\n\n"
+            f"{schedule_json}"
+        )
+
+        messages = [{"role": "user", "content": user_msg}]
+
+        try:
+            # Use Anthropic (controller) — delta format keeps output compact
+            result = self.router.chat_anthropic_direct(
+                messages, system_prompt, max_tokens=8192
+            )
+            raw = result.get("content", "")
+            cost = result.get("cost", 0.0)
+
+            # Strip markdown fences
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3].strip()
+
+            enriched = json.loads(cleaned)
+
+            # Merge enrichment deltas back into original tasks by id
+            delta_by_id: dict = {}
+            for e in enriched.get("enrichments", []):
+                delta_by_id[e.get("id")] = e
+
+            merged_tasks = []
+            for orig in tasks:
+                tid = orig.get("id")
+                delta = delta_by_id.get(tid, {})
+                merged = {**orig}
+                for key in ("wbs", "dependency_type", "lag_days", "is_milestone",
+                            "constraint_type", "notes_msp", "risk_buffer_days"):
+                    if key in delta:
+                        merged[key] = delta[key]
+                merged_tasks.append(merged)
+
+            result_schedule = {
+                **schedule,
+                "tasks": merged_tasks,
+                "milestones": enriched.get("milestones", []),
+                "summary_tasks": enriched.get("summary_tasks", []),
+                "msp_notes": enriched.get("msp_notes", ""),
+            }
+
+            logger.info(
+                "MS Project enrichment: %d tasks enriched, %d milestones, %d summary tasks",
+                len(merged_tasks),
+                len(result_schedule["milestones"]),
+                len(result_schedule["summary_tasks"]),
+            )
+            return result_schedule, cost
+
+        except Exception as exc:
+            logger.warning("MS Project enrichment failed: %s", exc)
+            return None, 0.0
 
     # ------------------------------------------------------------------
     # Chat response
