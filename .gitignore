@@ -18,6 +18,18 @@ output/
 # Streamlit secrets
 .streamlit/secrets.toml
 
+# Claude Code internals
+.claude/
+
+# Temp test scripts
+_tmp_test.py
+_generate_novi_iskar.py
+_export_xml_novi_iskar.py
+_test_enrich.py
+
+# Test logs
+tests/e2e/*.log
+
 # Installer tools
 tools/python-installer.exe
 
