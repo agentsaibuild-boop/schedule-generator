@@ -302,6 +302,7 @@ class AIRouter:
             messages=full_messages,
             max_tokens=4096,
             temperature=0.3,
+            timeout=120,
         )
 
         content = response.choices[0].message.content or ""
@@ -331,6 +332,7 @@ class AIRouter:
             max_tokens=max_tokens,
             system=system_prompt,
             messages=messages,
+            timeout=120,
         )
 
         content = response.content[0].text if response.content else ""
@@ -370,17 +372,19 @@ class AIRouter:
     # Schedule verification (Controller = Anthropic, fallback = DeepSeek)
     # ------------------------------------------------------------------
 
-    def verify_schedule(self, schedule_json: str, rules: str) -> dict:
+    def verify_schedule(self, schedule_json: str, rules: str, project_type: str = "") -> dict:
         """Send schedule to the controller (Anthropic) for verification.
 
         Args:
             schedule_json: The schedule as a JSON string.
             rules: Verification rules from knowledge/skills.
+            project_type: Project type for methodology-specific validation.
 
         Returns:
             Dict with approved, issues, corrections, model, cost.
         """
-        system_prompt = VERIFICATION_SYSTEM_PROMPT.format(rules=rules)
+        type_context = f"Тип проект: {project_type}\n\n" if project_type else ""
+        system_prompt = VERIFICATION_SYSTEM_PROMPT.format(rules=f"{type_context}{rules}")
         user_message = f"Провери следния график:\n\n{schedule_json}"
 
         # Try Anthropic first
@@ -429,6 +433,7 @@ class AIRouter:
                 system=system_prompt,
                 messages=messages,
                 temperature=0.1,
+                timeout=120,
             )
             raw = response.content[0].text if response.content else "{}"
             tokens_in = response.usage.input_tokens
@@ -442,6 +447,7 @@ class AIRouter:
                 messages=full_msgs,
                 max_tokens=4096,
                 temperature=0.1,
+                timeout=120,
             )
             raw = response.choices[0].message.content or "{}"
             usage = response.usage
@@ -536,6 +542,7 @@ class AIRouter:
                 messages=full_msgs,
                 max_tokens=8192,
                 temperature=0.1,
+                timeout=120,
             )
             raw = response.choices[0].message.content or "{}"
             usage = response.usage
@@ -550,6 +557,7 @@ class AIRouter:
                 system=system_prompt,
                 messages=messages,
                 temperature=0.1,
+                timeout=120,
             )
             raw = response.content[0].text if response.content else "{}"
             tokens_in = response.usage.input_tokens
@@ -579,6 +587,7 @@ class AIRouter:
         max_cycles: int = 3,
         progress_callback: Any | None = None,
         knowledge_prompt: str = "",
+        project_type: str = "",
     ) -> dict:
         """Automatic correction cycle: verify -> correct -> verify (max N times).
 
@@ -616,7 +625,7 @@ class AIRouter:
                     f"Проверявам правилата... ({model_label}) [опит {cycle + 1}]"
                 )
 
-            verification = self.verify_schedule(current_schedule, rules)
+            verification = self.verify_schedule(current_schedule, rules, project_type=project_type)
             total_cost += verification.get("cost", 0.0)
 
             if verification.get("error"):
@@ -826,6 +835,7 @@ class AIRouter:
             model="deepseek-chat",
             messages=messages,
             max_tokens=4096,
+            timeout=120,
         )
         text = response.choices[0].message.content or ""
         usage = response.usage
@@ -857,6 +867,7 @@ class AIRouter:
                     {"type": "text", "text": prompt},
                 ],
             }],
+            timeout=120,
         )
         text = response.content[0].text if response.content else ""
         self._log_usage(

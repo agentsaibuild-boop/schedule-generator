@@ -154,12 +154,16 @@ def test_exports():
         print(f"FAILED - {len(errors)} error(s):")
         for e in errors:
             print(f"  - {e}")
-        return False
     else:
         print("ALL TESTS PASSED")
-        return True
+
+    assert not errors, f"{len(errors)} export error(s): {'; '.join(errors)}"
 
 
 if __name__ == "__main__":
-    success = test_exports()
-    sys.exit(0 if success else 1)
+    try:
+        test_exports()
+        sys.exit(0)
+    except AssertionError as e:
+        print(str(e))
+        sys.exit(1)

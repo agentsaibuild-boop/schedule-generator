@@ -224,6 +224,10 @@ def _build_tasks(
     uid_map: dict[str, int] = {}
     uid_counter = 1
 
+    # Outline number tracking: (level, parent_id) → current count
+    _outline_counters: dict[tuple, int] = {}
+    _outline_nums: dict[str, str] = {}  # task_id → "1.2.3"
+
     for task in flat_tasks:
         task_id = task.get("id", "")
         uid_map[task_id] = uid_counter
@@ -236,6 +240,18 @@ def _build_tasks(
         # Outline level
         outline = _get_outline_level(task)
         ET.SubElement(task_elem, "OutlineLevel").text = str(outline)
+
+        # OutlineNumber (e.g. "1", "1.1", "1.1.2") — required for WBS hierarchy in MS Project
+        parent_id = task.get("parent_id")
+        parent_num = _outline_nums.get(parent_id, "") if parent_id else ""
+        counter_key = (outline, parent_id or "")
+        _outline_counters[counter_key] = _outline_counters.get(counter_key, 0) + 1
+        outline_num = (
+            f"{parent_num}.{_outline_counters[counter_key]}" if parent_num
+            else str(_outline_counters[counter_key])
+        )
+        _outline_nums[task_id] = outline_num
+        ET.SubElement(task_elem, "OutlineNumber").text = outline_num
 
         # Dates
         start_day = task.get("start_day", 1)
@@ -306,25 +322,43 @@ def _add_task_custom_fields(task_elem: ET.Element, task: dict) -> None:
         ET.SubElement(ea, "Value").text = team
 
 
+_DEPENDENCY_TYPE_MAP = {
+    "FS": "1",  # Finish-to-Start (default)
+    "SS": "3",  # Start-to-Start
+    "FF": "0",  # Finish-to-Finish
+    "SF": "2",  # Start-to-Finish
+}
+
+
 def _add_predecessor_links(
     task_elem: ET.Element,
     task: dict,
     uid_map: dict[str, int],
 ) -> None:
-    """Add dependency links to a task element."""
+    """Add dependency links to a task element.
+
+    Reads dependency_type and lag_days from task dict (set by enrich_for_msproject).
+    LinkLag is in tenths of minutes: 1 day = 480 min × 10 = 4800.
+    """
     deps = task.get("dependencies", [])
     if not deps:
         return
 
+    dep_type_str = (task.get("dependency_type") or "FS").upper()
+    type_code = _DEPENDENCY_TYPE_MAP.get(dep_type_str, "1")
+    lag_days = int(task.get("lag_days") or 0)
+    link_lag = str(lag_days * 4800)  # tenths of minutes per day
+
     for dep_id in deps:
         dep_uid = uid_map.get(dep_id)
         if dep_uid is None:
+            logger.debug("Predecessor %s not found in uid_map (task %s)", dep_id, task.get("id"))
             continue
 
         pred = ET.SubElement(task_elem, "PredecessorLink")
         ET.SubElement(pred, "PredecessorUID").text = str(dep_uid)
-        ET.SubElement(pred, "Type").text = "1"  # FS (Finish-to-Start)
-        ET.SubElement(pred, "LinkLag").text = "0"
+        ET.SubElement(pred, "Type").text = type_code
+        ET.SubElement(pred, "LinkLag").text = link_lag
         ET.SubElement(pred, "LagFormat").text = "5"  # days
 
 
@@ -395,48 +429,41 @@ def _build_assignments(
 # ---------------------------------------------------------------------------
 
 
-def _flatten_schedule(schedule_data: list[dict]) -> list[dict]:
+def _flatten_schedule(
+    schedule_data: list[dict],
+    _parent_id: str | None = None,
+    _depth: int = 1,
+) -> list[dict]:
     """Flatten hierarchical schedule into a list with proper outline levels.
 
-    Walks top-level tasks and their sub_activities recursively.
-    Marks parent tasks with _has_children=True and subtasks with _is_subtask=True.
+    Recursively walks sub_activities up to 3 levels deep.
+    Sets _has_children, _is_subtask, _outline_level on each entry.
     """
     result = []
     for task in schedule_data:
-        has_subs = bool(task.get("sub_activities"))
-        entry = {**task, "_has_children": has_subs, "_is_subtask": False}
+        subs = task.get("sub_activities") or []
+        has_subs = bool(subs)
+        entry = {
+            **task,
+            "_has_children": has_subs,
+            "_is_subtask": _depth > 1,
+            "_outline_level": _depth,
+        }
+        if not entry.get("parent_id") and _parent_id:
+            entry["parent_id"] = _parent_id
         result.append(entry)
 
         if has_subs:
-            for sub in task["sub_activities"]:
-                sub_entry = {
-                    **sub,
-                    "_has_children": False,
-                    "_is_subtask": True,
-                }
-                # Inherit parent_id if not set
-                if not sub_entry.get("parent_id"):
-                    sub_entry["parent_id"] = task.get("id")
-                result.append(sub_entry)
+            result.extend(
+                _flatten_schedule(subs, _parent_id=task.get("id"), _depth=_depth + 1)
+            )
 
     return result
 
 
 def _get_outline_level(task: dict) -> int:
-    """Determine the outline level for a task.
-
-    0 = root (project), 1 = top-level, 2 = sub-activity.
-    """
-    if task.get("_is_subtask"):
-        return 2
-    return 1
-
-
-def _find_uid_by_id(
-    task_id: str, schedule_data: list[dict], uid_map: dict[str, int]
-) -> int | None:
-    """Find UID of a task by its ID."""
-    return uid_map.get(task_id)
+    """Determine the outline level for a task (1-based, 0 = project root)."""
+    return task.get("_outline_level", 1)
 
 
 def _serialize_xml(root: ET.Element) -> bytes:

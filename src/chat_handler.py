@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -498,8 +499,7 @@ class ChatHandler:
         raw_analysis = analysis.get("analysis", "")
         if isinstance(raw_analysis, str):
             try:
-                import json as _json
-                parsed_a = _json.loads(raw_analysis)
+                parsed_a = json.loads(raw_analysis)
                 conflicts = parsed_a.get("conflicts", [])
             except Exception:
                 pass
@@ -548,15 +548,27 @@ class ChatHandler:
                     locs = self.ai.extract_situation_locations(sit_path)
                     situation_locations.extend(locs)
                 if situation_locations:
-                    import logging as _log
-                    _log.getLogger(__name__).info(
+                    logger.info(
                         "Situation extraction added %d locations", len(situation_locations)
                     )
 
         # Step 2: Generate schedule with verification
         self._progress(0.25, "Генериране на график...")
+
+        # Extract project_type from AI analysis first (higher priority than manual selection)
         project_type = ""
-        if project_context:
+        raw_analysis_for_type = analysis.get("analysis", "")
+        if isinstance(raw_analysis_for_type, str):
+            try:
+                _parsed_pt = json.loads(raw_analysis_for_type)
+                project_type = _parsed_pt.get("project_type", "")
+            except Exception:
+                pass
+        elif isinstance(raw_analysis_for_type, dict):
+            project_type = raw_analysis_for_type.get("project_type", "")
+
+        # Fallback to manual project_context selection only if AI didn't determine a type
+        if not project_type and project_context:
             project_type = project_context.get("type", "")
 
         progress_messages: list[str] = []
@@ -1192,11 +1204,10 @@ class ChatHandler:
         ["Клон 1", "Клон 2", "ул. Витоша", ...].
         Empty list if no sections found.
         """
-        import json as _json
         raw = analysis.get("analysis", "")
         if isinstance(raw, str):
             try:
-                parsed = _json.loads(raw)
+                parsed = json.loads(raw)
             except Exception:
                 return []
         elif isinstance(raw, dict):
@@ -1225,12 +1236,11 @@ class ChatHandler:
         Returns a pending_sequence state dict with the first question,
         or None if the questionnaire is not needed (e.g. water-only project).
         """
-        import json as _json
         raw = analysis.get("analysis", "")
         parsed: dict = {}
         if isinstance(raw, str):
             try:
-                parsed = _json.loads(raw)
+                parsed = json.loads(raw)
             except Exception:
                 pass
         elif isinstance(raw, dict):
@@ -1244,10 +1254,10 @@ class ChatHandler:
 
         _WATER_KEYWORDS = [
             "водопровод", "вода", "water", "в/к", "вк мрежа",
-            "водоснабдяване", "питейна", "водопроводна",
+            "водоснабдяване", "питейна", "водопроводна", "тласкател",
         ]
         _SEWER_KEYWORDS = [
-            "канализация", "канал", "sewer", "в/к", "вк мрежа",
+            "канализация", "канал", "sewer", "вк мрежа",
             "отводняване", "канализационна", "фекална", "дъждовна",
         ]
         has_water = any(w in combined for w in _WATER_KEYWORDS)
@@ -1360,8 +1370,7 @@ class ChatHandler:
             opposite = "sewer_first" if default == "water_first" else "water_first"
 
             # Parse numbers from user input
-            import re as _re
-            nums = [int(n) - 1 for n in _re.findall(r"\d+", msg)
+            nums = [int(n) - 1 for n in re.findall(r"\d+", msg)
                     if 1 <= int(n) <= len(sections)]
 
             if not nums:
@@ -1413,7 +1422,18 @@ class ChatHandler:
             for sit_path in classification.get("situation_paths", []):
                 situation_locations.extend(self.ai.extract_situation_locations(sit_path))
 
+        # Extract project_type from analysis (same logic as _handle_generate_schedule)
         project_type = ""
+        raw_analysis_for_type = analysis.get("analysis", "")
+        if isinstance(raw_analysis_for_type, str):
+            try:
+                _parsed_pt = json.loads(raw_analysis_for_type)
+                project_type = _parsed_pt.get("project_type", "")
+            except Exception:
+                pass
+        elif isinstance(raw_analysis_for_type, dict):
+            project_type = raw_analysis_for_type.get("project_type", "")
+
         progress_messages: list[str] = []
         _cycle_pcts = [0.45, 0.60, 0.75, 0.85, 0.90, 0.92]
         _cycle_idx = [0]
