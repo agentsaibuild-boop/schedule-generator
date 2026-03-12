@@ -179,7 +179,6 @@ def _register_fonts() -> bool:
 
 def _download_dejavu_fonts(target_dir: Path) -> bool:
     """Download DejaVu Sans fonts from GitHub releases."""
-    import io as _io
     import urllib.request
     import zipfile
 
@@ -196,7 +195,7 @@ def _download_dejavu_fonts(target_dir: Path) -> bool:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = resp.read()
 
-        with zipfile.ZipFile(_io.BytesIO(data)) as zf:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
             for name in zf.namelist():
                 basename = Path(name).name
                 if basename in ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"):
