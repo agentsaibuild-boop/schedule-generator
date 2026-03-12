@@ -168,6 +168,10 @@ class AIRouter:
         self._anthropic_client = anthropic.Anthropic(api_key=self._anthropic_key)
         return self._anthropic_client
 
+    def get_anthropic_client(self):
+        """Public accessor for the Anthropic client (for use by external modules)."""
+        return self._get_anthropic()
+
     # ------------------------------------------------------------------
     # System prompt validation
     # ------------------------------------------------------------------
