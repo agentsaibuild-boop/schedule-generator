@@ -40,10 +40,13 @@ from src.docs_updater import DocsUpdater
 def _ensure_schedule_list(data: object) -> list[dict]:
     """Parse schedule data into a list of task dicts.
 
-    Handles: list[dict] (passthrough), JSON string, markdown-fenced JSON.
+    Handles: list[dict] (passthrough), dict with "tasks" key,
+    JSON string, markdown-fenced JSON.
     """
     if isinstance(data, list):
         return data
+    if isinstance(data, dict):
+        return data.get("tasks", [])
     if not isinstance(data, str) or not data.strip():
         return []
     cleaned = data.strip()
