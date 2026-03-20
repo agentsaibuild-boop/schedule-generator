@@ -310,8 +310,8 @@ class AIProcessor:
             try:
                 parsed_analysis = json.loads(raw_analysis)
                 locations = parsed_analysis.get("locations", [])
-            except (json.JSONDecodeError, AttributeError):
-                pass
+            except (json.JSONDecodeError, AttributeError) as exc:
+                logger.debug("Could not parse locations from analysis JSON: %s", exc)
         elif isinstance(raw_analysis, dict):
             locations = raw_analysis.get("locations", [])
 

@@ -1053,8 +1053,8 @@ class AIRouter:
                 data = json.loads(self._cumulative_path.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
                     self._cumulative = data
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.debug("Could not load cumulative usage cache (%s): %s", self._cumulative_path, exc)
 
     def _save_cumulative(self) -> None:
         """Save cumulative usage to disk."""
@@ -1066,8 +1066,8 @@ class AIRouter:
                 json.dumps(self._cumulative, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.debug("Could not save cumulative usage cache (%s): %s", self._cumulative_path, exc)
 
     def get_cumulative_stats(self) -> dict:
         """Get all-time cumulative usage stats (persisted across sessions)."""
