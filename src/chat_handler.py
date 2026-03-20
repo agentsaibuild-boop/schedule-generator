@@ -60,7 +60,7 @@ INTENT_KEYWORDS: dict[str, list[str]] = {
     "load_project": ["зареди", "отвори", "затвори", "закрий"],
     "generate_schedule": [
         "генерирай", "график", "създай", "направи", "gantt",
-        "линеен", "графика", "нов график",
+        "линеен", "нов график",
     ],
     "ask_question": [
         "какво", "какви", "как", "защо", "кога", "колко", "обясни",
@@ -1815,14 +1815,19 @@ class ChatHandler:
             if phrase in message_lower:
                 return "load_project"
 
-        if re.search(r'[A-Za-z]:\\[^\s"\']+|/[^\s"\']+', message):
+        # Require "/" to be at a word boundary (start or after whitespace) to
+        # avoid false matches on fractions/units like "5м/ден" or "В/К".
+        if re.search(r'[A-Za-z]:\\[^\s"\']+|(?:^|\s)/[^\s"\']{2,}', message):
             return "load_project"
 
         best_intent = "general"
         best_score = 0
         for intent, keywords in INTENT_KEYWORDS.items():
             score = sum(1 for kw in keywords if kw in message_lower)
-            if score > best_score:
+            # Use >= so that later (more specific) intents win ties over earlier
+            # (more generic) ones — e.g. "добави функционалност" → evolve, not
+            # modify_schedule; "запиши урок" → save_lesson, not ask_question.
+            if score >= best_score and score > 0:
                 best_score = score
                 best_intent = intent
 
