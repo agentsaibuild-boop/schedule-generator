@@ -30,12 +30,12 @@ src/
 start.bat  ← стартира app на localhost:8501
 
 ## Тестове
-uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e   ← unit тестове (100 теста в 9 файла)
+uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e   ← unit тестове (155 теста в 11 файла)
 pytest tests/e2e/ -v               ← E2E Playwright тестове (10 теста)
 
 - Unit тестовете не изискват стартирано приложение, но изискват пълния Python стек (.env не е нужен)
 - E2E тестовете изискват стартирано приложение и реални API ключове (.env)
-- Pre-commit hook: автоматично пуска всички unit тестове (100) при всеки git commit
+- Pre-commit hook: автоматично пуска всички unit тестове при всеки git commit
   Инсталирай: cp hooks/pre-commit .git/hooks/pre-commit
 - Всеки тест файл има "FAILURE означава:" коментар — показва кой модул е счупен
 

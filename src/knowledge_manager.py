@@ -147,7 +147,10 @@ class KnowledgeManager:
 
         # Add to lessons_learned.md
         learned_path = self.lessons_path / "lessons_learned.md"
-        content = learned_path.read_text(encoding="utf-8")
+        if learned_path.exists():
+            content = learned_path.read_text(encoding="utf-8")
+        else:
+            content = "# Научени уроци\n"
         content += f"\n**#{next_num}**: {lesson}"
         learned_path.write_text(content, encoding="utf-8")
 
