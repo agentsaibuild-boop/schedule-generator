@@ -39,6 +39,7 @@ _MAX_TOKENS_CHAT = 4096        # regular chat, analysis, OCR, verification
 _MAX_TOKENS_CORRECTION = 8192  # schedule correction (larger output needed)
 _MAX_TOKENS_LESSON = 1024      # lesson verification (short JSON response)
 _MIN_SYSTEM_PROMPT_LEN = 100   # minimum viable knowledge-aware system prompt
+_API_TIMEOUT_SECONDS = 120     # timeout for all AI API calls (prevents Streamlit freeze)
 
 # ---------------------------------------------------------------------------
 # Verification system prompt template
@@ -158,6 +159,7 @@ class AIRouter:
         self._deepseek_client = OpenAI(
             api_key=self._deepseek_key,
             base_url="https://api.deepseek.com",
+            timeout=_API_TIMEOUT_SECONDS,
         )
         return self._deepseek_client
 
@@ -173,7 +175,10 @@ class AIRouter:
 
         import anthropic
 
-        self._anthropic_client = anthropic.Anthropic(api_key=self._anthropic_key)
+        self._anthropic_client = anthropic.Anthropic(
+            api_key=self._anthropic_key,
+            timeout=_API_TIMEOUT_SECONDS,
+        )
         return self._anthropic_client
 
     def get_anthropic_client(self):
