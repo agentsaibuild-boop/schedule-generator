@@ -39,27 +39,23 @@ class AIProcessor:
         self,
         router: AIRouter | None = None,
         knowledge_manager: KnowledgeManager | None = None,
-        api_key: str | None = None,
-        skills_path: str = "",
     ) -> None:
         """Initialize the AI processor.
 
         Args:
             router: AIRouter instance for dual-AI calls.
             knowledge_manager: KnowledgeManager for building prompts.
-            api_key: Legacy param (kept for backward compat during transition).
-            skills_path: Legacy param.
         """
         self.router = router
         self.knowledge = knowledge_manager
-        self._legacy_api_key = api_key or ""
 
     @property
     def is_configured(self) -> bool:
         """Check whether at least one AI model is available."""
-        if self.router:
-            return self.router.deepseek_available or self.router.anthropic_available
-        return bool(self._legacy_api_key)
+        return bool(
+            self.router
+            and (self.router.deepseek_available or self.router.anthropic_available)
+        )
 
     # ------------------------------------------------------------------
     # System prompt builders
@@ -946,23 +942,3 @@ class AIProcessor:
         )
         return unique
 
-    # ------------------------------------------------------------------
-    # Legacy compatibility methods
-    # ------------------------------------------------------------------
-
-    def process_documents(self, files: list[dict], project_type: str) -> dict:
-        """Legacy method — delegates to analyze_documents."""
-        return self.analyze_documents(files)
-
-    def generate_schedule_legacy(self, analysis: dict, config: dict) -> dict:
-        """Legacy method — delegates to generate_schedule."""
-        return self.generate_schedule(analysis, config.get("project_type", ""))
-
-    def chat(self, messages: list[dict], system_prompt: str) -> str:
-        """Legacy chat method — returns just the content string."""
-        result = self.chat_response(messages)
-        return result.get("content", "")
-
-    def ask_clarification(self, context: str, question: str) -> str:
-        """Legacy method for clarification questions."""
-        return f"Уточняващ въпрос: {question}"
