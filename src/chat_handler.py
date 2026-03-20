@@ -551,7 +551,7 @@ class ChatHandler:
             }
 
         # Step 1b: Sequence questionnaire — ask before generating
-        seq_state = self._start_sequence_questionnaire(analysis)
+        seq_state = self._start_sequence_questionnaire(analysis, project_context)
         if seq_state:
             return {
                 "response": seq_state["question"],
@@ -1242,7 +1242,9 @@ class ChatHandler:
 
         return sections
 
-    def _start_sequence_questionnaire(self, analysis: dict) -> dict | None:
+    def _start_sequence_questionnaire(
+        self, analysis: dict, project_context: dict | None = None
+    ) -> dict | None:
         """Start the sequence questionnaire if the project has both water and sewer.
 
         Returns a pending_sequence state dict with the first question,
@@ -1287,6 +1289,7 @@ class ChatHandler:
         return {
             "step": "q1",
             "analysis": analysis,
+            "project_context": project_context,
             "sections": sections,
             "constraints": {},  # will be filled as user answers
             "question": (
@@ -1410,6 +1413,7 @@ class ChatHandler:
         """Trigger schedule generation with collected sequence constraints."""
         analysis = state["analysis"]
         constraints = state["constraints"]
+        project_context = state.get("project_context")
 
         # Build human-readable summary
         default = constraints.get("default", "water_first")
@@ -1421,12 +1425,14 @@ class ChatHandler:
             summary += f"\nИзключения ({opposite_label}): {exc_label}"
 
         # Re-enter generation flow
-        result = self._continue_generation(analysis, constraints)
+        result = self._continue_generation(analysis, constraints, project_context)
         result["response"] = summary + "\n\n" + result.get("response", "")
         result.pop("pending_sequence", None)
         return result
 
-    def _continue_generation(self, analysis: dict, sequence_constraints: dict) -> dict:
+    def _continue_generation(
+        self, analysis: dict, sequence_constraints: dict, project_context: dict | None = None
+    ) -> dict:
         """Run the generation steps after questionnaire is complete."""
         all_text = self.files.get_all_text() if self.files else ""
 
@@ -1437,7 +1443,7 @@ class ChatHandler:
             for sit_path in classification.get("situation_paths", []):
                 situation_locations.extend(self.ai.extract_situation_locations(sit_path))
 
-        project_type = self._extract_project_type(analysis)
+        project_type = self._extract_project_type(analysis, project_context)
 
         progress_messages: list[str] = []
         _cycle_pcts = [0.45, 0.60, 0.75, 0.85, 0.90, 0.92]
