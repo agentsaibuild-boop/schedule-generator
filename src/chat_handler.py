@@ -335,7 +335,6 @@ class ChatHandler:
                     "close_project": True}
 
         # 1) Try full file path
-        import re
         path_match = re.search(r'[A-Za-z]:\\[^\s"\']+|/[^\s"\']+', message)
         if path_match:
             path = path_match.group(0)
@@ -1803,7 +1802,6 @@ class ChatHandler:
             if phrase in message_lower:
                 return "load_project"
 
-        import re
         if re.search(r'[A-Za-z]:\\[^\s"\']+|/[^\s"\']+', message):
             return "load_project"
 
@@ -1857,7 +1855,6 @@ class ChatHandler:
             return None  # Fall through to original handler
 
         # Check for file path in the query
-        import re
         path_match = re.search(r'[A-Za-z]:\\[^\s"\']+|/[^\s"\']+', message)
         if path_match:
             path = path_match.group(0)
