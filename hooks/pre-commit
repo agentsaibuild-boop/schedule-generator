@@ -15,7 +15,7 @@ cd "$(git rev-parse --show-toplevel)"
 # --- Run unit/integration tests ---
 echo ""
 echo "[1/1] Running all unit tests (excluding E2E)..."
-python -m pytest tests/ --ignore=tests/e2e -v --tb=short --no-header -q
+uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e -v --tb=short --no-header -q
 if [ $? -ne 0 ]; then
     echo ""
     echo "UNIT TESTS FAILED. Commit aborted."
