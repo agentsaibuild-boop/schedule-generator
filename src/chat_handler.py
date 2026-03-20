@@ -1253,15 +1253,18 @@ class ChatHandler:
         combined = f"{scope} {project_type_str} {quantities_str}"
 
         _WATER_KEYWORDS = [
-            "водопровод", "вода", "water", "в/к", "вк мрежа",
+            "водопровод", "вода", "water",
             "водоснабдяване", "питейна", "водопроводна", "тласкател",
         ]
         _SEWER_KEYWORDS = [
-            "канализация", "канал", "sewer", "вк мрежа",
+            "канализация", "канал", "sewer",
             "отводняване", "канализационна", "фекална", "дъждовна",
         ]
-        has_water = any(w in combined for w in _WATER_KEYWORDS)
-        has_sewer = any(w in combined for w in _SEWER_KEYWORDS)
+        # "вк мрежа" / "в/к" означава комбинирана В+К мрежа — задейства и двете
+        _COMBINED_KEYWORDS = ["вк мрежа", "в/к мрежа"]
+        has_combined = any(w in combined for w in _COMBINED_KEYWORDS)
+        has_water = has_combined or any(w in combined for w in _WATER_KEYWORDS)
+        has_sewer = has_combined or any(w in combined for w in _SEWER_KEYWORDS)
 
         # Only ask if BOTH networks are present
         if not (has_water and has_sewer):
