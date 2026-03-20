@@ -584,6 +584,34 @@ class ChatHandler:
 
         project_type = self._extract_project_type(analysis, project_context)
 
+        # C2 fix: refuse to generate when classifier returns out_of_scope
+        if project_type == "out_of_scope":
+            raw_analysis = analysis.get("analysis", "")
+            specifics = ""
+            if isinstance(raw_analysis, str):
+                try:
+                    specifics = json.loads(raw_analysis).get("specifics", "")
+                except Exception:
+                    pass
+            elif isinstance(raw_analysis, dict):
+                specifics = raw_analysis.get("specifics", "")
+            reason = f"\n\n**Причина:** {specifics}" if specifics else ""
+            return {
+                "response": (
+                    "⛔ **Проектът е извън обхвата на генератора.**"
+                    f"{reason}\n\n"
+                    "Системата поддържа: водоснабдяване, канализация, КПС, "
+                    "довеждащ водопровод и инженеринг проекти за ВиК инфраструктура. "
+                    "При HDD/безизкопни технологии или нестандартни проекти "
+                    "моля използвайте ръчно въвеждане."
+                ),
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "generate_schedule",
+                "model_used": analysis.get("model", "none"),
+            }
+
         progress_messages: list[str] = []
 
         # Progress steps: generate=25%, verify cycles up to 90%
