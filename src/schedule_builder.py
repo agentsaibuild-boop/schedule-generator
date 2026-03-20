@@ -666,18 +666,16 @@ class ScheduleBuilder:
         rows: list[dict[str, Any]] = []
         for i, task in enumerate(schedule):
             duration = task.get("duration", 0)
-            end_day = task.get(
-                "end_day",
-                task.get("start_day", 0) + max(duration, 1) - 1,
-            )
+            start_day = task.get("start_day", 1)
+            end_day = task.get("end_day", start_day + max(duration, 1) - 1)
             rows.append({
                 "№": i + 1,
-                "Дейност": task["name"],
+                "Дейност": task.get("name", "Без име"),
                 "Тип": get_type_label(task.get("type", "")),
                 "DN": task.get("diameter", "—"),
                 "L(м)": task.get("length_m", "—"),
                 "Екип": task.get("team", "—"),
-                "Начало": day_to_date(task["start_day"], start_date),
+                "Начало": day_to_date(start_day, start_date),
                 "Край": day_to_date(end_day, start_date),
                 "Дни": duration,
                 "Критичен": "🔴" if task.get("is_critical") else "",
