@@ -33,6 +33,14 @@ PRICING = {
 }
 
 # ---------------------------------------------------------------------------
+# Token limits per call type
+# ---------------------------------------------------------------------------
+_MAX_TOKENS_CHAT = 4096        # regular chat, analysis, OCR, verification
+_MAX_TOKENS_CORRECTION = 8192  # schedule correction (larger output needed)
+_MAX_TOKENS_LESSON = 1024      # lesson verification (short JSON response)
+_MIN_SYSTEM_PROMPT_LEN = 100   # minimum viable knowledge-aware system prompt
+
+# ---------------------------------------------------------------------------
 # Verification system prompt template
 # ---------------------------------------------------------------------------
 VERIFICATION_SYSTEM_PROMPT = """\
@@ -192,7 +200,7 @@ class AIRouter:
         DeepSeek is a 'clean' model — without knowledge context it doesn't
         know the rules for ViK schedules, productivities, lessons, etc.
         """
-        if not system_prompt or len(system_prompt) < 100:
+        if not system_prompt or len(system_prompt) < _MIN_SYSTEM_PROMPT_LEN:
             logger.warning(
                 "DeepSeek called with empty/short system prompt in %s! "
                 "Knowledge context may be missing. Prompt length: %d chars.",
@@ -313,7 +321,7 @@ class AIRouter:
         response = client.chat.completions.create(
             model="deepseek-chat",
             messages=full_messages,
-            max_tokens=4096,
+            max_tokens=_MAX_TOKENS_CHAT,
             temperature=0.3,
             timeout=120,
         )
@@ -335,7 +343,7 @@ class AIRouter:
 
     def _chat_anthropic(
         self, messages: list[dict], system_prompt: str, *, is_fallback: bool = False,
-        max_tokens: int = 4096,
+        max_tokens: int = _MAX_TOKENS_CHAT,
     ) -> dict:
         """Send chat to Anthropic Claude."""
         client = self._get_anthropic()
@@ -363,7 +371,7 @@ class AIRouter:
         }
 
     def chat_anthropic_direct(
-        self, messages: list[dict], system_prompt: str, max_tokens: int = 4096
+        self, messages: list[dict], system_prompt: str, max_tokens: int = _MAX_TOKENS_CHAT
     ) -> dict:
         """Send a chat request directly to Anthropic (no fallback to DeepSeek).
 
@@ -442,7 +450,7 @@ class AIRouter:
             client = self._get_anthropic()
             response = client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=4096,
+                max_tokens=_MAX_TOKENS_CHAT,
                 system=system_prompt,
                 messages=messages,
                 temperature=0.1,
@@ -458,7 +466,7 @@ class AIRouter:
             response = client.chat.completions.create(
                 model="deepseek-chat",
                 messages=full_msgs,
-                max_tokens=4096,
+                max_tokens=_MAX_TOKENS_CHAT,
                 temperature=0.1,
                 timeout=120,
             )
@@ -553,7 +561,7 @@ class AIRouter:
             response = client.chat.completions.create(
                 model="deepseek-chat",
                 messages=full_msgs,
-                max_tokens=8192,
+                max_tokens=_MAX_TOKENS_CORRECTION,
                 temperature=0.1,
                 timeout=120,
             )
@@ -566,7 +574,7 @@ class AIRouter:
             client = self._get_anthropic()
             response = client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=8192,
+                max_tokens=_MAX_TOKENS_CORRECTION,
                 system=system_prompt,
                 messages=messages,
                 temperature=0.1,
@@ -847,7 +855,7 @@ class AIRouter:
         response = client.chat.completions.create(
             model="deepseek-chat",
             messages=messages,
-            max_tokens=4096,
+            max_tokens=_MAX_TOKENS_CHAT,
             timeout=120,
         )
         text = response.choices[0].message.content or ""
@@ -864,7 +872,7 @@ class AIRouter:
         client = self._get_anthropic()
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=4096,
+            max_tokens=_MAX_TOKENS_CHAT,
             system=system_prompt if system_prompt else "",
             messages=[{
                 "role": "user",
@@ -921,7 +929,7 @@ class AIRouter:
                 client = self._get_anthropic()
                 response = client.messages.create(
                     model="claude-sonnet-4-6",
-                    max_tokens=1024,
+                    max_tokens=_MAX_TOKENS_LESSON,
                     system=system_prompt,
                     messages=messages,
                     temperature=0.1,
@@ -951,7 +959,7 @@ class AIRouter:
                 response = client.chat.completions.create(
                     model="deepseek-chat",
                     messages=full_msgs,
-                    max_tokens=1024,
+                    max_tokens=_MAX_TOKENS_LESSON,
                     temperature=0.1,
                 )
                 raw = response.choices[0].message.content or "{}"
