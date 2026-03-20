@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,6 +19,17 @@ if TYPE_CHECKING:
     from src.knowledge_manager import KnowledgeManager
 
 logger = logging.getLogger(__name__)
+
+# Module-level constants for _validate_task_locations (avoid recompiling on every call)
+_PLACE_TOKEN = re.compile(r"\b[А-ЯA-ZЁ][а-яa-zёА-ЯA-Z]{3,}\b")
+_SKIP_WORDS = frozenset({
+    "водопровод", "канализация", "участък", "клон", "фаза", "етап",
+    "дейност", "монтаж", "полагане", "изкоп", "засипване", "уплътняване",
+    "дезинфекция", "проба", "приемане", "проектиране", "надзор",
+    "подготовка", "демонтаж", "рехабилитация", "реконструкция",
+    "екип", "бригада", "доставка", "инсталация", "свързване",
+    "разрешение", "съгласуване", "въвеждане", "експлоатация",
+})
 
 
 class AIProcessor:
@@ -216,7 +228,10 @@ class AIProcessor:
                 "   - 'единичен' — единичен участък, 1-2 улици, без проектиране\n"
                 "   - 'инженеринг' — ВКЛЮЧВА проектиране + строителство. Индикатори: "
                 "'Технически проект', 'Геодезически проучвания', 'Авторски надзор' "
-                "като ОТДЕЛНИ позиции в КСС, срок >500 дни\n"
+                "като ОТДЕЛНИ позиции в КСС, срок >500 дни. "
+                "ДОПЪЛНИТЕЛНИ тригери (използвай 'инженеринг' ако присъстват): "
+                "'ПУП', 'проектиране и строителство', 'технически проект и строителство', "
+                "'проект и строителство', 'изготвяне на проект'\n"
                 "   - 'mega' — >20km обща дължина или >500 участъка\n"
                 "   - 'out_of_scope' — проектът НЕ може да се генерира автоматично. "
                 "Задължително използвай 'out_of_scope' при: "
@@ -490,24 +505,9 @@ class AIProcessor:
         Returns:
             List of warning strings (empty = no issues detected).
         """
-        import re
-
         # Build a single searchable corpus: whitelist + full document text
         whitelist_lower = {loc.lower() for loc in locations_whitelist}
         corpus_lower = all_text.lower()
-
-        # Regex: capitalised tokens of 4+ chars (avoids "DN", "РЕ", etc.)
-        _PLACE_TOKEN = re.compile(r"\b[А-ЯA-ZЁ][а-яa-zёА-ЯA-Z]{3,}\b")
-
-        # Common Bulgarian construction words to skip (not place names)
-        _SKIP_WORDS = {
-            "водопровод", "канализация", "участък", "клон", "фаза", "етап",
-            "дейност", "монтаж", "полагане", "изкоп", "засипване", "уплътняване",
-            "дезинфекция", "проба", "приемане", "проектиране", "надзор",
-            "подготовка", "демонтаж", "рехабилитация", "реконструкция",
-            "екип", "бригада", "доставка", "инсталация", "свързване",
-            "разрешение", "съгласуване", "въвеждане", "експлоатация",
-        }
 
         warnings: list[str] = []
 
