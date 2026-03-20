@@ -255,3 +255,110 @@ class TestBuildPrompt:
         result_a = km.build_system_prompt()
         result_b = km.get_all_knowledge_for_prompt(level="full")
         assert result_a == result_b
+
+
+# ---------------------------------------------------------------------------
+# update_methodology
+# ---------------------------------------------------------------------------
+
+class TestUpdateMethodology:
+    def test_known_type_writes_correct_file(self, km):
+        km.update_methodology("distribution", "# Разпределителна\nПравило А")
+        filepath = km.methodologies_path / "distribution_network.md"
+        assert filepath.exists()
+        assert "Правило А" in filepath.read_text(encoding="utf-8")
+
+    def test_all_four_types_map_to_correct_files(self, km):
+        expected = {
+            "engineering": "engineering_projects.md",
+            "distribution": "distribution_network.md",
+            "supply": "supply_pipeline.md",
+            "single": "single_section.md",
+        }
+        for project_type, filename in expected.items():
+            km.update_methodology(project_type, f"content for {project_type}")
+            assert (km.methodologies_path / filename).exists()
+
+    def test_unknown_type_does_nothing(self, km):
+        km.update_methodology("nonexistent_type", "some content")
+        # Нито един файл не трябва да е създаден
+        files = list(km.methodologies_path.glob("*.md"))
+        assert files == []
+
+    def test_overwrites_existing_content(self, km):
+        (km.methodologies_path / "single_section.md").write_text("Стар текст", encoding="utf-8")
+        km.update_methodology("single", "Нов текст")
+        content = (km.methodologies_path / "single_section.md").read_text(encoding="utf-8")
+        assert "Нов текст" in content
+        assert "Стар текст" not in content
+
+    def test_invalidates_cache_after_write(self, km):
+        (km.methodologies_path / "supply_pipeline.md").write_text("Версия 1", encoding="utf-8")
+        _ = km.get_methodology("supply")  # напълни кеша
+        km.update_methodology("supply", "Версия 2")
+        result = km.get_methodology("supply")
+        assert "Версия 2" in result
+
+
+# ---------------------------------------------------------------------------
+# get_skills
+# ---------------------------------------------------------------------------
+
+class TestGetSkills:
+    def test_returns_empty_when_file_missing(self, km):
+        assert km.get_skills() == ""
+
+    def test_returns_content_when_file_exists(self, km):
+        (km.skills_path / "SKILL.md").write_text("# Умения\nПравило X", encoding="utf-8")
+        result = km.get_skills()
+        assert "Правило X" in result
+
+    def test_caches_content_between_reads(self, km):
+        filepath = km.skills_path / "SKILL.md"
+        filepath.write_text("Cached content", encoding="utf-8")
+        first = km.get_skills()
+        second = km.get_skills()
+        assert first == second == "Cached content"
+
+
+# ---------------------------------------------------------------------------
+# get_productivities
+# ---------------------------------------------------------------------------
+
+class TestGetProductivities:
+    def test_returns_empty_when_file_missing(self, km):
+        assert km.get_productivities() == ""
+
+    def test_returns_json_content_as_string(self, km):
+        productivities_path = km.knowledge_path.parent / "config" / "productivities.json"
+        productivities_path.write_text('{"DN90": 55}', encoding="utf-8")
+        result = km.get_productivities()
+        assert '"DN90"' in result
+        assert "55" in result
+
+    def test_returns_empty_for_empty_file(self, km):
+        productivities_path = km.knowledge_path.parent / "config" / "productivities.json"
+        productivities_path.write_text("", encoding="utf-8")
+        assert km.get_productivities() == ""
+
+
+# ---------------------------------------------------------------------------
+# get_workflow_rules
+# ---------------------------------------------------------------------------
+
+class TestGetWorkflowRules:
+    def test_returns_empty_when_file_missing(self, km):
+        assert km.get_workflow_rules() == ""
+
+    def test_returns_rules_when_file_exists(self, km):
+        rules_path = km.skills_path / "references" / "workflow-rules.md"
+        rules_path.write_text("# Работни правила\nПравило 1", encoding="utf-8")
+        result = km.get_workflow_rules()
+        assert "Правило 1" in result
+
+    def test_caches_content_between_reads(self, km):
+        rules_path = km.skills_path / "references" / "workflow-rules.md"
+        rules_path.write_text("Правило за кеш", encoding="utf-8")
+        first = km.get_workflow_rules()
+        second = km.get_workflow_rules()
+        assert first == second == "Правило за кеш"
