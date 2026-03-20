@@ -172,6 +172,15 @@ class AIRouter:
         """Public accessor for the Anthropic client (for use by external modules)."""
         return self._get_anthropic()
 
+    def log_usage(self, model: str, tokens_in: int, tokens_out: int, task_type: str) -> None:
+        """Public accessor for usage logging (for use by external modules)."""
+        self._log_usage(model, tokens_in, tokens_out, task_type)
+
+    @staticmethod
+    def parse_json_response(raw: str) -> dict:
+        """Public accessor for JSON response parsing (for use by external modules)."""
+        return AIRouter._parse_json_response(raw)
+
     # ------------------------------------------------------------------
     # System prompt validation
     # ------------------------------------------------------------------

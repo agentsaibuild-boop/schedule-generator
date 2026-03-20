@@ -185,13 +185,13 @@ class SelfEvolution:
                 temperature=0.2,
             )
             raw = response.content[0].text if response.content else "{}"
-            self.router._log_usage(
+            self.router.log_usage(
                 "claude-sonnet-4-6",
                 response.usage.input_tokens,
                 response.usage.output_tokens,
                 "evolution_analyze",
             )
-            return self.router._parse_json_response(raw)
+            return self.router.parse_json_response(raw)
         except Exception as exc:
             logger.exception("Failed to analyze evolution request")
             return {
@@ -252,13 +252,13 @@ class SelfEvolution:
                 temperature=0.1,
             )
             raw = response.content[0].text if response.content else "{}"
-            self.router._log_usage(
+            self.router.log_usage(
                 "claude-sonnet-4-6",
                 response.usage.input_tokens,
                 response.usage.output_tokens,
                 "evolution_generate",
             )
-            return self.router._parse_json_response(raw)
+            return self.router.parse_json_response(raw)
         except Exception as exc:
             logger.exception("Failed to generate evolution changes")
             return {
