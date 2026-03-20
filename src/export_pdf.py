@@ -18,6 +18,8 @@ from pathlib import Path
 
 from reportlab.lib import colors
 from reportlab.lib.colors import HexColor
+
+from src.constants import COLOR_PALETTE as _COLOR_PALETTE, TYPE_LABELS  # noqa: F401
 from reportlab.lib.pagesizes import A3, landscape
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
@@ -70,30 +72,8 @@ GANTT_RIGHT = PAGE_W - RIGHT_MARGIN
 # ---------------------------------------------------------------------------
 # Color map (matches gantt_chart.py)
 # ---------------------------------------------------------------------------
-COLOR_MAP = {
-    "design": HexColor("#4472C4"),
-    "water_pipe": HexColor("#5B9BD5"),
-    "sewer": HexColor("#ED7D31"),
-    "kps": HexColor("#FFC000"),
-    "road": HexColor("#A5A5A5"),
-    "electrical": HexColor("#70AD47"),
-    "mobilization": HexColor("#9DC3E6"),
-    "completion": HexColor("#BF8F00"),
-    "supervision": HexColor("#7030A0"),
-}
+COLOR_MAP = {k: HexColor(v) for k, v in _COLOR_PALETTE.items()}
 CRITICAL_COLOR = HexColor("#FF0000")
-
-TYPE_LABELS = {
-    "design": "Проектиране",
-    "water_pipe": "Водоснабдяване",
-    "sewer": "Канализация",
-    "kps": "КПС",
-    "road": "Пътни работи",
-    "electrical": "ЕЛ/ТТ",
-    "mobilization": "Мобилизация",
-    "completion": "Завършване",
-    "supervision": "Авт. надзор",
-}
 
 # ---------------------------------------------------------------------------
 # Font registration

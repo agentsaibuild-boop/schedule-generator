@@ -7,36 +7,13 @@ from typing import Any
 
 import plotly.graph_objects as go
 
+from src.constants import COLOR_PALETTE as COLOR_MAP, CRITICAL_PATH_COLOR, CRITICAL_PATH_BORDER, TYPE_LABELS  # noqa: F401
+
 # ---------------------------------------------------------------------------
-# Constants
+# Constants (re-exported for backwards compatibility)
 # ---------------------------------------------------------------------------
 
-COLOR_MAP: dict[str, str] = {
-    "design": "#4472C4",
-    "water_pipe": "#5B9BD5",
-    "sewer": "#ED7D31",
-    "kps": "#FFC000",
-    "road": "#A5A5A5",
-    "electrical": "#70AD47",
-    "mobilization": "#9DC3E6",
-    "completion": "#BF8F00",
-    "supervision": "#7030A0",
-}
-
-CRITICAL_PATH_COLOR = "#FF0000"
-CRITICAL_PATH_BORDER = "#8B0000"
-
-TYPE_LABELS: dict[str, str] = {
-    "design": "Проектиране",
-    "water_pipe": "Водоснабдяване",
-    "sewer": "Канализация",
-    "kps": "КПС",
-    "road": "Пътни работи",
-    "electrical": "ЕЛ/ТТ Кабели",
-    "mobilization": "Мобилизация",
-    "completion": "Завършване",
-    "supervision": "Авт. надзор",
-}
+# Note: TYPE_LABELS and COLOR_MAP are imported above from src.constants.
 
 DEFAULT_LAYERS: dict[str, bool] = {
     "bars": True,
