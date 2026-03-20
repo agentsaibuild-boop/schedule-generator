@@ -247,6 +247,7 @@ class DocsUpdater:
             "Добавено": [],
             "Променено": [],
             "Поправено": [],
+            "Документация": [],
         }
 
         for msg in commit_messages:
@@ -260,6 +261,9 @@ class DocsUpdater:
             elif msg.startswith(("refactor:", "perf:", "style:")):
                 desc = re.sub(r"^(refactor|perf|style)(\([^)]*\))?:\s*", "", msg)
                 groups["Променено"].append(f"- {desc}")
+            elif msg.startswith("docs:") or msg.startswith("docs("):
+                desc = re.sub(r"^docs(\([^)]*\))?:\s*", "", msg)
+                groups["Документация"].append(f"- {desc}")
 
         lines: list[str] = []
         for group_name, items in groups.items():
