@@ -443,6 +443,7 @@ class AIProcessor:
         cycle_result = self.router.run_correction_cycle(
             schedule_json, rules, max_cycles=3, progress_callback=progress_callback,
             project_type=project_type,
+            knowledge_prompt=system_prompt,
         )
 
         gen_cost = gen_result.get("cost", 0.0)

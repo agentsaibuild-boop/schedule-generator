@@ -1,0 +1,189 @@
+{
+  "meta": {
+    "file_purpose": "Project overview for investors, new developers, and AI assistants. Single source of truth about what this project is, how it works, and where it stands.",
+    "last_updated": "2026-03-20",
+    "version": "0.9.0"
+  },
+
+  "project": {
+    "name": "ВиК График Генератор",
+    "name_en": "Water & Sewage Schedule Generator",
+    "tagline": "AI-powered Gantt schedule generator for Bulgarian water infrastructure projects",
+    "company": "РАИ Комерс",
+    "target_users": "Construction engineers and project managers who work on ВиК (water & sewage) tenders in Bulgaria",
+    "problem_solved": "Creating construction Gantt schedules for ВиК tenders is a manual, error-prone process taking days. This app does it in minutes by reading tender documents (PDF, Excel, DOCX) and generating a full schedule using AI.",
+    "current_version": "0.9.0",
+    "maturity": "Production-ready for internal use. Tested on 2 real projects (Герман, Плевен). Not yet deployed as SaaS.",
+    "language": "Bulgarian (UI, prompts, output). Code comments in Bulgarian.",
+    "platform": "Windows desktop app (Streamlit, localhost:8501)"
+  },
+
+  "value_proposition": {
+    "for_investors": "Automates a professional task that currently requires a senior engineer and 1-3 days of manual work. The knowledge base grows with every project — the app gets smarter over time. Self-evolving: the AI can write and deploy improvements to its own code.",
+    "time_saved_per_project": "Estimated 2-3 days of senior engineer time → 15-30 minutes with the app",
+    "knowledge_base": "85+ domain rules learned from 8 real ВиК projects, encoded as structured knowledge and injected into every AI prompt",
+    "moat": "Domain-specific knowledge (ВиК construction norms, Bulgarian regulations, pipe productivity rates, project types) that generic AI does not have"
+  },
+
+  "architecture": {
+    "type": "Single-machine Streamlit app (no server, no database, runs locally)",
+    "ai_stack": {
+      "worker_model": "DeepSeek V3 (via OpenAI-compatible API) — generates schedules, analyses documents",
+      "controller_model": "Anthropic Claude Sonnet 4.6 — reviews and corrects worker output, up to 3 correction cycles",
+      "pattern": "Dual-AI: worker + controller with automatic quality loops",
+      "fallback": "If DeepSeek fails, Anthropic takes over as worker"
+    },
+    "pipeline": [
+      "1. User selects folder with tender documents",
+      "2. FileManager converts PDF/Excel/DOCX/CSV → JSON (3-tier PDF strategy: fitz → DeepSeek reformat → Claude OCR)",
+      "3. KnowledgeManager injects domain rules into prompt (3 levels: minimal / full / verification)",
+      "4. AIProcessor generates schedule JSON via DeepSeek",
+      "5. Anthropic Claude reviews and corrects (up to 3 loops)",
+      "6. MS Project enrichment layer adds expert metadata",
+      "7. ScheduleBuilder validates and structures tasks",
+      "8. GanttChart renders interactive 9-layer Plotly visualization",
+      "9. Export: PDF A3, MSPDI XML (MS Project), JSON"
+    ],
+    "self_evolution": {
+      "description": "AI can propose and deploy code changes to itself",
+      "safety_levels": ["GREEN — low risk, auto-apply", "YELLOW — medium risk, user confirms", "RED — high risk, blocked"],
+      "rollback": "Automatic rollback on failure"
+    }
+  },
+
+  "codebase": {
+    "total_lines": 11991,
+    "entry_point": "app.py (1675 lines) — Streamlit UI and orchestration",
+    "modules": {
+      "src/ai_router.py": "DeepSeek/Anthropic routing, fallback logic, cost tracking (1107 lines)",
+      "src/ai_processor.py": "System prompts, schedule generation, correction loops (959 lines)",
+      "src/chat_handler.py": "Intent detection, chat logic, session management (1951 lines)",
+      "src/file_manager.py": "PDF/Excel/DOCX → JSON conversion, 3-tier OCR strategy (1042 lines)",
+      "src/gantt_chart.py": "Plotly Gantt chart, 9 visualization layers (1003 lines)",
+      "src/schedule_builder.py": "Task validation, cascade dependencies, diff (685 lines)",
+      "src/export_pdf.py": "A3 PDF export with Cyrillic fonts via ReportLab (874 lines)",
+      "src/export_xml.py": "MSPDI XML for MS Project (DurationFormat=5, Manual=1) (477 lines)",
+      "src/knowledge_manager.py": "Loads and caches domain knowledge files into AI prompts (550 lines)",
+      "src/project_manager.py": "Recent projects, persistent chat history, AI usage tracking (445 lines)",
+      "src/self_evolution.py": "AI writes its own code with rollback protection (758 lines)",
+      "src/docs_updater.py": "Auto-updates README, CHANGELOG, ARCHITECTURE docs (464 lines)"
+    },
+    "config": {
+      "config/app_config.json": "App settings, supported file types, project types, default parameters",
+      "config/productivities.json": "Verified pipe installation rates (v0.4) — DN90 to DN630, HDD and open trench, terrain factors",
+      "config/projects_history.json": "Recent projects with chat history and usage stats"
+    },
+    "knowledge_base": {
+      "location": "knowledge/",
+      "lessons": "85+ rules learned from real projects (lessons_learned.md)",
+      "methodologies": "Per project-type scheduling strategies (distribution, supply, single, engineering)",
+      "skills": "Specialized AI capabilities (OCR, conflict resolution, etc.)",
+      "evolution_log": "Log of all AI self-modifications"
+    }
+  },
+
+  "infrastructure": {
+    "runtime": "Python 3.12+, Windows 10/11",
+    "ui_framework": "Streamlit ≥1.30",
+    "ai_apis": {
+      "deepseek": "api.deepseek.com (OpenAI-compatible, via openai SDK) — cheap worker",
+      "anthropic": "api.anthropic.com — quality controller and fallback"
+    },
+    "key_libraries": {
+      "plotly": "Interactive Gantt chart",
+      "pymupdf": "PDF text extraction (replaces PyPDF2)",
+      "reportlab": "PDF generation with Cyrillic (DejaVu Sans fonts in fonts/)",
+      "openpyxl": "Excel reading",
+      "python-docx": "Word document reading",
+      "watchdog": "File system monitoring"
+    },
+    "fonts": "fonts/DejaVu Sans — required for Cyrillic in PDF export",
+    "env_vars": {
+      "DEEPSEEK_API_KEY": "Worker AI key",
+      "ANTHROPIC_API_KEY": "Controller AI key",
+      "note": ".env file — NOT in git"
+    },
+    "no_database": "All state in JSON files in config/. No SQL, no server.",
+    "no_cloud": "Runs 100% locally. API calls to DeepSeek and Anthropic are the only external traffic."
+  },
+
+  "project_types_supported": [
+    {"id": "distribution", "name": "Разпределителна мрежа", "description": "Many identical sections, pipeline overlap scheduling"},
+    {"id": "supply", "name": "Довеждащ водопровод", "description": "Variable sections, sequential"},
+    {"id": "single", "name": "Единичен участък", "description": "1 continuous section, unique activities"},
+    {"id": "engineering", "name": "ИНЖЕНЕРИНГ", "description": "Design + Construction + Author supervision (3 phases)"},
+    {"id": "mega", "name": "Mega-scale", "description": ">20km, >1000 tasks"}
+  ],
+
+  "pipe_productivities": {
+    "note": "Verified field rates v0.4 — used by AI when calculating durations from document quantities",
+    "DN90_PE_HDD": "12 m/day effective",
+    "DN110_PE_HDD": "13 m/day effective",
+    "DN125_PE_HDD": "14 m/day effective",
+    "DN315_PVC_open": "12 m/day effective",
+    "DN400_PVC_open": "11 m/day effective",
+    "DN500_PE_open": "15 m/day effective",
+    "DN630_open": "9 m/day effective",
+    "DN300_CI_open": "8 m/day effective",
+    "terrain_factors": {"asphalt": 0.75, "dirt_road": 1.0, "forest": 0.6}
+  },
+
+  "testing": {
+    "unit_tests": "tests/test_exports.py — PDF and XML export validation",
+    "e2e_tests": "tests/e2e/ — 10 real Playwright tests (require running app + real API keys)",
+    "test_files": [
+      "test_gantt.py — Gantt chart renders correctly",
+      "test_chat_interaction.py — Chat sends and receives responses",
+      "test_export_functional.py — PDF/XML export works end-to-end",
+      "test_sidebar_structure.py — Sidebar UI elements present"
+    ],
+    "ci": "Pre-commit hook runs all 11 tests (1 unit + 10 E2E) before every git commit",
+    "failure_comments": "Every E2E test has a 'FAILURE означава:' comment showing which module is broken"
+  },
+
+  "real_projects_processed": [
+    {
+      "name": "Герман",
+      "location": "София — Герман и Илиенци",
+      "documents": 39,
+      "pdf_result": "27 GOOD, 1 PARTIAL, 3 SCANNED (0 API calls for 90%)",
+      "status": "schedule_generated",
+      "sessions": 770
+    },
+    {
+      "name": "Плевен Дружба 3 и 4",
+      "location": "Плевен",
+      "documents": 8,
+      "status": "new — not yet processed"
+    }
+  ],
+
+  "key_rules_for_developers": [
+    "knowledge/ files — DO NOT edit without domain reason. They encode field-verified rules.",
+    "config/productivities.json — verified v0.4 rates. Change only with field confirmation.",
+    "XML export MUST have DurationFormat=5 and Manual=1 — MS Project requirement.",
+    "Cyrillic in PDF requires DejaVu Sans from fonts/ — do not remove.",
+    ".env files are NOT in git.",
+    "DeepSeek ALWAYS receives full knowledge context (3 levels: minimal/full/verification).",
+    "All AI calls go through ai_router.py — never call Anthropic/DeepSeek directly from other modules.",
+    "Schedule validation is in schedule_builder.py — errors, warnings, cascade, diff.",
+    "self_evolution.py has 3 safety levels — never bypass RED level without user confirmation."
+  ],
+
+  "how_to_run": {
+    "windows": "Double-click install.bat (first time), then start.bat or desktop shortcut",
+    "manual": "python -m streamlit run app.py",
+    "url": "http://localhost:8501",
+    "requires": [".env with DEEPSEEK_API_KEY and ANTHROPIC_API_KEY", "Python 3.12+", "Internet (for API calls)"]
+  },
+
+  "what_is_missing_next_steps": [
+    "SaaS / multi-user deployment (currently single-user local only)",
+    "User authentication and project isolation",
+    "Cloud storage for projects instead of local filesystem",
+    "More project types (road construction, electrical, etc.)",
+    "Auto-learning from new projects into knowledge base",
+    "Mobile / tablet UI",
+    "Integration with Bulgarian e-procurement platforms (CAIS)"
+  ]
+}
