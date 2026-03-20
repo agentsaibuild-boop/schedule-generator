@@ -305,6 +305,109 @@ class TestBuildVerificationPrompt:
         assert "WORKFLOW RULES" in result
 
 
+# ---------------------------------------------------------------------------
+# generate_schedule prompt — verified productivity rates (no-API path)
+# Verifies that the schedule-generation prompt embeds the correct effective
+# rates from productivities.md v0.4 and does NOT contain the old wrong values.
+# ---------------------------------------------------------------------------
+
+class TestGenerateSchedulePromptRates:
+    """Checks that AI prompt has correct productivity rates (verified v0.4).
+
+    If these tests fail it means someone has edited the prompt in
+    ai_processor.py with incorrect rates that contradict productivities.md.
+    """
+
+    def _build_prompt(self) -> str:
+        """Build the generate-schedule system prompt (knowledge-free path)."""
+        km = MagicMock()
+        km.get_skills.return_value = ""
+        km.get_methodology.return_value = ""
+        km.get_productivities.return_value = ""
+        km.get_lessons.return_value = ""
+        km.get_workflow_rules.return_value = ""
+        proc = _processor(knowledge=km)
+        # Call build_system_prompt which is used inside generate_schedule
+        return proc.build_system_prompt()
+
+    def _build_generate_prompt_fragment(self) -> str:
+        """Extract the hardcoded production-rate section from generate_schedule source.
+
+        We inspect the source string directly to avoid needing a real router call.
+        We grab the relevant constant strings from the module.
+        """
+        import inspect
+        import src.ai_processor as mod
+        src_text = inspect.getsource(mod.AIProcessor.generate_schedule)
+        return src_text
+
+    def test_dn300_ci_correct_rate_8(self):
+        """Prompt must contain DN300 CI effective rate of 8 м/ден (verified)."""
+        fragment = self._build_generate_prompt_fragment()
+        # The correct verified rate is 8 м/ден; old wrong value was 3-5 м/ден
+        assert "8 м/ден" in fragment, (
+            "DN300 CI effective rate must be 8 м/ден (verified productivities.md). "
+            "Old wrong value '3-5 м/ден' was overestimating schedule duration by 1.6-2.7×."
+        )
+
+    def test_dn300_ci_old_wrong_rate_absent(self):
+        """Prompt must NOT contain the old wrong DN300 CI rate of '3-5 м/ден'."""
+        fragment = self._build_generate_prompt_fragment()
+        assert "3-5 м/ден" not in fragment, (
+            "Old wrong DN300 CI rate '3-5 м/ден' found in prompt. "
+            "This contradicts productivities.md which specifies effective_rate: 8."
+        )
+
+    def test_dn500_pe_correct_rate_15(self):
+        """Prompt must contain DN500 PE effective rate of 15 м/ден (verified)."""
+        fragment = self._build_generate_prompt_fragment()
+        assert "15 м/ден" in fragment, (
+            "DN500 PE effective rate must be 15 м/ден (verified productivities.md). "
+            "Old wrong value '20-25 м/ден' underestimated schedule duration by 33-67%."
+        )
+
+    def test_dn500_pe_old_wrong_rate_absent(self):
+        """Prompt must NOT contain the old wrong DN500 PE rate of '20-25 м/ден'."""
+        fragment = self._build_generate_prompt_fragment()
+        assert "20-25 м/ден" not in fragment, (
+            "Old wrong DN500 PE rate '20-25 м/ден' found in prompt. "
+            "Correct verified rate from productivities.md is 15 м/ден."
+        )
+
+    def test_hdd_effective_rate_not_drill_rate(self):
+        """Prompt must clarify that HDD effective rate (12-13 м/ден) ≠ drill rate (56 м/ден)."""
+        fragment = self._build_generate_prompt_fragment()
+        # Should explicitly mention the word "ЕФЕКТИВНА" near HDD to prevent using drill rate
+        assert "ЕФЕКТИВНА" in fragment, (
+            "Prompt must explicitly mark HDD effective rate as 'ЕФЕКТИВНА' "
+            "to prevent AI from using the drill rate (56 м/ден) which is 4-5× higher."
+        )
+
+    def test_hdd_56_is_drill_rate_warning_present(self):
+        """Prompt must warn that 56 м/ден is drill rate, not effective rate."""
+        fragment = self._build_generate_prompt_fragment()
+        # The drill rate of 56 should still be mentioned, but labeled as пробивна (drill)
+        assert "пробивна" in fragment.lower(), (
+            "Prompt must label '56 м/ден' as 'пробивна скорост' (drill rate) "
+            "so AI knows NOT to use it for duration calculations."
+        )
+
+    def test_dn90_pe_rate_12(self):
+        """Prompt must contain DN90 PE rate of 12 м/ден (verified)."""
+        fragment = self._build_generate_prompt_fragment()
+        assert "12 м/ден" in fragment, (
+            "DN90 PE effective rate must be 12 м/ден per productivities.md v0.4."
+        )
+
+    def test_ci_multiplier_comment_is_realistic(self):
+        """CI slowdown vs PE should be ~3-4×, not the old wrong '10-12×'."""
+        fragment = self._build_generate_prompt_fragment()
+        assert "10-12×" not in fragment, (
+            "Old wrong comment '10-12× по-бавно от PE' found. "
+            "Correct: DN300 CI (8 м/ден) vs DN300 PE (~25 м/ден) ≈ 3× slower, not 10-12×."
+        )
+
+
 if __name__ == "__main__":
     import subprocess, sys
     result = subprocess.run(
