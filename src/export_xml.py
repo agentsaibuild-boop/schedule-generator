@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 NAMESPACE = "http://schemas.microsoft.com/project"
 
+# MS Project calendar constants
+MINUTES_PER_DAY = 480           # 8h × 60 = 480 min/working day
+LINK_LAG_FACTOR = 10            # LinkLag unit = tenths of minutes (480 × 10 = 4800/day)
+
 # Custom field IDs (verified against MS Project)
 FIELD_ID_TEXT1 = "188743731"    # Text1 = DN
 FIELD_ID_TEXT2 = "188743734"    # Text2 = Мярка
@@ -109,12 +113,12 @@ def _build_xml(
     ET.SubElement(root, "DurationFormat").text = "5"  # CRITICAL: 5=days
     ET.SubElement(root, "DefaultStartTime").text = "08:00:00"
     ET.SubElement(root, "DefaultFinishTime").text = "17:00:00"
-    ET.SubElement(root, "MinutesPerDay").text = "480"
+    ET.SubElement(root, "MinutesPerDay").text = str(MINUTES_PER_DAY)
 
     if calendar_type == "7-day":
-        ET.SubElement(root, "MinutesPerWeek").text = "3360"  # 7 × 480
+        ET.SubElement(root, "MinutesPerWeek").text = str(7 * MINUTES_PER_DAY)
     else:
-        ET.SubElement(root, "MinutesPerWeek").text = "2400"  # 5 × 480
+        ET.SubElement(root, "MinutesPerWeek").text = str(5 * MINUTES_PER_DAY)
 
     ET.SubElement(root, "DaysPerMonth").text = "30"
 
@@ -338,7 +342,7 @@ def _add_predecessor_links(
     """Add dependency links to a task element.
 
     Reads dependency_type and lag_days from task dict (set by enrich_for_msproject).
-    LinkLag is in tenths of minutes: 1 day = 480 min × 10 = 4800.
+    LinkLag is in tenths of minutes: 1 day = MINUTES_PER_DAY × LINK_LAG_FACTOR = 4800.
     """
     deps = task.get("dependencies", [])
     if not deps:
@@ -347,7 +351,7 @@ def _add_predecessor_links(
     dep_type_str = (task.get("dependency_type") or "FS").upper()
     type_code = _DEPENDENCY_TYPE_MAP.get(dep_type_str, "1")
     lag_days = int(task.get("lag_days") or 0)
-    link_lag = str(lag_days * 4800)  # tenths of minutes per day
+    link_lag = str(lag_days * MINUTES_PER_DAY * LINK_LAG_FACTOR)
 
     for dep_id in deps:
         dep_uid = uid_map.get(dep_id)
