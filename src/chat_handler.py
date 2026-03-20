@@ -395,6 +395,33 @@ class ChatHandler:
             "- Натиснете бутона 📂 за избор на папка"
         )}
 
+    @staticmethod
+    def _extract_project_type(analysis: dict, project_context: dict | None = None) -> str:
+        """Extract project_type from AI analysis result with fallback to manual selection.
+
+        Args:
+            analysis: Result dict from analyze_documents(); its "analysis" value
+                      may be a raw JSON string or an already-parsed dict.
+            project_context: Optional dict with a "type" key (manual selection).
+
+        Returns:
+            project_type string, or "" if not determinable.
+        """
+        project_type = ""
+        raw = analysis.get("analysis", "")
+        if isinstance(raw, str):
+            try:
+                project_type = json.loads(raw).get("project_type", "")
+            except Exception:
+                pass
+        elif isinstance(raw, dict):
+            project_type = raw.get("project_type", "")
+
+        if not project_type and project_context:
+            project_type = project_context.get("type", "")
+
+        return project_type
+
     def _handle_generate_schedule(
         self,
         message: str,
@@ -554,21 +581,7 @@ class ChatHandler:
         # Step 2: Generate schedule with verification
         self._progress(0.25, "Генериране на график...")
 
-        # Extract project_type from AI analysis first (higher priority than manual selection)
-        project_type = ""
-        raw_analysis_for_type = analysis.get("analysis", "")
-        if isinstance(raw_analysis_for_type, str):
-            try:
-                _parsed_pt = json.loads(raw_analysis_for_type)
-                project_type = _parsed_pt.get("project_type", "")
-            except Exception:
-                pass
-        elif isinstance(raw_analysis_for_type, dict):
-            project_type = raw_analysis_for_type.get("project_type", "")
-
-        # Fallback to manual project_context selection only if AI didn't determine a type
-        if not project_type and project_context:
-            project_type = project_context.get("type", "")
+        project_type = self._extract_project_type(analysis, project_context)
 
         progress_messages: list[str] = []
 
@@ -1424,17 +1437,7 @@ class ChatHandler:
             for sit_path in classification.get("situation_paths", []):
                 situation_locations.extend(self.ai.extract_situation_locations(sit_path))
 
-        # Extract project_type from analysis (same logic as _handle_generate_schedule)
-        project_type = ""
-        raw_analysis_for_type = analysis.get("analysis", "")
-        if isinstance(raw_analysis_for_type, str):
-            try:
-                _parsed_pt = json.loads(raw_analysis_for_type)
-                project_type = _parsed_pt.get("project_type", "")
-            except Exception:
-                pass
-        elif isinstance(raw_analysis_for_type, dict):
-            project_type = raw_analysis_for_type.get("project_type", "")
+        project_type = self._extract_project_type(analysis)
 
         progress_messages: list[str] = []
         _cycle_pcts = [0.45, 0.60, 0.75, 0.85, 0.90, 0.92]
