@@ -116,6 +116,7 @@ class ChatHandler:
         self.history: list[dict[str, str]] = []
         self.current_schedule: dict | None = None
         self.correction_history: list[dict] = []
+        self.current_project_type: str = ""
 
     def process_message(
         self,
@@ -664,6 +665,7 @@ class ChatHandler:
 
         self.current_schedule = gen_result.get("schedule")
         self.correction_history = history
+        self.current_project_type = project_type
 
         # Save schedule to project manager
         if self.project_mgr and self.project_mgr.current_project:
@@ -752,6 +754,7 @@ class ChatHandler:
             result["content"], rules, max_cycles=2,
             knowledge_prompt=system_prompt,
             progress_callback=_mod_progress,
+            project_type=self.current_project_type,
         )
 
         new_schedule = verification.get("schedule")
@@ -1493,6 +1496,7 @@ class ChatHandler:
 
         self.current_schedule = gen_result.get("schedule")
         self.correction_history = history
+        self.current_project_type = project_type
 
         # Save to project manager (same as _handle_generate_schedule)
         if self.project_mgr and self.project_mgr.current_project:
@@ -1954,6 +1958,7 @@ class ChatHandler:
         self.history = []
         self.current_schedule = None
         self.correction_history = []
+        self.current_project_type = ""
 
     def restore_history(self, messages: list[dict[str, str]]) -> None:
         """Restore chat history from saved data."""
