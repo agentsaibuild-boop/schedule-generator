@@ -357,9 +357,14 @@ class FileManager:
                         '{"required": [...], "useful": [...], "situation": [...], "unknown": [...]}'
                     ),
                 }]
-                result = ai_processor.router.chat(messages, system_prompt="")
-                import json as _json
-                classified = _json.loads(result["content"])
+                file_class_prompt = (
+                    "Ти си асистент за класификация на строителни документи. "
+                    "Задачата ти е да разпознаеш ролята на всеки файл в тендерна "
+                    "документация за ВиК инфраструктурен проект. "
+                    "Отговаряй САМО с валиден JSON — без обяснения, без markdown."
+                )
+                result = ai_processor.router.chat(messages, file_class_prompt)
+                classified = json.loads(result["content"])
                 ai_required = classified.get("required", [])
                 ai_useful = classified.get("useful", [])
                 ai_situation = classified.get("situation", [])
