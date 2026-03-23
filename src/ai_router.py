@@ -328,7 +328,7 @@ class AIRouter:
             messages=full_messages,
             max_tokens=_MAX_TOKENS_CHAT,
             temperature=0.3,
-            timeout=120,
+            timeout=_API_TIMEOUT_SECONDS,
         )
 
         content = response.choices[0].message.content or ""
@@ -358,7 +358,7 @@ class AIRouter:
             max_tokens=max_tokens,
             system=system_prompt,
             messages=messages,
-            timeout=120,
+            timeout=_API_TIMEOUT_SECONDS,
         )
 
         content = response.content[0].text if response.content else ""
@@ -459,7 +459,7 @@ class AIRouter:
                 system=system_prompt,
                 messages=messages,
                 temperature=0.1,
-                timeout=120,
+                timeout=_API_TIMEOUT_SECONDS,
             )
             raw = response.content[0].text if response.content else "{}"
             tokens_in = response.usage.input_tokens
@@ -473,7 +473,7 @@ class AIRouter:
                 messages=full_msgs,
                 max_tokens=_MAX_TOKENS_CHAT,
                 temperature=0.1,
-                timeout=120,
+                timeout=_API_TIMEOUT_SECONDS,
             )
             raw = response.choices[0].message.content or "{}"
             usage = response.usage
@@ -568,7 +568,7 @@ class AIRouter:
                 messages=full_msgs,
                 max_tokens=_MAX_TOKENS_CORRECTION,
                 temperature=0.1,
-                timeout=120,
+                timeout=_API_TIMEOUT_SECONDS,
             )
             raw = response.choices[0].message.content or "{}"
             usage = response.usage
@@ -583,7 +583,7 @@ class AIRouter:
                 system=system_prompt,
                 messages=messages,
                 temperature=0.1,
-                timeout=120,
+                timeout=_API_TIMEOUT_SECONDS,
             )
             raw = response.content[0].text if response.content else "{}"
             tokens_in = response.usage.input_tokens
@@ -861,7 +861,7 @@ class AIRouter:
             model="deepseek-chat",
             messages=messages,
             max_tokens=_MAX_TOKENS_CHAT,
-            timeout=120,
+            timeout=_API_TIMEOUT_SECONDS,
         )
         text = response.choices[0].message.content or ""
         usage = response.usage
@@ -893,7 +893,7 @@ class AIRouter:
                     {"type": "text", "text": prompt},
                 ],
             }],
-            timeout=120,
+            timeout=_API_TIMEOUT_SECONDS,
         )
         text = response.content[0].text if response.content else ""
         self._log_usage(
