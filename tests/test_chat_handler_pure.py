@@ -1,11 +1,12 @@
 """Unit tests for ChatHandler pure handler methods (no AI, no I/O).
 
-Covers: _handle_export, _offline_response, _handle_select_recent.
-All three methods are deterministic and require no mocking of AI or files.
+Covers: _handle_export, _offline_response, _handle_select_recent, _handle_save_lesson.
+All methods are deterministic and require no mocking of AI or files.
 
-FAILURE означава: export handler, offline fallback, или project selection
-не работят правилно → потребителят получава грешни съобщения при критични
-операции (свали PDF/XML, офлайн режим, избор на скорошен проект).
+FAILURE означава: export handler, offline fallback, project selection,
+или lesson-save handler не работят правилно → потребителят получава грешни
+съобщения при критични операции (свали PDF/XML, офлайн режим, избор на
+скорошен проект, запис на урок).
 """
 
 from __future__ import annotations
@@ -374,3 +375,228 @@ class TestHandleSelectRecent:
         h = _handler()
         for n in [1, 2, 99]:
             assert h._handle_select_recent(n, self._projects())["correction_info"] is None
+
+
+# ===========================================================================
+# _handle_save_lesson
+# ===========================================================================
+
+class TestHandleSaveLesson:
+    """Tests for _handle_save_lesson — pure paths only (no AI calls).
+
+    The method has two AI-free paths:
+    1. No AI initialised → error response immediately.
+    2. Lesson text too short (< 10 chars after trigger stripping) → prompt to
+       provide more detail.
+
+    Both paths are fully deterministic and require no mocking of AI or I/O.
+    """
+
+    # ------------------------------------------------------------------
+    # Guard: no AI initialised
+    # ------------------------------------------------------------------
+
+    def test_no_ai_returns_dict(self):
+        h = _handler()
+        result = h._handle_save_lesson("запиши урок: DN300 е бавен")
+        assert isinstance(result, dict)
+
+    def test_no_ai_intent_is_save_lesson(self):
+        h = _handler()
+        result = h._handle_save_lesson("запиши урок: DN300 е бавен")
+        assert result["intent"] == "save_lesson"
+
+    def test_no_ai_schedule_updated_false(self):
+        h = _handler()
+        assert h._handle_save_lesson("запиши урок: нещо")["schedule_updated"] is False
+
+    def test_no_ai_schedule_data_none(self):
+        h = _handler()
+        assert h._handle_save_lesson("запиши урок: нещо")["schedule_data"] is None
+
+    def test_no_ai_correction_info_none(self):
+        h = _handler()
+        assert h._handle_save_lesson("запиши урок: нещо")["correction_info"] is None
+
+    def test_no_ai_model_used_is_none_string(self):
+        h = _handler()
+        assert h._handle_save_lesson("запиши урок: нещо")["model_used"] == "none"
+
+    def test_no_ai_response_mentions_ai(self):
+        h = _handler()
+        result = h._handle_save_lesson("запиши урок: нещо")
+        assert "AI" in result["response"]
+
+    # ------------------------------------------------------------------
+    # Guard: lesson text too short
+    # ------------------------------------------------------------------
+
+    def _handler_with_ai(self) -> ChatHandler:
+        """ChatHandler with a minimal AI stub (router present but save_lesson not called)."""
+        h = ChatHandler()
+        mock_router = MagicMock()
+        mock_ai = MagicMock()
+        mock_ai.router = mock_router
+        h.ai = mock_ai
+        return h
+
+    def test_short_lesson_after_trigger_returns_prompt(self):
+        h = self._handler_with_ai()
+        # "abc" is 3 chars — below the 10-char minimum
+        result = h._handle_save_lesson("запиши урок: abc")
+        assert "подробно" in result["response"] or "формулир" in result["response"]
+
+    def test_empty_lesson_after_trigger_returns_prompt(self):
+        h = self._handler_with_ai()
+        result = h._handle_save_lesson("запиши урок:")
+        assert "подробно" in result["response"] or "формулир" in result["response"]
+
+    def test_short_lesson_intent_is_save_lesson(self):
+        h = self._handler_with_ai()
+        result = h._handle_save_lesson("запиши урок: кратко")
+        assert result["intent"] == "save_lesson"
+
+    def test_short_lesson_schedule_updated_false(self):
+        h = self._handler_with_ai()
+        assert h._handle_save_lesson("запиши урок: ok")["schedule_updated"] is False
+
+    def test_short_lesson_no_ai_call(self):
+        """Short lesson should NOT trigger any AI call."""
+        h = self._handler_with_ai()
+        h._handle_save_lesson("запиши урок: кратко")
+        h.ai.router.save_lesson.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Trigger keyword extraction
+    # ------------------------------------------------------------------
+
+    def test_trigger_запиши_урок_extracted(self):
+        """Text after 'запиши урок' is passed to AI as the lesson."""
+        h = self._handler_with_ai()
+        h.ai.router.save_lesson.return_value = {
+            "approved": True,
+            "formatted_lesson": "DN300 CI е 8 м/ден",
+            "reason": "Валидно",
+            "model": "deepseek",
+        }
+        h._handle_save_lesson("запиши урок: DN300 CI е 8 м/ден ефективна производителност")
+        call_args = h.ai.router.save_lesson.call_args
+        lesson_text = call_args[0][0]
+        assert "DN300" in lesson_text
+
+    def test_trigger_научен_урок_extracted(self):
+        h = self._handler_with_ai()
+        h.ai.router.save_lesson.return_value = {
+            "approved": True,
+            "formatted_lesson": "Засипването е след 24ч",
+            "reason": "Валидно",
+            "model": "deepseek",
+        }
+        h._handle_save_lesson("научен урок: засипването трябва да е след 24 часа")
+        call_args = h.ai.router.save_lesson.call_args
+        lesson_text = call_args[0][0]
+        assert "засипването" in lesson_text.lower()
+
+    def test_trigger_запомни_extracted(self):
+        h = self._handler_with_ai()
+        h.ai.router.save_lesson.return_value = {
+            "approved": False,
+            "formatted_lesson": "нещо",
+            "reason": "Не е достатъчно конкретен",
+            "model": "anthropic",
+        }
+        h._handle_save_lesson("запомни: КПС стартира СЛЕД завършване на Тласкател")
+        call_args = h.ai.router.save_lesson.call_args
+        lesson_text = call_args[0][0]
+        assert "КПС" in lesson_text
+
+    # ------------------------------------------------------------------
+    # Approved lesson response shape
+    # ------------------------------------------------------------------
+
+    def test_approved_lesson_response_contains_formatted_lesson(self):
+        h = self._handler_with_ai()
+        h.ai.router.save_lesson.return_value = {
+            "approved": True,
+            "formatted_lesson": "DN500 PE: 15 м/ден ефективна",
+            "reason": "Валидно — съответства на productivities.json",
+            "model": "deepseek",
+        }
+        result = h._handle_save_lesson("запиши урок: DN500 PE е 15 м/ден ефективна производителност")
+        assert "DN500" in result["response"]
+
+    def test_approved_lesson_intent_is_save_lesson(self):
+        h = self._handler_with_ai()
+        h.ai.router.save_lesson.return_value = {
+            "approved": True,
+            "formatted_lesson": "Урок А",
+            "reason": "ОК",
+            "model": "deepseek",
+        }
+        result = h._handle_save_lesson("запиши урок: Урок А е важен урок за запомняне")
+        assert result["intent"] == "save_lesson"
+
+    def test_approved_lesson_calls_knowledge_add_lesson(self):
+        h = self._handler_with_ai()
+        mock_km = MagicMock()
+        h.knowledge = mock_km
+        h.ai.router.save_lesson.return_value = {
+            "approved": True,
+            "formatted_lesson": "Урок Б за записване в базата",
+            "reason": "ОК",
+            "model": "deepseek",
+        }
+        h._handle_save_lesson("запиши урок: Урок Б за записване в базата знания")
+        mock_km.add_lesson.assert_called_once_with("Урок Б за записване в базата")
+
+    def test_approved_lesson_no_knowledge_no_crash(self):
+        h = self._handler_with_ai()
+        h.knowledge = None
+        h.ai.router.save_lesson.return_value = {
+            "approved": True,
+            "formatted_lesson": "Урок без knowledge manager",
+            "reason": "ОК",
+            "model": "deepseek",
+        }
+        # Should not raise even without knowledge manager
+        result = h._handle_save_lesson("запиши урок: Урок без knowledge manager в системата")
+        assert result["schedule_updated"] is False
+
+    # ------------------------------------------------------------------
+    # Rejected lesson response shape
+    # ------------------------------------------------------------------
+
+    def test_rejected_lesson_response_contains_reason(self):
+        h = self._handler_with_ai()
+        h.ai.router.save_lesson.return_value = {
+            "approved": False,
+            "formatted_lesson": "Преформулиран урок",
+            "reason": "Твърде неясен — посочи конкретен DN и производителност",
+            "model": "anthropic",
+        }
+        result = h._handle_save_lesson("запиши урок: тръбите са по-бавни в горски терен наистина")
+        assert "Твърде неясен" in result["response"]
+
+    def test_rejected_lesson_does_not_call_add_lesson(self):
+        h = self._handler_with_ai()
+        mock_km = MagicMock()
+        h.knowledge = mock_km
+        h.ai.router.save_lesson.return_value = {
+            "approved": False,
+            "formatted_lesson": "Нещо",
+            "reason": "Неприемливо",
+            "model": "anthropic",
+        }
+        h._handle_save_lesson("запиши урок: тръбите са по-бавни в горски терен в България")
+        mock_km.add_lesson.assert_not_called()
+
+    def test_rejected_lesson_intent_is_save_lesson(self):
+        h = self._handler_with_ai()
+        h.ai.router.save_lesson.return_value = {
+            "approved": False,
+            "formatted_lesson": "Нещо",
+            "reason": "Неприемливо",
+            "model": "anthropic",
+        }
+        result = h._handle_save_lesson("запиши урок: тръбите са по-бавни в горски терен в България")
+        assert result["intent"] == "save_lesson"
