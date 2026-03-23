@@ -1,7 +1,8 @@
 """Unit tests for FileManager — non-classify helpers.
 
 Covers: _serialize_value, _copy_json_txt, _convert_csv,
-        get_project_summary, set_project_path, get_conversion_status.
+        get_project_summary, set_project_path, get_conversion_status,
+        get_all_text, get_converted_files, read_converted.
 
 FAILURE означава: src/file_manager.py е счупена —
 конвертирането на CSV/JSON/TXT файлове или скенирането на проектна папка
@@ -296,6 +297,200 @@ def test_get_conversion_status_converted_file_not_pending():
         assert status["pending"] == 0
 
 
+# ---------------------------------------------------------------------------
+# get_all_text
+# ---------------------------------------------------------------------------
+
+def _make_converted_dir(tmpdir: str) -> Path:
+    """Helper: create a converted/ subdir and set project path on a fresh FM."""
+    converted = Path(tmpdir) / "converted"
+    converted.mkdir()
+    return converted
+
+
+def test_get_all_text_no_converted_dir_returns_empty():
+    fm = FileManager()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fm.set_project_path(tmpdir)
+        # converted/ does not exist yet
+        assert fm.get_all_text() == ""
+
+
+def test_get_all_text_full_text_field():
+    fm = FileManager()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fm.set_project_path(tmpdir)
+        converted = _make_converted_dir(tmpdir)
+        (converted / "doc.json").write_text(
+            json.dumps({"source_file": "doc.pdf", "full_text": "Съдържание на PDF"}),
+            encoding="utf-8",
+        )
+        result = fm.get_all_text()
+        assert "doc.pdf" in result
+        assert "Съдържание на PDF" in result
+
+
+def test_get_all_text_sheets_field():
+    fm = FileManager()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fm.set_project_path(tmpdir)
+        converted = _make_converted_dir(tmpdir)
+        (converted / "КСС.json").write_text(
+            json.dumps({
+                "source_file": "КСС.xlsx",
+                "sheets": [{"name": "Лист1", "rows": [{"Дейност": "Изкоп", "Дни": "10"}]}],
+            }),
+            encoding="utf-8",
+        )
+        result = fm.get_all_text()
+        assert "КСС.xlsx" in result
+        assert "Лист1" in result
+        assert "Изкоп" in result
+
+
+def test_get_all_text_content_string():
+    fm = FileManager()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fm.set_project_path(tmpdir)
+        converted = _make_converted_dir(tmpdir)
+        (converted / "spec.json").write_text(
+            json.dumps({"source_file": "spec.txt", "content": "Технически условия"}),
+            encoding="utf-8",
+        )
+        result = fm.get_all_text()
+        assert "Технически условия" in result
+
+
+def test_get_all_text_content_list_of_dicts():
+    fm = FileManager()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fm.set_project_path(tmpdir)
+        converted = _make_converted_dir(tmpdir)
+        (converted / "report.json").write_text(
+            json.dumps({
+                "source_file": "report.docx",
+                "content": [{"text": "Параграф 1"}, {"text": "Параграф 2"}],
+            }),
+            encoding="utf-8",
+        )
+        result = fm.get_all_text()
+        assert "Параграф 1" in result
+        assert "Параграф 2" in result
+
+
+def test_get_all_text_skips_manifest():
+    fm = FileManager()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fm.set_project_path(tmpdir)
+        converted = _make_converted_dir(tmpdir)
+        (converted / "_manifest.json").write_text(
+            json.dumps({"files": {}}), encoding="utf-8"
+        )
+        (converted / "real.json").write_text(
+            json.dumps({"source_file": "real.txt", "full_text": "Реален текст"}),
+            encoding="utf-8",
+        )
+        result = fm.get_all_text()
+        assert "Реален текст" in result
+        # Manifest content should not appear as a section
+        assert '"files"' not in result
+
+
+def test_get_all_text_skips_invalid_json_silently():
+    fm = FileManager()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fm.set_project_path(tmpdir)
+        converted = _make_converted_dir(tmpdir)
+        (converted / "broken.json").write_text("{not valid", encoding="utf-8")
+        (converted / "good.json").write_text(
+            json.dumps({"source_file": "good.txt", "full_text": "Добър текст"}),
+            encoding="utf-8",
+        )
+        result = fm.get_all_text()
+        assert "Добър текст" in result  # good file processed
+        # No exception raised for broken file
+
+
+def test_get_all_text_uses_stem_when_no_source_file():
+    fm = FileManager()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fm.set_project_path(tmpdir)
+        converted = _make_converted_dir(tmpdir)
+        (converted / "myfile.json").write_text(
+            json.dumps({"full_text": "Без source_file поле"}), encoding="utf-8"
+        )
+        result = fm.get_all_text()
+        assert "myfile" in result  # stem is used as fallback header
+
+
+# ---------------------------------------------------------------------------
+# get_converted_files
+# ---------------------------------------------------------------------------
+
+def test_get_converted_files_empty_manifest():
+    fm = FileManager()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fm.set_project_path(tmpdir)
+        assert fm.get_converted_files() == []
+
+
+def test_get_converted_files_includes_ok_entries():
+    fm = FileManager()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fm.set_project_path(tmpdir)
+        fm._manifest["files"] = {
+            "КСС.xlsx": {
+                "status": "ok",
+                "converted_file": "КСС.json",
+                "conversion_method": "xlsx",
+                "converted_size": 1234,
+            }
+        }
+        result = fm.get_converted_files()
+        assert len(result) == 1
+        assert result[0]["original"] == "КСС.xlsx"
+        assert result[0]["converted"] == "КСС.json"
+        assert result[0]["type"] == ".xlsx"
+        assert result[0]["method"] == "xlsx"
+        assert result[0]["size"] == 1234
+
+
+def test_get_converted_files_excludes_error_entries():
+    fm = FileManager()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fm.set_project_path(tmpdir)
+        fm._manifest["files"] = {
+            "broken.pdf": {"status": "error", "error": "OCR failed"},
+        }
+        assert fm.get_converted_files() == []
+
+
+# ---------------------------------------------------------------------------
+# read_converted
+# ---------------------------------------------------------------------------
+
+def test_read_converted_raises_when_missing():
+    fm = FileManager()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fm.set_project_path(tmpdir)
+        import pytest
+        with pytest.raises(FileNotFoundError):
+            fm.read_converted("nonexistent.xlsx")
+
+
+def test_read_converted_returns_parsed_json():
+    fm = FileManager()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fm.set_project_path(tmpdir)
+        converted = Path(tmpdir) / "converted"
+        converted.mkdir()
+        (converted / "КСС.json").write_text(
+            json.dumps({"source_file": "КСС.xlsx", "rows": 42}), encoding="utf-8"
+        )
+        data = fm.read_converted("КСС.xlsx")
+        assert data["rows"] == 42
+
+
 if __name__ == "__main__":
     tests = [
         test_serialize_none,
@@ -323,6 +518,19 @@ if __name__ == "__main__":
         test_get_project_summary_groups_by_type,
         test_get_conversion_status_new_file_is_pending,
         test_get_conversion_status_converted_file_not_pending,
+        test_get_all_text_no_converted_dir_returns_empty,
+        test_get_all_text_full_text_field,
+        test_get_all_text_sheets_field,
+        test_get_all_text_content_string,
+        test_get_all_text_content_list_of_dicts,
+        test_get_all_text_skips_manifest,
+        test_get_all_text_skips_invalid_json_silently,
+        test_get_all_text_uses_stem_when_no_source_file,
+        test_get_converted_files_empty_manifest,
+        test_get_converted_files_includes_ok_entries,
+        test_get_converted_files_excludes_error_entries,
+        test_read_converted_raises_when_missing,
+        test_read_converted_returns_parsed_json,
     ]
     passed = 0
     for t in tests:
