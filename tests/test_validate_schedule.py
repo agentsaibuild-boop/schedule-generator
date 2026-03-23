@@ -270,3 +270,47 @@ def test_valid_schedule_no_warnings():
     result = _v([t1, t2])
     assert result["valid"] is True
     assert result["warnings"] == []
+
+
+# ---------------------------------------------------------------------------
+# Edge cases — lines not covered by the above tests
+# ---------------------------------------------------------------------------
+
+def test_negative_duration_produces_warning():
+    """Line 112: negative duration should generate a warning (not an error)."""
+    task = _task("T1", "Задача", start=1, duration=-3, end=1)
+    result = _v([task])
+    assert any("отрицателна продължителност" in w for w in result["warnings"])
+
+
+def test_sub_activity_without_end_day_out_of_bounds():
+    """Lines 178-179: sub-activity with no end_day; computed end should still
+    detect out-of-bounds."""
+    # Parent: start=1, dur=5 → end=5.  Sub: start=4, dur=5 → computed end=8 > parent end.
+    t = _task(
+        "T1", "Родител", start=1, duration=5, end=5,
+        sub_activities=[{"name": "Подзадача", "start_day": 4, "duration": 5}],
+    )
+    result = _v([t])
+    assert any("излиза" in e for e in result["errors"])
+
+
+def test_sub_activity_without_end_day_within_bounds_no_error():
+    """Lines 178-179: sub-activity with no end_day that fits inside parent — no error."""
+    t = _task(
+        "T1", "Родител", start=1, duration=10, end=10,
+        sub_activities=[{"name": "Подзадача", "start_day": 2, "duration": 3}],
+    )
+    result = _v([t])
+    assert not any("излиза" in e for e in result["errors"])
+
+
+def test_team_overlap_task_without_end_day():
+    """Lines 257-258: team task missing end_day — should compute it from duration
+    and still detect overlap when >2 tasks overlap."""
+    # Three tasks in the same team, all overlapping; T3 has no end_day.
+    t1 = _task("T1", "А", start=1, duration=10, end=10, team="Екип А")
+    t2 = _task("T2", "Б", start=1, duration=10, end=10, team="Екип А")
+    t3 = _task("T3", "В", start=1, duration=10, team="Екип А")  # no end_day
+    result = _v([t1, t2, t3])
+    assert any("Екип А" in w for w in result["warnings"])

@@ -283,6 +283,98 @@ class TestValidateModification:
 
 
 # ---------------------------------------------------------------------------
+# adjust_schedule — cascade guard (>50 affected tasks, lines 442-454)
+# ---------------------------------------------------------------------------
+
+def _fan_out(n: int = 52) -> list[dict]:
+    """Root task A with n direct dependents — triggers the >50 cascade guard."""
+    root = _task("A", "Корен", 0, 10)
+    dependents = [_task(f"T{i:03d}", f"Задача {i}", 10, 5, deps=["A"]) for i in range(n)]
+    return [root] + dependents
+
+
+class TestAdjustScheduleCascadeGuard:
+    def test_cascade_guard_emits_warning_when_over_50(self, builder):
+        sched = _fan_out(52)  # 52 direct dependents → len(cascaded)=52 > 50
+        result = builder.adjust_schedule(sched, {
+            "task_id": "A", "field": "duration", "new_value": 15, "cascade": True,
+        })
+        assert any("каскадна" in w.lower() or "Каскадна" in w for w in result["warnings"])
+
+    def test_cascade_guard_returns_affected_count_one(self, builder):
+        sched = _fan_out(52)
+        result = builder.adjust_schedule(sched, {
+            "task_id": "A", "field": "duration", "new_value": 15, "cascade": True,
+        })
+        assert result["affected_count"] == 1
+
+    def test_cascade_guard_does_not_shift_dependents(self, builder):
+        sched = _fan_out(52)
+        result = builder.adjust_schedule(sched, {
+            "task_id": "A", "field": "duration", "new_value": 15, "cascade": True,
+        })
+        # Dependents must stay at their original start_day (no cascade applied)
+        for t in result["schedule"]:
+            if t["id"].startswith("T"):
+                assert t["start_day"] == 10
+
+    def test_cascade_guard_still_applies_target_change(self, builder):
+        sched = _fan_out(52)
+        result = builder.adjust_schedule(sched, {
+            "task_id": "A", "field": "duration", "new_value": 15, "cascade": True,
+        })
+        root = next(t for t in result["schedule"] if t["id"] == "A")
+        assert root["duration"] == 15
+        assert root["end_day"] == 14  # start=0, dur=15
+
+    def test_cascade_under_limit_applies_normally(self, builder):
+        """Exactly 50 dependents → no guard (50 == limit, not strictly greater)."""
+        sched = _fan_out(50)
+        result = builder.adjust_schedule(sched, {
+            "task_id": "A", "field": "duration", "new_value": 15, "cascade": True,
+        })
+        # All 50 dependents should be shifted
+        for t in result["schedule"]:
+            if t["id"].startswith("T"):
+                assert t["start_day"] == 15
+
+
+# ---------------------------------------------------------------------------
+# adjust_schedule — old_end is None (line 405-406)
+# ---------------------------------------------------------------------------
+
+class TestAdjustScheduleMissingEndDay:
+    def test_task_without_end_day_computes_delta_correctly(self, builder):
+        """Target task has no end_day — delta must still be computed from duration."""
+        sched = [
+            {"id": "A", "name": "А", "start_day": 0, "duration": 10, "dependencies": []},
+            _task("B", "Б", 10, 5, deps=["A"]),
+        ]
+        result = builder.adjust_schedule(sched, {
+            "task_id": "A", "field": "duration", "new_value": 15, "cascade": True,
+        })
+        tasks = {t["id"]: t for t in result["schedule"]}
+        assert tasks["B"]["start_day"] == 15  # delta = 15-10 = +5
+
+    def test_sub_activity_without_end_day_does_not_raise(self, builder):
+        """Sub-activity missing end_day should not crash the sub-bounds check."""
+        sched = [
+            {
+                "id": "A", "name": "А", "start_day": 0, "duration": 20,
+                "dependencies": [],
+                "sub_activities": [
+                    {"name": "Sub", "start_day": 15, "duration": 3},  # no end_day
+                ],
+            }
+        ]
+        # Shrinking A so that sub would exceed — just must not raise
+        result = builder.adjust_schedule(sched, {
+            "task_id": "A", "field": "duration", "new_value": 10, "cascade": False,
+        })
+        assert "schedule" in result
+
+
+# ---------------------------------------------------------------------------
 # _diff_task
 # ---------------------------------------------------------------------------
 
