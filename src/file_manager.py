@@ -364,7 +364,7 @@ class FileManager:
                     "Отговаряй САМО с валиден JSON — без обяснения, без markdown."
                 )
                 result = ai_processor.router.chat(messages, file_class_prompt)
-                classified = json.loads(result["content"])
+                classified = ai_processor.router.parse_json_response(result.get("content", "{}"))
                 ai_required = classified.get("required", [])
                 ai_useful = classified.get("useful", [])
                 ai_situation = classified.get("situation", [])

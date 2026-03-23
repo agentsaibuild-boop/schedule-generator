@@ -133,6 +133,95 @@ def test_multiple_required_files():
     assert len(result["required"]) == 2
 
 
+# ---------------------------------------------------------------------------
+# AI fallback path tests (no real API calls — router is mocked)
+# ---------------------------------------------------------------------------
+
+def _make_mock_router(content: str):
+    """Build a minimal mock router whose chat() returns the given content string."""
+    from unittest.mock import MagicMock
+    router = MagicMock()
+    router.chat.return_value = {"content": content}
+    # Use the real parse_json_response from AIRouter
+    from src.ai_router import AIRouter
+    router.parse_json_response.side_effect = AIRouter.parse_json_response
+    return router
+
+
+def _make_mock_ai_processor(content: str):
+    """Build a minimal mock ai_processor wrapping a mock router."""
+    from unittest.mock import MagicMock
+    ai = MagicMock()
+    ai.router = _make_mock_router(content)
+    return ai
+
+
+def _classify_with_ai(file_names: list[str], ai_content: str) -> dict:
+    """Run classify_files with no keyword match, triggering AI fallback."""
+    fm = FileManager()
+    # Use names that don't match any keyword → AI fallback is triggered
+    fake_paths = _make_paths(*file_names)
+    ai = _make_mock_ai_processor(ai_content)
+    with patch.object(fm, "_list_supported_files", return_value=fake_paths):
+        return fm.classify_files(ai_processor=ai)
+
+
+def test_ai_fallback_plain_json():
+    """AI returns plain JSON → classify_files uses it and sets ai_used=True."""
+    import json
+    payload = json.dumps({
+        "required": ["проект_А.xlsx"],
+        "useful": [],
+        "situation": [],
+        "unknown": ["снимки.zip"],
+    })
+    result = _classify_with_ai(["проект_А.xlsx", "снимки.zip"], payload)
+    assert result["ai_used"] is True
+    assert result["can_proceed"] is True
+    assert "проект_А.xlsx" in result["required"]
+
+
+def test_ai_fallback_markdown_wrapped_json():
+    """AI wraps response in ```json ... ``` → parse_json_response strips it correctly."""
+    import json
+    inner = json.dumps({
+        "required": ["разчет.xlsx"],
+        "useful": ["договор.pdf"],
+        "situation": [],
+        "unknown": [],
+    })
+    markdown_content = f"```json\n{inner}\n```"
+    result = _classify_with_ai(["разчет.xlsx", "договор.pdf"], markdown_content)
+    assert result["ai_used"] is True
+    assert result["can_proceed"] is True
+    assert "разчет.xlsx" in result["required"]
+    assert "договор.pdf" in result["useful"]
+
+
+def test_ai_fallback_invalid_json_degrades_gracefully():
+    """AI returns garbage → parse_json_response returns fallback dict (no keys match),
+    so required=[] and can_proceed=False. ai_used=True because we did attempt AI."""
+    result = _classify_with_ai(["непознат.zip"], "ГРЕШКА: не мога да класифицирам")
+    assert result["can_proceed"] is False
+    assert result["required"] == []
+    # ai_used=True because the AI call itself succeeded; only the JSON was unparseable
+    assert result["ai_used"] is True
+
+
+def test_ai_fallback_empty_required_sets_can_proceed_false():
+    """AI returns valid JSON but required=[] → can_proceed=False."""
+    import json
+    payload = json.dumps({
+        "required": [],
+        "useful": ["договор.pdf"],
+        "situation": [],
+        "unknown": [],
+    })
+    result = _classify_with_ai(["договор.pdf"], payload)
+    assert result["ai_used"] is True
+    assert result["can_proceed"] is False
+
+
 if __name__ == "__main__":
     tests = [
         test_kss_keyword_required_can_proceed,
@@ -146,6 +235,10 @@ if __name__ == "__main__":
         test_situation_takes_priority_over_required_keywords,
         test_mixed_files_correct_routing,
         test_multiple_required_files,
+        test_ai_fallback_plain_json,
+        test_ai_fallback_markdown_wrapped_json,
+        test_ai_fallback_invalid_json_degrades_gracefully,
+        test_ai_fallback_empty_required_sets_can_proceed_false,
     ]
     passed = 0
     for t in tests:
