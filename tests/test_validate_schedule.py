@@ -314,3 +314,25 @@ def test_team_overlap_task_without_end_day():
     t3 = _task("T3", "В", start=1, duration=10, team="Екип А")  # no end_day
     result = _v([t1, t2, t3])
     assert any("Екип А" in w for w in result["warnings"])
+
+
+def test_large_schedule_above_limit_skips_cycle_check():
+    """Line 141: schedule with >1000 tasks bypasses cycle detection and
+    adds a warning instead of an error."""
+    # Build 1001 independent tasks (no dependencies).
+    tasks = [_task(f"T{i}", f"Задача {i}", start=i, duration=1, end=i)
+             for i in range(1, 1002)]
+    result = _v(tasks)
+    # No cycle error expected — cycle check was skipped.
+    assert not any("кръгова" in e.lower() for e in result["errors"])
+    # A warning about skipping the check must be present.
+    assert any("пропусната" in w.lower() for w in result["warnings"])
+
+
+def test_total_duration_zero_when_end_day_before_start():
+    """Line 213: when the only task has end_day < start_day the computed
+    total duration is 0 and an error is appended."""
+    # end_day=2 < start_day=5 → max_end(2) < min_start(5) → total_dur=0.
+    t = _task("T1", "Невалидна задача", start=5, duration=1, end=2)
+    result = _v([t])
+    assert any("≤ 0" in e for e in result["errors"])

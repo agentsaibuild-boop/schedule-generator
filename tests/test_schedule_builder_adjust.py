@@ -402,3 +402,47 @@ class TestDiffTask:
         old = _task("A", "Тест", 0, 5)
         new = {**old, "notes_msp": "нова бележка"}
         assert ScheduleBuilder._diff_task(old, new) == []
+
+
+# ---------------------------------------------------------------------------
+# _cascade_shift edge cases — lines 492 and 497
+# ---------------------------------------------------------------------------
+
+class TestCascadeShiftEdgeCases:
+    """Direct tests for ScheduleBuilder._cascade_shift to cover branches that
+    adjust_schedule never exercises through normal usage."""
+
+    def test_diamond_dependency_each_node_shifted_once(self):
+        """Line 492: in a diamond graph (A→B, A→C, B→D, C→D) the shared
+        successor D is visited twice in the BFS queue.  The `if tid in visited`
+        guard (line 492) must prevent double-shifting."""
+        A = _task("A", "A", 0, 10, deps=[])
+        B = _task("B", "B", 10, 5, deps=["A"])
+        C = _task("C", "C", 10, 5, deps=["A"])
+        D = _task("D", "D", 15, 3, deps=["B", "C"])
+        schedule = [A, B, C, D]
+        task_by_id = {t["id"]: t for t in schedule}
+
+        shifted = ScheduleBuilder._cascade_shift("A", 5, task_by_id, schedule)
+
+        # D must appear in the shifted list exactly once.
+        assert shifted.count("D") == 1
+        # D's start must be shifted by exactly 5, not 10.
+        assert task_by_id["D"]["start_day"] == 20
+
+    def test_successor_missing_from_task_by_id_is_skipped(self):
+        """Line 497: when a task ID appears in the successors map but is absent
+        from task_by_id (mismatched arguments), _cascade_shift skips it
+        gracefully and does not raise."""
+        A = {"id": "A", "name": "A", "start_day": 0, "duration": 10,
+             "end_day": 9, "dependencies": []}
+        B = {"id": "B", "name": "B", "start_day": 10, "duration": 5,
+             "end_day": 14, "dependencies": ["A"]}
+        schedule = [A, B]
+        # Pass task_by_id without B so task_by_id.get("B") returns None.
+        task_by_id = {"A": A}
+
+        shifted = ScheduleBuilder._cascade_shift("A", 5, task_by_id, schedule)
+
+        # B is not in task_by_id → should not be in the shifted list.
+        assert "B" not in shifted

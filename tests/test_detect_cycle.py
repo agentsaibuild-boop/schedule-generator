@@ -229,3 +229,14 @@ class TestCyclePath:
         tasks, by_id = _build([_t("A"), _t("B", ["A"])])
         result = _detect(tasks, by_id)
         assert result is None
+
+
+class TestMismatchedTaskById:
+    def test_task_in_schedule_but_missing_from_task_by_id_returns_none(self):
+        """Lines 323-325: when task_by_id does not contain a task that IS in
+        schedule (and therefore in the color map), dfs colours it BLACK and
+        returns None gracefully — no exception, no false cycle."""
+        tasks = [_t("A")]
+        # Intentionally pass an empty task_by_id so "A" is coloured but missing.
+        result = _detect(tasks, {})
+        assert result is None
