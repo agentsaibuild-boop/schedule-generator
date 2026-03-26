@@ -499,7 +499,7 @@ class AIProcessor:
         rules = self.build_verification_prompt()
 
         cycle_result = self.router.run_correction_cycle(
-            schedule_json, rules, max_cycles=3, progress_callback=progress_callback,
+            schedule_json, rules, max_cycles=1, progress_callback=progress_callback,
             project_type=project_type,
             knowledge_prompt=system_prompt,
         )
