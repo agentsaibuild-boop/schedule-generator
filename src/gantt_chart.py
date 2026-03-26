@@ -24,7 +24,7 @@ DEFAULT_LAYERS: dict[str, bool] = {
     "phase_separators": True,
     "today_line": True,
     "milestones": True,
-    "subtasks": False,
+    "subtasks": True,
 }
 
 _MS_PER_DAY = 86_400_000
@@ -168,11 +168,11 @@ def create_gantt_chart(
             legend_name = "Критичен път"
         else:
             bar_color = COLOR_MAP.get(task_type, "#4472C4")
-            border_color = "white"
+            border_color = "rgba(0,0,0,0.25)"
             border_width = 1
-            opacity = 0.5 if show_critical else 0.85
+            opacity = 0.45 if show_critical else 0.90
             if is_sub:
-                opacity *= 0.7
+                opacity *= 0.75
             legend_key = task_type
             legend_name = get_type_label(task_type)
 
@@ -202,7 +202,7 @@ def create_gantt_chart(
         if show_legend:
             legend_added.add(legend_key)
 
-        bar_width = 0.4 if is_sub else 0.6
+        bar_width = 0.5 if is_sub else 0.78
 
         fig.add_trace(go.Bar(
             y=[y_labels[idx]],
@@ -364,7 +364,7 @@ def create_gantt_chart(
 
     # ── LAYOUT ────────────────────────────────────────────────────────────
     if view_mode == "months":
-        tick_fmt = "%b %Y"
+        tick_fmt = "%b '%y"
         dtick = "M1"
     elif view_mode == "weeks":
         tick_fmt = "%d %b"
@@ -373,31 +373,63 @@ def create_gantt_chart(
         tick_fmt = "%d.%m"
         dtick = _MS_PER_DAY
 
+    # Auto initial x-range: show first 180 days (user can scroll for long projects)
+    all_start_days = [t.get("start_day", 1) for t in display]
+    all_end_days = [t.get("end_day", t.get("start_day", 1) + t.get("duration", 1) - 1) for t in display]
+    project_start_dt = datetime.strptime(project_start_date, "%Y-%m-%d")
+    range_start = project_start_dt + timedelta(days=min(all_start_days) - 2)
+    max_end_day = max(all_end_days) if all_end_days else 365
+    visible_days = min(max_end_day, 180)
+    range_end = project_start_dt + timedelta(days=visible_days + 5)
+
+    # Alternating row backgrounds
+    for row_idx in range(len(display)):
+        if row_idx % 2 == 0:
+            fig.add_shape(
+                type="rect",
+                xref="paper", yref="y",
+                x0=0, x1=1,
+                y0=y_labels[row_idx] if row_idx < len(y_labels) else row_idx,
+                y1=y_labels[row_idx] if row_idx < len(y_labels) else row_idx,
+                fillcolor="rgba(240,244,250,0.5)",
+                line=dict(width=0),
+                layer="below",
+            )
+
+    row_height = 38
     fig.update_layout(
-        height=max(400, len(display) * 30 + 120),
-        margin=dict(l=420, r=50, t=60, b=80),
+        height=max(450, len(display) * row_height + 140),
+        margin=dict(l=380, r=30, t=50, b=90),
         xaxis=dict(
             title="",
             type="date",
-            rangeslider=dict(visible=True, thickness=0.05),
+            range=[range_start, range_end],
+            rangeslider=dict(visible=True, thickness=0.04),
             tickformat=tick_fmt,
-            gridcolor="#E5E5E5",
+            gridcolor="#D0D7E3",
+            gridwidth=1,
             dtick=dtick,
+            tickfont=dict(size=11),
+            showline=True,
+            linecolor="#999",
         ),
         yaxis=dict(
             autorange="reversed",
             tickfont=dict(size=11),
             categoryorder="array",
             categoryarray=y_labels,
+            showgrid=True,
+            gridcolor="#E8ECF2",
+            gridwidth=1,
         ),
         showlegend=True,
-        legend=dict(orientation="h", y=-0.15, xanchor="center", x=0.5),
-        plot_bgcolor="white",
+        legend=dict(orientation="h", y=-0.13, xanchor="center", x=0.5, font=dict(size=11)),
+        plot_bgcolor="#FAFBFD",
         paper_bgcolor="white",
-        bargap=0.3,
+        bargap=0.18,
         barmode="overlay",
-        font=dict(family="Arial, sans-serif", size=12),
-        title=dict(text="Линеен график (Gantt)", font=dict(size=16)),
+        font=dict(family="Arial, sans-serif", size=11),
+        title=dict(text="Линеен график (Gantt)", font=dict(size=15), x=0.5, xanchor="center"),
     )
 
     return fig

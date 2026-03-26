@@ -1383,7 +1383,7 @@ class ChatHandler:
         # ── Q2: same for all sections? ──────────────────────────────────
         if step == "q2":
             if "ДА" in msg or msg in ("Д", "YES", "Y", "DA"):
-                return self._generate_with_sequence(state)
+                return self._ask_parallel_teams(state)
 
             if "НЕ" in msg or msg in ("Н", "NO", "N", "NE"):
                 sections = state.get("sections", [])
@@ -1434,11 +1434,71 @@ class ChatHandler:
                 constraints[name] = opposite
 
             exc_label = ", ".join(exception_names)
-            return self._generate_with_sequence({**state, "constraints": constraints,
-                                                 "_exc_label": exc_label})
+            return self._ask_parallel_teams({**state, "constraints": constraints,
+                                             "_exc_label": exc_label})
+
+        # ── Q3: how many teams? ──────────────────────────────────────────
+        if step == "q3_teams":
+            nums = re.findall(r"\d+", msg)
+            if nums:
+                num_teams = max(1, int(nums[0]))
+                if num_teams == 1:
+                    return self._generate_with_sequence({**state, "num_teams": 1, "parallel": False})
+                return self._ask_parallel_question({**state, "num_teams": num_teams})
+            return {**_base, "response": (
+                "Моля, напиши **число** — колко екипи ще работят (напр. **2**)."
+            ), "pending_sequence": state}
+
+        # ── Q4: parallel or sequential? ─────────────────────────────────
+        if step == "q4_parallel":
+            if "ДА" in msg or msg in ("Д", "YES", "Y", "DA"):
+                return self._generate_with_sequence({**state, "parallel": True})
+            if "НЕ" in msg or msg in ("Н", "NO", "N", "NE"):
+                return self._generate_with_sequence({**state, "parallel": False})
+            return {**_base, "response": (
+                "Моля, отговори с **ДА** (паралелно) или **НЕ** (последователно)."
+            ), "pending_sequence": state}
 
         # Unknown step — clear and restart
         return {**_base, "response": "Нещо се обърка. Напиши **генерирай график** отново."}
+
+    def _ask_parallel_teams(self, state: dict) -> dict:
+        """Ask Q3: how many teams."""
+        _base = {
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "generate_schedule",
+            "model_used": "none",
+        }
+        return {**_base,
+            "response": (
+                "**Колко екипи ще работят?**\n\n"
+                "  **1** — един екип\n"
+                "  **2** — два екипа\n"
+                "  **3** или повече — посочи броя"
+            ),
+            "pending_sequence": {**state, "step": "q3_teams"},
+        }
+
+    def _ask_parallel_question(self, state: dict) -> dict:
+        """Ask Q4: parallel or sequential."""
+        _base = {
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "generate_schedule",
+            "model_used": "none",
+        }
+        num_teams = state.get("num_teams", 2)
+        return {**_base,
+            "response": (
+                f"**{num_teams} екипа — паралелно ли?**\n\n"
+                "  **ДА** — екипите работят едновременно (съкращава срока)\n"
+                "  **НЕ** — екипите работят последователно"
+            ),
+            "pending_sequence": {**state, "step": "q4_parallel"},
+        }
 
     def _generate_with_sequence(self, state: dict) -> dict:
         """Trigger schedule generation with collected sequence constraints."""
@@ -1454,15 +1514,21 @@ class ChatHandler:
         if exc_label:
             opposite_label = "Канализация → Водопровод" if default == "water_first" else "Водопровод → Канализация"
             summary += f"\nИзключения ({opposite_label}): {exc_label}"
+        num_teams = state.get("num_teams", 1)
+        parallel = state.get("parallel", num_teams > 1)
+        if num_teams > 1:
+            summary += f"\nЕкипи: **{num_teams}**, {'паралелно' if parallel else 'последователно'}"
 
         # Re-enter generation flow
-        result = self._continue_generation(analysis, constraints, project_context)
+        result = self._continue_generation(analysis, constraints, project_context,
+                                           num_teams=num_teams if parallel else 1)
         result["response"] = summary + "\n\n" + result.get("response", "")
         result.pop("pending_sequence", None)
         return result
 
     def _continue_generation(
-        self, analysis: dict, sequence_constraints: dict, project_context: dict | None = None
+        self, analysis: dict, sequence_constraints: dict, project_context: dict | None = None,
+        num_teams: int = 1,
     ) -> dict:
         """Run the generation steps after questionnaire is complete."""
         all_text = self.files.get_all_text() if self.files else ""
@@ -1491,6 +1557,7 @@ class ChatHandler:
             all_text=all_text,
             extra_locations=situation_locations or None,
             sequence_constraints=sequence_constraints,
+            num_teams=num_teams,
         )
 
         status = gen_result.get("status", "error")

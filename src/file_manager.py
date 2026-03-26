@@ -8,6 +8,7 @@ project directory together with a ``_manifest.json`` cache.
 
 from __future__ import annotations
 
+import concurrent.futures
 import csv
 import io
 import json
@@ -15,6 +16,8 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+_FILE_CONVERT_TIMEOUT = 120  # seconds per file
 
 logger = logging.getLogger(__name__)
 
@@ -89,11 +92,11 @@ class FileManager:
         converted_dir = self.base_path / "converted"
 
         for f in sorted(self.base_path.iterdir()):
-            if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS:
+            if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS and not f.name.startswith(("~$", "~_")):
                 files.append(f)
             elif f.is_dir() and f != converted_dir:
                 for child in sorted(f.iterdir()):
-                    if child.is_file() and child.suffix.lower() in SUPPORTED_EXTENSIONS:
+                    if child.is_file() and child.suffix.lower() in SUPPORTED_EXTENSIONS and not child.name.startswith(("~$", "~_")):
                         files.append(child)
         return files
 
@@ -440,7 +443,12 @@ class FileManager:
                 progress_callback(i + 1, len(supported), fname, "working")
 
             try:
-                result = self.convert_single_file(str(fp), ai_processor)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    future = ex.submit(self.convert_single_file, str(fp), ai_processor)
+                    try:
+                        result = future.result(timeout=_FILE_CONVERT_TIMEOUT)
+                    except concurrent.futures.TimeoutError:
+                        result = {"status": "error", "error": f"Timeout ({_FILE_CONVERT_TIMEOUT}s)"}
                 if result["status"] == "ok":
                     converted += 1
                     results.append({
@@ -703,6 +711,11 @@ class FileManager:
 
         Handles merged cells by propagating the merged value.
         """
+        fp_obj = Path(filepath)
+        if fp_obj.suffix.lower() == ".xls":
+            import xlrd
+            return self._convert_excel_xls(filepath)
+
         from openpyxl import load_workbook
 
         wb = load_workbook(filepath, data_only=True)
@@ -774,6 +787,35 @@ class FileManager:
             "status": "ok",
             "data": data,
             "method": "openpyxl",
+            "detail": f"{len(sheets)} листа, {total_rows} реда",
+            "pages_or_rows": total_rows,
+        }
+
+    def _convert_excel_xls(self, filepath: str) -> dict:
+        """Convert legacy .xls file using xlrd."""
+        import xlrd
+
+        wb = xlrd.open_workbook(filepath)
+        sheets: list[dict] = []
+        total_rows = 0
+
+        for ws in wb.sheets():
+            if ws.nrows == 0:
+                continue
+            headers = [str(ws.cell_value(0, c) or f"Col{c+1}").strip() for c in range(ws.ncols)]
+            rows: list[dict] = []
+            for r in range(1, ws.nrows):
+                row_data = {headers[c]: ws.cell_value(r, c) for c in range(ws.ncols)}
+                if any(v for v in row_data.values() if v != ""):
+                    rows.append(row_data)
+            total_rows += len(rows)
+            sheets.append({"name": ws.name, "headers": headers, "rows": rows, "row_count": len(rows)})
+
+        data = {"source_file": Path(filepath).name, "type": "excel", "sheets": sheets}
+        return {
+            "status": "ok",
+            "data": data,
+            "method": "xlrd",
             "detail": f"{len(sheets)} листа, {total_rows} реда",
             "pages_or_rows": total_rows,
         }

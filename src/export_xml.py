@@ -348,12 +348,22 @@ def _add_predecessor_links(
     if not deps:
         return
 
-    dep_type_str = (task.get("dependency_type") or "FS").upper()
-    type_code = _DEPENDENCY_TYPE_MAP.get(dep_type_str, "1")
-    lag_days = int(task.get("lag_days") or 0)
-    link_lag = str(lag_days * MINUTES_PER_DAY * LINK_LAG_FACTOR)
+    for dep in deps:
+        # Support both formats:
+        # Old: ["D01", "D02"]  (array of strings)
+        # New: [{"predecessor_id": "D01", "type": "SS", "lag": 20}]  (array of dicts)
+        if isinstance(dep, dict):
+            dep_id = dep.get("predecessor_id") or dep.get("id", "")
+            dep_type_str = (dep.get("type") or "FS").upper()
+            lag_days = int(dep.get("lag") or dep.get("lag_days") or 0)
+        else:
+            dep_id = str(dep)
+            dep_type_str = (task.get("dependency_type") or "FS").upper()
+            lag_days = int(task.get("lag_days") or 0)
 
-    for dep_id in deps:
+        type_code = _DEPENDENCY_TYPE_MAP.get(dep_type_str, "1")
+        link_lag = str(lag_days * MINUTES_PER_DAY * LINK_LAG_FACTOR)
+
         dep_uid = uid_map.get(dep_id)
         if dep_uid is None:
             logger.debug("Predecessor %s not found in uid_map (task %s)", dep_id, task.get("id"))

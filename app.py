@@ -98,6 +98,12 @@ st.markdown(
         padding-bottom: 0;
     }
     .stTabs [data-baseweb="tab-list"] button { font-size: 0.95rem; }
+    /* Chat input — по-голяма височина */
+    [data-testid="stChatInput"] textarea {
+        min-height: 80px !important;
+        max-height: 200px !important;
+        overflow-y: auto !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -771,6 +777,37 @@ with st.sidebar:
             st.rerun()
         else:
             st.warning("Моля, изберете папка.")
+
+    # --- Drag & Drop file upload ---
+    with st.expander("📎 Влачи файлове тук", expanded=False):
+        dropped_files = st.file_uploader(
+            "drag",
+            accept_multiple_files=True,
+            type=["pdf", "xlsx", "xls", "docx", "doc"],
+            label_visibility="collapsed",
+            key="drag_drop_uploader",
+        )
+        if dropped_files:
+            current_names = {uf.name for uf in dropped_files}
+            already_saved = st.session_state.get("drag_drop_saved", set())
+            new_files = [uf for uf in dropped_files if uf.name not in already_saved]
+            if new_files:
+                if st.session_state.project_path:
+                    target_dir = Path(st.session_state.project_path)
+                else:
+                    import tempfile
+                    target_dir = Path(tempfile.mkdtemp(prefix="vik_project_"))
+                    st.session_state.project_path = str(target_dir)
+                target_dir.mkdir(parents=True, exist_ok=True)
+                for uf in new_files:
+                    (target_dir / uf.name).write_bytes(uf.getbuffer())
+                st.session_state.drag_drop_saved = current_names
+                st.success(f"Записани: {len(new_files)} файла")
+                if not st.session_state.project_loaded:
+                    _load_project_by_path(str(target_dir))
+                else:
+                    file_mgr.set_project_path(st.session_state.project_path)
+                st.rerun()
 
     # --- Loaded project file details ---
     if st.session_state.project_loaded and st.session_state.project_path:
