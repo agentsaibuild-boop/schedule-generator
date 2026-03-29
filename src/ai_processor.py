@@ -783,10 +783,18 @@ class AIProcessor:
                 "cost": 0.0,
             }
 
-        system_prompt = self.build_system_prompt()
+        system_prompt = (
+            "Ти си вграден асистент в приложение за генериране на строителни графици за ВиК проекти.\n"
+            "Отговаряй ДИРЕКТНО и КРАТКО на български.\n"
+            "ВАЖНО: Не генерирай Python/код — нямаш достъп до изпълнение на код.\n"
+            "ВАЖНО: Не искай от потребителя да изпълнява код — ти не можеш да го виждаш.\n"
+            "Ако въпросът е за функционалност на приложението — обясни как работи.\n"
+            "Ако въпросът е за строителен график — отговори по същество.\n"
+            "Ако нещо не работи — опиши конкретно какво е проблемът и как може да се реши (без код).\n"
+        )
         if project_context:
             ctx_str = json.dumps(project_context, ensure_ascii=False, default=str)
-            system_prompt += f"\n\nТекущ проект: {ctx_str}"
+            system_prompt += f"\nТекущ проект: {ctx_str}"
 
         return self.router.chat(messages, system_prompt)
 

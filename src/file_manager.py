@@ -81,23 +81,27 @@ class FileManager:
     # ------------------------------------------------------------------
 
     def _list_supported_files(self) -> list[Path]:
-        """List supported files in project dir (max 1 level of recursion).
+        """List supported files in project dir (full recursive scan).
 
         Excludes files inside the ``converted/`` subfolder.
         """
         if not self.base_path:
             return []
 
-        files: list[Path] = []
         converted_dir = self.base_path / "converted"
+        files: list[Path] = []
 
-        for f in sorted(self.base_path.iterdir()):
-            if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS and not f.name.startswith(("~$", "~_")):
-                files.append(f)
-            elif f.is_dir() and f != converted_dir:
-                for child in sorted(f.iterdir()):
-                    if child.is_file() and child.suffix.lower() in SUPPORTED_EXTENSIONS and not child.name.startswith(("~$", "~_")):
-                        files.append(child)
+        for f in sorted(self.base_path.rglob("*")):
+            if not f.is_file():
+                continue
+            if converted_dir in f.parents:
+                continue
+            if f.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                continue
+            if f.name.startswith(("~$", "~_")):
+                continue
+            files.append(f)
+
         return files
 
     def list_files(self) -> list[dict]:
