@@ -34,7 +34,6 @@ from src.knowledge_manager import KnowledgeManager
 from src.project_manager import ProjectManager
 from src.schedule_builder import ScheduleBuilder
 from src.self_evolution import SelfEvolution
-from src.docs_updater import DocsUpdater
 
 
 def _ensure_schedule_list(data: object) -> list[dict]:
@@ -611,7 +610,7 @@ if not st.session_state.project_loaded:
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("# \U0001f4d0 ВиК График Генератор")
-    st.caption("РАИ Комерс | v0.3 — Dual AI + Projects")
+    st.caption("РАИ Комерс | v0.9.0 — Dual AI + Projects")
 
     st.divider()
 
@@ -780,6 +779,7 @@ with st.sidebar:
                 chosen = result.stdout.strip()
                 if chosen:
                     st.session_state.project_path = chosen
+                    _load_project_by_path(chosen)
                     st.rerun()
                 elif result.returncode != 0:
                     st.warning("Диалогът не можа да се отвори. Въведете пътя ръчно.")
@@ -973,25 +973,6 @@ with st.sidebar:
 
     st.divider()
 
-    # --- Documentation status ---
-    st.subheader("\U0001f4dd Документация")
-    _docs_updater = DocsUpdater(str(APP_DIR))
-    _docs_updates = _docs_updater.check_for_updates()
-
-    if _docs_updates:
-        st.warning(f"\U0001f4dd {len(_docs_updates)} документа трябва да се обновят")
-        if st.button("Обнови документацията", use_container_width=True, key="docs_update_btn"):
-            result = _docs_updater.run_all_updates()
-            if result["total"] > 0:
-                st.success(f"\u2705 Обновени: {result['total']} секции")
-            else:
-                st.info("Няма секции за обновяване.")
-            st.rerun()
-    else:
-        st.success("\U0001f4dd Документацията е актуална")
-
-    st.divider()
-
     # --- Clear chat ---
     if st.button("\U0001f5d1\ufe0f Изчисти чата", use_container_width=True):
         _save_chat_history()
@@ -1117,23 +1098,6 @@ with chat_col:
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
-
-    # Stop button (visible when processing is active)
-    if st.session_state.get("processing"):
-        if st.button(
-            "\u23f9 \u0421\u043f\u0440\u0438 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u044f\u0442\u0430",
-            type="primary",
-            use_container_width=True,
-            key="stop_btn",
-        ):
-            st.session_state.stop_requested = True
-            st.session_state.processing = False
-            router.stop_requested = True
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": "\u23f9 \u041e\u043f\u0435\u0440\u0430\u0446\u0438\u044f\u0442\u0430 \u0435 \u0441\u043f\u0440\u044f\u043d\u0430 \u043e\u0442 \u043f\u043e\u0442\u0440\u0435\u0431\u0438\u0442\u0435\u043b\u044f.",
-            })
-            st.rerun()
 
     # Chat input (disabled during processing)
     user_input = st.chat_input(
@@ -1317,8 +1281,6 @@ with viz_col:
         st.session_state.current_schedule = schedule
         st.session_state.schedule_data = schedule
     # DEBUG: show schedule count for test diagnostics
-    st.caption(f"DEBUG_SCHED:{len(schedule)}")
-
     # ── Layer toggles (row 1) ─────────────────────────────────────────
     st.caption("**Слоеве:**")
     lc1, lc2, lc3, lc4 = st.columns(4)
