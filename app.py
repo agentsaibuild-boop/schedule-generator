@@ -104,6 +104,25 @@ st.markdown(
         max-height: 200px !important;
         overflow-y: auto !important;
     }
+    /* Wall frame — всички бутони */
+    [data-testid="stButton"] > button,
+    [data-testid="stFormSubmitButton"] > button {
+        border: 2px solid #1B398F !important;
+        border-radius: 6px !important;
+        box-shadow: 3px 3px 0px #1B398F !important;
+        font-weight: 600 !important;
+        transition: box-shadow 0.1s ease, transform 0.1s ease !important;
+    }
+    [data-testid="stButton"] > button:hover,
+    [data-testid="stFormSubmitButton"] > button:hover {
+        box-shadow: 1px 1px 0px #1B398F !important;
+        transform: translate(2px, 2px) !important;
+    }
+    [data-testid="stButton"] > button:active,
+    [data-testid="stFormSubmitButton"] > button:active {
+        box-shadow: none !important;
+        transform: translate(3px, 3px) !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
