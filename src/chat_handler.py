@@ -779,7 +779,7 @@ class ChatHandler:
             self._progress(0.70, msg)
 
         verification = self.ai.router.run_correction_cycle(
-            result["content"], rules, max_cycles=2,
+            result.get("content", ""), rules, max_cycles=2,
             knowledge_prompt=system_prompt,
             progress_callback=_mod_progress,
             project_type=self.current_project_type,
@@ -844,7 +844,7 @@ class ChatHandler:
         # Build response
         response_parts = [
             f"Промяната е приложена.",
-            f"Модел: {result['model']}, Проверка: {verification['status']}",
+            f"Модел: {result.get('model', '?')}, Проверка: {verification.get('status', '?')}",
         ]
         if validation_notes:
             response_parts.append("")
@@ -856,11 +856,11 @@ class ChatHandler:
             "schedule_updated": True,
             "schedule_data": self.current_schedule,
             "correction_info": {
-                "status": verification["status"],
+                "status": verification.get("status", "error"),
                 "cycles": verification.get("cycles", 0),
             },
             "intent": "modify_schedule",
-            "model_used": result["model"],
+            "model_used": result.get("model", "unknown"),
         }
 
     def _handle_export(self, message: str) -> dict:
@@ -1502,8 +1502,17 @@ class ChatHandler:
 
     def _generate_with_sequence(self, state: dict) -> dict:
         """Trigger schedule generation with collected sequence constraints."""
-        analysis = state["analysis"]
-        constraints = state["constraints"]
+        analysis = state.get("analysis")
+        constraints = state.get("constraints", {})
+        if not analysis:
+            return {
+                "response": "Грешка: липсват данни за анализ. Моля, опитайте отново.",
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "generate_schedule",
+                "model_used": "none",
+            }
         project_context = state.get("project_context")
 
         # Build human-readable summary

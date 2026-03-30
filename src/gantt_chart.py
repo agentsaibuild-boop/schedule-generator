@@ -141,10 +141,11 @@ def create_gantt_chart(
     y_labels: list[str] = []
     for task in display:
         is_sub = _is_subtask(task, schedule_data)
+        name = task.get("name", "—")
         if is_sub:
-            y_labels.append(f"  ↳ {task['name']}")
+            y_labels.append(f"  ↳ {name}")
         else:
-            y_labels.append(task["name"])
+            y_labels.append(name)
 
     fig = go.Figure()
 
@@ -187,7 +188,7 @@ def create_gantt_chart(
         #                          start_str, end_str, duration, critical]
         customdata = [[
             task.get("id", ""),
-            task["name"],
+            task.get("name", "—"),
             get_type_label(task_type),
             str(task.get("diameter", "—")),
             str(task.get("length_m", "—")),
@@ -274,10 +275,10 @@ def create_gantt_chart(
                 dt = _day_to_dt(task["start_day"], project_start_date)
                 ms_x.append(dt)
                 ms_y.append(y_labels[idx])
-                ms_text.append(task["name"])
+                ms_text.append(task.get("name", "—"))
                 date_str = day_to_date(task["start_day"], project_start_date)
                 ms_hover.append(
-                    f"<b>{task['name']}</b><br>"
+                    f"<b>{task.get('name', '—')}</b><br>"
                     f"Дата: {date_str}<br>"
                     f"Ден: {task['start_day']}"
                 )
@@ -542,13 +543,13 @@ def create_task_detail_panel(
     start_date: str,
 ) -> str:
     """Generate Markdown with full details for a selected task."""
-    task_lookup = {t["id"]: t for t in schedule_data}
+    task_lookup = {t["id"]: t for t in schedule_data if t.get("id")}
     end_day = task.get(
         "end_day",
         task.get("start_day", 0) + max(task.get("duration", 1), 1) - 1,
     )
 
-    lines: list[str] = [f"### {task['name']}"]
+    lines: list[str] = [f"### {task.get('name', '—')}"]
     lines.append(
         f"**Тип:** {get_type_label(task.get('type', ''))} "
         f"| **Фаза:** {task.get('phase', '—')}"
