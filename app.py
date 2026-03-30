@@ -19,15 +19,7 @@ from src.ai_processor import AIProcessor
 from src.ai_router import AIRouter
 from src.chat_handler import ChatHandler
 from src.file_manager import FileManager
-from src.gantt_chart import (
-    DEFAULT_LAYERS,
-    TYPE_LABELS,
-    create_gantt_chart,
-    create_task_detail_panel,
-    day_to_date,
-    get_schedule_stats,
-    get_type_label,
-)
+from src.gantt_chart import get_schedule_stats
 from src.export_pdf import export_to_pdf
 from src.export_xml import export_to_mspdi_xml
 from src.knowledge_manager import KnowledgeManager
@@ -232,11 +224,6 @@ if "pending_conflicts_analysis" not in st.session_state:
 if "evolution_history" not in st.session_state:
     st.session_state.evolution_history = []
 
-if "gantt_layers" not in st.session_state:
-    st.session_state.gantt_layers = DEFAULT_LAYERS.copy()
-
-if "selected_task_id" not in st.session_state:
-    st.session_state.selected_task_id = None
 
 if "project_start_date" not in st.session_state:
     st.session_state.project_start_date = "2025-04-01"
@@ -984,713 +971,418 @@ with st.sidebar:
         st.rerun()
 
 # ---------------------------------------------------------------------------
-# Main layout: Chat (left) | Visualization (right)
+# Main layout: Chat (full width) + Schedule tabs below
 # ---------------------------------------------------------------------------
-chat_col, viz_col = st.columns([45, 55], gap="medium")
+st.markdown("### \U0001f4ac Чат")
 
-# ---------------------------------------------------------------------------
-# LEFT COLUMN — Chat
-# ---------------------------------------------------------------------------
-with chat_col:
-    st.markdown("### \U0001f4ac Чат")
-
-    # Welcome message (shown once)
-    if not st.session_state.welcome_shown:
-        # Build welcome with AI status
-        ai_note = ""
-        if ai_health.get("deepseek") and ai_health.get("anthropic"):
-            ai_note = "\U0001f7e2 Двата AI модела са готови (DeepSeek + Anthropic)."
-        elif ai_health.get("fallback_active"):
-            src = ai_health.get("fallback_source", "")
-            if src == "deepseek":
-                ai_note = "\u26a0\ufe0f DeepSeek не е достъпен — работя чрез Anthropic."
-            elif src == "anthropic":
-                ai_note = "\u26a0\ufe0f Anthropic не е достъпен — работя чрез DeepSeek."
-            else:
-                ai_note = "\U0001f534 AI моделите не са достъпни. Проверете .env файла."
-
-        # Check for recent projects
-        recent = st.session_state.recent_projects
-        if recent:
-            project_lines = []
-            for i, proj in enumerate(recent, 1):
-                emoji = project_mgr.get_status_emoji(proj.get("status", "new"))
-                name = proj.get("name", "?")
-                label = proj.get("status_label", "")
-                time_ago = proj.get("time_ago", "")
-
-                # Build detail
-                schedule_info = ""
-                progress = proj.get("progress", {})
-                last_sched = _ensure_schedule_list(progress.get("last_schedule"))
-                if last_sched:
-                    total_days = max(
-                        (
-                            t.get("end_day", t.get("start_day", 0) + t.get("duration", 0))
-                            for t in last_sched
-                        ),
-                        default=0,
-                    )
-                    version = progress.get("schedule_version", "")
-                    if version:
-                        schedule_info = f" ({version}, {total_days}д)"
-                    elif total_days > 0:
-                        schedule_info = f" ({total_days}д)"
-
-                exists_mark = "" if proj.get("exists", True) else " \u274c"
-                project_lines.append(
-                    f"{i}. {emoji} **{name}**{schedule_info} — {label} — {time_ago}{exists_mark}"
-                )
-
-            projects_text = "\n".join(project_lines)
-
-            welcome = (
-                f"Здравейте! Аз съм вашият асистент за строителни графици.\n\n"
-                f"{ai_note}\n\n"
-                f"**Скорошни проекти:**\n"
-                f"{projects_text}\n\n"
-                f"Изберете проект с номер (напр. **1**) или заредете нов с 'Зареди D:\\Projects\\...'\n\n"
-                "Мога да генерирам графици, да анализирам документи и да експортирам в PDF/XML."
-            )
+# Welcome message (shown once)
+if not st.session_state.welcome_shown:
+    # Build welcome with AI status
+    ai_note = ""
+    if ai_health.get("deepseek") and ai_health.get("anthropic"):
+        ai_note = "\U0001f7e2 Двата AI модела са готови (DeepSeek + Anthropic)."
+    elif ai_health.get("fallback_active"):
+        src = ai_health.get("fallback_source", "")
+        if src == "deepseek":
+            ai_note = "\u26a0\ufe0f DeepSeek не е достъпен — работя чрез Anthropic."
+        elif src == "anthropic":
+            ai_note = "\u26a0\ufe0f Anthropic не е достъпен — работя чрез DeepSeek."
         else:
-            welcome = (
-                f"Здравейте! Аз съм вашият асистент за строителни графици.\n\n"
-                f"{ai_note}\n\n"
-                "За да започнете, заредете проект:\n"
-                "Напишете: `Зареди D:\\Projects\\ИмеНаПроект`\n\n"
-                "Мога да:\n"
-                "- Анализирам тендерна документация (PDF, Excel, Word)\n"
-                "- Генерирам строителен график (Gantt)\n"
-                "- Проверявам спазването на правилата\n"
-                "- Експортирам в PDF (A3) и MS Project (XML)\n\n"
-                "Всички файлове остават на вашия компютър."
+            ai_note = "\U0001f534 AI моделите не са достъпни. Проверете .env файла."
+
+    # Check for recent projects
+    recent = st.session_state.recent_projects
+    if recent:
+        project_lines = []
+        for i, proj in enumerate(recent, 1):
+            emoji = project_mgr.get_status_emoji(proj.get("status", "new"))
+            name = proj.get("name", "?")
+            label = proj.get("status_label", "")
+            time_ago = proj.get("time_ago", "")
+
+            # Build detail
+            schedule_info = ""
+            progress = proj.get("progress", {})
+            last_sched = _ensure_schedule_list(progress.get("last_schedule"))
+            if last_sched:
+                total_days = max(
+                    (
+                        t.get("end_day", t.get("start_day", 0) + t.get("duration", 0))
+                        for t in last_sched
+                    ),
+                    default=0,
+                )
+                version = progress.get("schedule_version", "")
+                if version:
+                    schedule_info = f" ({version}, {total_days}д)"
+                elif total_days > 0:
+                    schedule_info = f" ({total_days}д)"
+
+            exists_mark = "" if proj.get("exists", True) else " \u274c"
+            project_lines.append(
+                f"{i}. {emoji} **{name}**{schedule_info} — {label} — {time_ago}{exists_mark}"
             )
 
-        st.session_state.messages.append(
-            {"role": "assistant", "content": welcome}
+        projects_text = "\n".join(project_lines)
+
+        welcome = (
+            f"Здравейте! Аз съм вашият асистент за строителни графици.\n\n"
+            f"{ai_note}\n\n"
+            f"**Скорошни проекти:**\n"
+            f"{projects_text}\n\n"
+            f"Изберете проект с номер (напр. **1**) или заредете нов с 'Зареди D:\\Projects\\...'\n\n"
+            "Мога да генерирам графици, да анализирам документи и да експортирам в PDF/XML."
         )
-        st.session_state.welcome_shown = True
+    else:
+        welcome = (
+            f"Здравейте! Аз съм вашият асистент за строителни графици.\n\n"
+            f"{ai_note}\n\n"
+            "За да започнете, заредете проект:\n"
+            "Напишете: `Зареди D:\\Projects\\ИмеНаПроект`\n\n"
+            "Мога да:\n"
+            "- Анализирам тендерна документация (PDF, Excel, Word)\n"
+            "- Генерирам строителен график (Gantt)\n"
+            "- Проверявам спазването на правилата\n"
+            "- Експортирам в PDF (A3) и MS Project (XML)\n\n"
+            "Всички файлове остават на вашия компютър."
+        )
 
-    # Display chat history
-    chat_container = st.container(height=520)
-    with chat_container:
-        # Show restored history from previous session in an expander
-        restored = st.session_state.get("restored_history", [])
-        if restored:
-            n_pairs = len(restored) // 2
-            last_topic = ""
-            for _m in reversed(restored):
-                if _m.get("role") == "user":
-                    last_topic = _m["content"][:60].replace("\n", " ")
-                    break
-            summary = f"Заредена история от последната сесия ({n_pairs} размени)"
-            if last_topic:
-                summary += f". Последна тема: _{last_topic}..._"
-            st.info(summary)
+    st.session_state.messages.append(
+        {"role": "assistant", "content": welcome}
+    )
+    st.session_state.welcome_shown = True
 
-            with st.expander("Покажи предишна история", expanded=False):
-                for msg in restored:
-                    with st.chat_message(msg["role"]):
-                        st.markdown(msg["content"])
-            st.divider()
+# Display chat history
+chat_container = st.container(height=520)
+with chat_container:
+    # Show restored history from previous session in an expander
+    restored = st.session_state.get("restored_history", [])
+    if restored:
+        n_pairs = len(restored) // 2
+        last_topic = ""
+        for _m in reversed(restored):
+            if _m.get("role") == "user":
+                last_topic = _m["content"][:60].replace("\n", " ")
+                break
+        summary = f"Заредена история от последната сесия ({n_pairs} размени)"
+        if last_topic:
+            summary += f". Последна тема: _{last_topic}..._"
+        st.info(summary)
 
-        # Current session messages
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+        with st.expander("Покажи предишна история", expanded=False):
+            for msg in restored:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+        st.divider()
 
-    # Chat input (disabled during processing)
-    user_input = st.chat_input(
-        "\u041d\u0430\u043f\u0438\u0448\u0435\u0442\u0435 \u0441\u044a\u043e\u0431\u0449\u0435\u043d\u0438\u0435..."
-        if not st.session_state.get("processing")
-        else "\u0418\u0437\u0447\u0430\u043a\u0432\u0430\u0439\u0442\u0435...",
-        disabled=st.session_state.get("processing", False),
+    # Current session messages
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+# Chat input (disabled during processing)
+user_input = st.chat_input(
+    "\u041d\u0430\u043f\u0438\u0448\u0435\u0442\u0435 \u0441\u044a\u043e\u0431\u0449\u0435\u043d\u0438\u0435..."
+    if not st.session_state.get("processing")
+    else "\u0418\u0437\u0447\u0430\u043a\u0432\u0430\u0439\u0442\u0435...",
+    disabled=st.session_state.get("processing", False),
+)
+
+# Show pending changes indicator
+if st.session_state.pending_changes:
+    pending_lvl = st.session_state.pending_changes.get("level", "?")
+    lvl_emoji = {"green": "\U0001f7e2", "yellow": "\U0001f7e1", "red": "\U0001f534"}.get(pending_lvl, "\u26aa")
+    if pending_lvl == "red":
+        st.info(f"{lvl_emoji} \u041e\u0447\u0430\u043a\u0432\u0430 \u0441\u0435 **\u0430\u0434\u043c\u0438\u043d \u043a\u043e\u0434** \u0437\u0430 \u043f\u0440\u0438\u043b\u0430\u0433\u0430\u043d\u0435 \u043d\u0430 \u043f\u0440\u043e\u043c\u0435\u043d\u0438...")
+    else:
+        st.info(f"{lvl_emoji} \u041e\u0447\u0430\u043a\u0432\u0430 \u0441\u0435 **\u043f\u043e\u0442\u0432\u044a\u0440\u0436\u0434\u0435\u043d\u0438\u0435** \u0437\u0430 \u043f\u0440\u0438\u043b\u0430\u0433\u0430\u043d\u0435 \u043d\u0430 \u043f\u0440\u043e\u043c\u0435\u043d\u0438...")
+
+if user_input:
+    st.session_state.messages.append(
+        {"role": "user", "content": user_input}
     )
 
-    # Show pending changes indicator
-    if st.session_state.pending_changes:
-        pending_lvl = st.session_state.pending_changes.get("level", "?")
-        lvl_emoji = {"green": "\U0001f7e2", "yellow": "\U0001f7e1", "red": "\U0001f534"}.get(pending_lvl, "\u26aa")
-        if pending_lvl == "red":
-            st.info(f"{lvl_emoji} \u041e\u0447\u0430\u043a\u0432\u0430 \u0441\u0435 **\u0430\u0434\u043c\u0438\u043d \u043a\u043e\u0434** \u0437\u0430 \u043f\u0440\u0438\u043b\u0430\u0433\u0430\u043d\u0435 \u043d\u0430 \u043f\u0440\u043e\u043c\u0435\u043d\u0438...")
-        else:
-            st.info(f"{lvl_emoji} \u041e\u0447\u0430\u043a\u0432\u0430 \u0441\u0435 **\u043f\u043e\u0442\u0432\u044a\u0440\u0436\u0434\u0435\u043d\u0438\u0435** \u0437\u0430 \u043f\u0440\u0438\u043b\u0430\u0433\u0430\u043d\u0435 \u043d\u0430 \u043f\u0440\u043e\u043c\u0435\u043d\u0438...")
+    # Sync schedule state: if session has schedule but chat_handler lost it
+    if st.session_state.get("current_schedule") and not chat_handler.current_schedule:
+        chat_handler.current_schedule = st.session_state.current_schedule
 
-    if user_input:
-        st.session_state.messages.append(
-            {"role": "user", "content": user_input}
+    # Build project context
+    project_context = None
+    if st.session_state.project_loaded:
+        project_context = {
+            "path": st.session_state.project_path,
+            "info": st.session_state.project_info,
+            "conversion_done": st.session_state.conversion_done,
+        }
+
+    # Set processing flag and reset stop
+    st.session_state.processing = True
+    st.session_state.stop_requested = False
+    router.stop_requested = False
+
+    # Process through ChatHandler with live progress bar
+    _prog_bar = st.progress(0, text="Обработвам...")
+    _prog_text = st.empty()
+
+    def _on_progress(pct: float, text: str) -> None:
+        try:
+            _prog_bar.progress(min(int(pct * 100), 100), text=text)
+        except Exception:
+            pass  # Don't let progress bar errors break the flow
+
+    try:
+        result = chat_handler.process_message(
+            user_input,
+            project_loaded=st.session_state.project_loaded,
+            conversion_done=st.session_state.conversion_done,
+            project_context=project_context,
+            pending_changes=st.session_state.pending_changes,
+            recent_projects=st.session_state.recent_projects,
+            progress_callback=_on_progress,
+            pending_sequence=st.session_state.pending_sequence,
+            pending_conflicts=st.session_state.pending_conflicts,
+            pending_conflicts_analysis=st.session_state.pending_conflicts_analysis,
         )
+    except Exception as exc:
+        result = {
+            "response": f"Възникна грешка: {exc}",
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "error",
+            "model_used": "none",
+        }
+    finally:
+        _prog_bar.empty()
+        _prog_text.empty()
+        # Always clear processing flag to prevent stuck state
+        st.session_state.processing = False
 
-        # Sync schedule state: if session has schedule but chat_handler lost it
-        if st.session_state.get("current_schedule") and not chat_handler.current_schedule:
-            chat_handler.current_schedule = st.session_state.current_schedule
-
-        # Build project context
-        project_context = None
-        if st.session_state.project_loaded:
-            project_context = {
-                "path": st.session_state.project_path,
-                "info": st.session_state.project_info,
-                "conversion_done": st.session_state.conversion_done,
-            }
-
-        # Set processing flag and reset stop
-        st.session_state.processing = True
+    # Check if stopped mid-operation
+    if st.session_state.get("stop_requested"):
         st.session_state.stop_requested = False
         router.stop_requested = False
-
-        # Process through ChatHandler with live progress bar
-        _prog_bar = st.progress(0, text="Обработвам...")
-        _prog_text = st.empty()
-
-        def _on_progress(pct: float, text: str) -> None:
-            try:
-                _prog_bar.progress(min(int(pct * 100), 100), text=text)
-            except Exception:
-                pass  # Don't let progress bar errors break the flow
-
-        try:
-            result = chat_handler.process_message(
-                user_input,
-                project_loaded=st.session_state.project_loaded,
-                conversion_done=st.session_state.conversion_done,
-                project_context=project_context,
-                pending_changes=st.session_state.pending_changes,
-                recent_projects=st.session_state.recent_projects,
-                progress_callback=_on_progress,
-                pending_sequence=st.session_state.pending_sequence,
-                pending_conflicts=st.session_state.pending_conflicts,
-                pending_conflicts_analysis=st.session_state.pending_conflicts_analysis,
-            )
-        except Exception as exc:
-            result = {
-                "response": f"Възникна грешка: {exc}",
-                "schedule_updated": False,
-                "schedule_data": None,
-                "correction_info": None,
-                "intent": "error",
-                "model_used": "none",
-            }
-        finally:
-            _prog_bar.empty()
-            _prog_text.empty()
-            # Always clear processing flag to prevent stuck state
-            st.session_state.processing = False
-
-        # Check if stopped mid-operation
-        if st.session_state.get("stop_requested"):
-            st.session_state.stop_requested = False
-            router.stop_requested = False
-            if result.get("response"):
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": result["response"] + "\n\n\u23f9 _\u041e\u043f\u0435\u0440\u0430\u0446\u0438\u044f\u0442\u0430 \u0435 \u0441\u043f\u0440\u044f\u043d\u0430._",
-                })
-            st.rerun()
-
-        # Handle close project from chat
-        if result.get("close_project"):
-            _save_chat_history()
-            st.session_state.project_loaded = False
-            st.session_state.current_project = None
-            st.session_state.project_path = ""
-            st.session_state.project_info = {}
-            st.session_state.conversion_done = False
-            st.session_state.restored_history = []
-            st.session_state.welcome_shown = False
-            st.session_state.recent_projects = project_mgr.get_recent_projects(5)
-            chat_handler.clear_history()
-            project_mgr.clear_last_active()
-
-        # Handle project loading from chat
-        if result.get("load_project_path"):
-            _load_project_by_path(result["load_project_path"])
-            st.rerun()
-
-        if result.get("load_project_id"):
-            _load_project_by_id(result["load_project_id"])
-            st.rerun()
-
-        # Track which model was used
-        st.session_state.current_model = result.get("model_used")
-
-        # Handle evolution pending changes
-        if result.get("evolution_pending"):
-            st.session_state.pending_changes = result["evolution_pending"]
-        if result.get("evolution_cleared") or result.get("evolution_applied"):
-            st.session_state.pending_changes = None
-
-        # Handle sequence questionnaire state
-        if result.get("pending_sequence"):
-            st.session_state.pending_sequence = result["pending_sequence"]
-        else:
-            st.session_state.pending_sequence = None
-
-        # Handle conflict resolution state
-        if result.get("pending_conflicts"):
-            st.session_state.pending_conflicts = result["pending_conflicts"]
-            st.session_state.pending_conflicts_analysis = result.get("pending_analysis")
-        else:
-            st.session_state.pending_conflicts = None
-            st.session_state.pending_conflicts_analysis = None
-
-        # Build response with fallback notice
-        response_text = result["response"]
-
-        # Check for fallback notice
-        if router.fallback_active and result.get("model_used") not in ("none", None):
-            src = router.fallback_source
-            if src == "deepseek" and result.get("model_used") == "claude-sonnet-4-6":
-                response_text = (
-                    "\u26a0\ufe0f _DeepSeek не отговаря. Превключвам към Anthropic._\n\n"
-                    + response_text
-                )
-            elif src == "anthropic" and result.get("model_used") == "deepseek-chat":
-                response_text = (
-                    "\u26a0\ufe0f _Anthropic не отговаря. Превключвам към DeepSeek._\n\n"
-                    + response_text
-                )
-
-        st.session_state.messages.append(
-            {"role": "assistant", "content": response_text}
-        )
-
-        # Update schedule if changed
-        if result.get("schedule_updated") and result.get("schedule_data"):
-            st.session_state.schedule_data = result["schedule_data"]
-            st.session_state.current_schedule = result["schedule_data"]
-
-        # Update usage stats
-        st.session_state.usage_stats = router.get_usage_stats()
-
-        # Persist chat history
-        _save_chat_history()
-
+        if result.get("response"):
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": result["response"] + "\n\n\u23f9 _\u041e\u043f\u0435\u0440\u0430\u0446\u0438\u044f\u0442\u0430 \u0435 \u0441\u043f\u0440\u044f\u043d\u0430._",
+            })
         st.rerun()
 
-# ---------------------------------------------------------------------------
-# RIGHT COLUMN — Visualization
-# ---------------------------------------------------------------------------
-with viz_col:
-    st.markdown("### \U0001f4ca Визуализация")
-    schedule = _ensure_schedule_list(
-        st.session_state.get("current_schedule")
-    )
-    # Persist the parsed version back so we don't re-parse on every rerun
-    if schedule != st.session_state.get("current_schedule"):
-        st.session_state.current_schedule = schedule
-        st.session_state.schedule_data = schedule
-    # DEBUG: show schedule count for test diagnostics
-    # ── Layer toggles (row 1) ─────────────────────────────────────────
-    st.caption("**Слоеве:**")
-    lc1, lc2, lc3, lc4 = st.columns(4)
-    with lc1:
-        ly_crit = st.checkbox(
-            "Критичен път",
-            value=st.session_state.gantt_layers.get("critical_path", True),
-            key="ly_crit",
-        )
-    with lc2:
-        ly_deps = st.checkbox(
-            "Зависимости",
-            value=st.session_state.gantt_layers.get("dependencies", False),
-            key="ly_deps",
-        )
-    with lc3:
-        ly_teams = st.checkbox(
-            "Екипи",
-            value=st.session_state.gantt_layers.get("team_labels", True),
-            key="ly_teams",
-        )
-    with lc4:
-        ly_dur = st.checkbox(
-            "Дни",
-            value=st.session_state.gantt_layers.get("duration_labels", False),
-            key="ly_dur",
-        )
+    # Handle close project from chat
+    if result.get("close_project"):
+        _save_chat_history()
+        st.session_state.project_loaded = False
+        st.session_state.current_project = None
+        st.session_state.project_path = ""
+        st.session_state.project_info = {}
+        st.session_state.conversion_done = False
+        st.session_state.restored_history = []
+        st.session_state.welcome_shown = False
+        st.session_state.recent_projects = project_mgr.get_recent_projects(5)
+        chat_handler.clear_history()
+        project_mgr.clear_last_active()
 
-    # ── Layer toggles (row 2) ─────────────────────────────────────────
-    lc5, lc6, lc7, lc8 = st.columns(4)
-    with lc5:
-        ly_phase = st.checkbox(
-            "Фазови линии",
-            value=st.session_state.gantt_layers.get("phase_separators", True),
-            key="ly_phase",
-        )
-    with lc6:
-        ly_today = st.checkbox(
-            "Днес",
-            value=st.session_state.gantt_layers.get("today_line", True),
-            key="ly_today",
-        )
-    with lc7:
-        ly_ms = st.checkbox(
-            "Етапи",
-            value=st.session_state.gantt_layers.get("milestones", True),
-            key="ly_ms",
-        )
-    with lc8:
-        ly_sub = st.checkbox(
-            "Поддейности",
-            value=st.session_state.gantt_layers.get("subtasks", False),
-            key="ly_sub",
-        )
+    # Handle project loading from chat
+    if result.get("load_project_path"):
+        _load_project_by_path(result["load_project_path"])
+        st.rerun()
 
-    layers = {
-        "bars": True,
-        "critical_path": ly_crit,
-        "dependencies": ly_deps,
-        "team_labels": ly_teams,
-        "duration_labels": ly_dur,
-        "phase_separators": ly_phase,
-        "today_line": ly_today,
-        "milestones": ly_ms,
-        "subtasks": ly_sub,
-    }
-    st.session_state.gantt_layers = layers
+    if result.get("load_project_id"):
+        _load_project_by_id(result["load_project_id"])
+        st.rerun()
 
-    # ── Filters ───────────────────────────────────────────────────────
-    _phase_labels = {
-        "design": "Проектиране",
-        "construction": "Строителство",
-        "supervision": "Авт. надзор",
-    }
-    all_teams = sorted(
-        {t.get("team", "") for t in schedule
-         if t.get("team") and t.get("team") != "\u2014"}
-    )
-    all_phases = sorted(
-        {t.get("phase", "") for t in schedule if t.get("phase")}
-    )
-    all_types = sorted(
-        {t.get("type", "") for t in schedule if t.get("type")}
-    )
+    # Track which model was used
+    st.session_state.current_model = result.get("model_used")
 
-    fc1, fc2, fc3, fc4 = st.columns(4)
-    with fc1:
-        _view_opts = {"Месеци": "months", "Седмици": "weeks", "Дни": "days"}
-        view_label = st.selectbox(
-            "Изглед", list(_view_opts.keys()), key="view_sel"
-        )
-        view_mode = _view_opts[view_label]
-    with fc2:
-        phase_display = ["Всички"] + [
-            _phase_labels.get(p, p) for p in all_phases
-        ]
-        phase_sel = st.selectbox("Фаза", phase_display, key="phase_sel")
-        filter_phase = None
-        if phase_sel != "Всички":
-            filter_phase = next(
-                (k for k, v in _phase_labels.items() if v == phase_sel),
-                phase_sel,
-            )
-    with fc3:
-        type_display = ["Всички"] + [
-            get_type_label(t) for t in all_types
-        ]
-        type_sel = st.selectbox("Тип", type_display, key="type_sel")
-        filter_type = None
-        if type_sel != "Всички":
-            filter_type = next(
-                (k for k, v in TYPE_LABELS.items() if v == type_sel),
-                type_sel,
-            )
-    with fc4:
-        team_display = ["Всички"] + all_teams
-        team_sel = st.selectbox("Екип", team_display, key="team_sel")
-        filter_team = team_sel if team_sel != "Всички" else None
+    # Handle evolution pending changes
+    if result.get("evolution_pending"):
+        st.session_state.pending_changes = result["evolution_pending"]
+    if result.get("evolution_cleared") or result.get("evolution_applied"):
+        st.session_state.pending_changes = None
 
-    # ── Gantt chart ───────────────────────────────────────────────────
-    if schedule:
-        start_date = st.session_state.get("project_start_date", "2025-04-01")
-
-        # Auto-disable dependencies for large schedules
-        effective_layers = layers.copy()
-        if len(schedule) > 100:
-            effective_layers["dependencies"] = False
-
-        fig = create_gantt_chart(
-            schedule,
-            layers=effective_layers,
-            view_mode=view_mode,
-            selected_task_id=st.session_state.get("selected_task_id"),
-            filter_team=filter_team,
-            filter_phase=filter_phase,
-            filter_type=filter_type,
-            project_start_date=start_date,
-        )
-
-        # Render chart (with click event handling)
-        try:
-            event = st.plotly_chart(
-                fig,
-                use_container_width=True,
-                key="gantt_main",
-                on_select="rerun",
-                selection_mode="points",
-            )
-            if (
-                event
-                and hasattr(event, "selection")
-                and event.selection
-                and hasattr(event.selection, "points")
-                and event.selection.points
-            ):
-                p = event.selection.points[0]
-                cdata = (
-                    p.get("customdata")
-                    if isinstance(p, dict)
-                    else getattr(p, "customdata", None)
-                )
-                if cdata and len(cdata) > 0 and cdata[0]:
-                    st.session_state.selected_task_id = cdata[0]
-        except TypeError:
-            # Fallback for older Streamlit without on_select
-            st.plotly_chart(fig, use_container_width=True, key="gantt_main")
-
-        # ── Tabs ──────────────────────────────────────────────────────
-        tab_table, tab_stats, tab_export, tab_details = st.tabs(
-            ["\U0001f4cb Таблица", "\U0001f4ca Статистика", "\U0001f4be Експорт", "\U0001f50d Детайли"]
-        )
-
-        with tab_table:
-            # Apply same filters as Gantt
-            filtered = schedule
-            if filter_team:
-                filtered = [
-                    t for t in filtered if t.get("team") == filter_team
-                ]
-            if filter_phase:
-                filtered = [
-                    t for t in filtered if t.get("phase") == filter_phase
-                ]
-            if filter_type:
-                filtered = [
-                    t for t in filtered if t.get("type") == filter_type
-                ]
-
-            if filtered:
-                tbl_builder = ScheduleBuilder()
-                df = tbl_builder.to_dataframe(filtered, start_date)
-
-                def _highlight_critical(row):
-                    if row["Критичен"] == "\U0001f534":
-                        return ["background-color: #FFF0F0"] * len(row)
-                    return [""] * len(row)
-
-                st.dataframe(
-                    df.style.apply(_highlight_critical, axis=1),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=min(400, len(df) * 35 + 40),
-                )
-            else:
-                st.info("Няма данни за показване с текущите филтри.")
-
-        with tab_stats:
-            stats = get_schedule_stats(schedule)
-            mc1, mc2, mc3, mc4 = st.columns(4)
-            with mc1:
-                st.metric("Дейности", stats["total_tasks"])
-            with mc2:
-                st.metric("Критични", stats["critical_count"])
-            with mc3:
-                st.metric("Общо дни", stats["total_days"])
-            with mc4:
-                st.metric("Екипи", len(stats["teams"]))
-
-            if stats["teams"]:
-                st.caption(f"Екипи: {', '.join(stats['teams'])}")
-
-            if stats["type_breakdown"]:
-                st.markdown("**Разбивка по тип:**")
-                for type_code, bd in stats["type_breakdown"].items():
-                    label = get_type_label(type_code)
-                    st.caption(
-                        f"\u2022 {label}: {bd['count']} дейности ({bd['days']}д)"
-                    )
-
-        with tab_export:
-            st.markdown("#### Експорт на графика")
-            if schedule:
-                project_name = st.session_state.get("project_name", "ВиК Проект")
-                export_start_date = st.session_state.get("project_start_date", "2026-06-01")
-
-                st.caption("**Налични формати:**")
-                exp_c1, exp_c2, exp_c3 = st.columns(3)
-
-                with exp_c1:
-                    st.markdown("**\U0001f4c4 PDF (A3 Gantt)**")
-                    st.caption("За печат и представяне")
-                    show_critical = st.checkbox(
-                        "Критичен път в PDF",
-                        value=True,
-                        key="pdf_critical",
-                    )
-                    if st.button(
-                        "Генерирай PDF",
-                        type="primary",
-                        key="btn_pdf",
-                        use_container_width=True,
-                    ):
-                        with st.spinner("Генерирам PDF..."):
-                            try:
-                                pdf_bytes = export_to_pdf(
-                                    schedule,
-                                    project_name,
-                                    start_date=export_start_date,
-                                    show_critical_path=show_critical,
-                                )
-                                if pdf_bytes:
-                                    st.session_state["pdf_ready"] = pdf_bytes
-                                else:
-                                    st.error("PDF генерирането не успя.")
-                            except Exception as e:
-                                st.error(f"Грешка при PDF: {e}")
-
-                    if st.session_state.get("pdf_ready"):
-                        st.download_button(
-                            label="\u2b07\ufe0f Свали PDF",
-                            data=st.session_state["pdf_ready"],
-                            file_name=f"\u0433\u0440\u0430\u0444\u0438\u043a_{project_name}.pdf",
-                            mime="application/pdf",
-                            use_container_width=True,
-                        )
-                        pdf_size = len(st.session_state["pdf_ready"])
-                        st.caption(f"\u2705 {pdf_size:,} bytes")
-
-                with exp_c2:
-                    st.markdown("**\U0001f4cb XML (MS Project)**")
-                    st.caption("За отваряне в MS Project")
-                    st.info(
-                        "MS Project \u2192 File \u2192 Open \u2192 XML Format",
-                        icon="\U0001f4a1",
-                    )
-                    if st.button(
-                        "Генерирай XML",
-                        type="primary",
-                        key="btn_xml",
-                        use_container_width=True,
-                    ):
-                        with st.spinner("Генерирам XML..."):
-                            try:
-                                xml_bytes = export_to_mspdi_xml(
-                                    schedule,
-                                    project_name,
-                                    start_date=export_start_date,
-                                )
-                                if xml_bytes:
-                                    st.session_state["xml_ready"] = xml_bytes
-                                else:
-                                    st.error("XML генерирането не успя.")
-                            except Exception as e:
-                                st.error(f"Грешка при XML: {e}")
-
-                    if st.session_state.get("xml_ready"):
-                        st.download_button(
-                            label="\u2b07\ufe0f Свали XML",
-                            data=st.session_state["xml_ready"],
-                            file_name=f"\u0433\u0440\u0430\u0444\u0438\u043a_{project_name}.xml",
-                            mime="application/xml",
-                            use_container_width=True,
-                        )
-                        xml_size = len(st.session_state["xml_ready"])
-                        st.caption(f"\u2705 {xml_size:,} bytes")
-
-                with exp_c3:
-                    st.markdown("**\U0001f527 JSON (суров)**")
-                    st.caption("За програмна обработка")
-                    from datetime import datetime as _dt_export
-
-                    json_data = json.dumps(
-                        {
-                            "metadata": {
-                                "project_name": project_name,
-                                "start_date": export_start_date,
-                                "total_activities": len(schedule),
-                                "exported": _dt_export.now().isoformat(),
-                            },
-                            "activities": schedule,
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                        default=str,
-                    )
-                    st.download_button(
-                        label="\u2b07\ufe0f Свали JSON",
-                        data=json_data.encode("utf-8"),
-                        file_name=f"\u0433\u0440\u0430\u0444\u0438\u043a_{project_name}.json",
-                        mime="application/json",
-                        use_container_width=True,
-                    )
-
-                st.divider()
-                st.caption(
-                    "\U0001f4a1 За .mpp файл: отворете XML в MS Project \u2192 "
-                    "File \u2192 Save As \u2192 .mpp"
-                )
-            else:
-                st.info(
-                    "\U0001f4ca Генерирайте график първо, за да можете да го експортирате."
-                )
-
-        with tab_details:
-            sel_id = st.session_state.get("selected_task_id")
-            if sel_id:
-                task_map = {t["id"]: t for t in schedule}
-                sel_task = task_map.get(sel_id)
-                if sel_task:
-                    detail_md = create_task_detail_panel(
-                        sel_task, schedule, start_date
-                    )
-                    st.markdown(detail_md)
-
-                    if st.button("\U0001f4ac Промени в чата", key="edit_in_chat"):
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": (
-                                f"Избрана дейност **{sel_task['id']}: "
-                                f"{sel_task['name']}** за промяна.\n\n"
-                                f"Опишете каква промяна желаете "
-                                f"(напр. 'Промени продължителността на "
-                                f"{sel_task['name']} на 45 дни')."
-                            ),
-                        })
-                        st.rerun()
-                else:
-                    st.info("Избраната дейност не е намерена в графика.")
-            else:
-                st.info(
-                    "Кликнете върху дейност в графика за да видите детайли."
-                )
+    # Handle sequence questionnaire state
+    if result.get("pending_sequence"):
+        st.session_state.pending_sequence = result["pending_sequence"]
     else:
-        st.info(
-            "Няма генериран график. Използвайте чата за да създадете един."
+        st.session_state.pending_sequence = None
+
+    # Handle conflict resolution state
+    if result.get("pending_conflicts"):
+        st.session_state.pending_conflicts = result["pending_conflicts"]
+        st.session_state.pending_conflicts_analysis = result.get("pending_analysis")
+    else:
+        st.session_state.pending_conflicts = None
+        st.session_state.pending_conflicts_analysis = None
+
+    # Build response with fallback notice
+    response_text = result["response"]
+
+    # Check for fallback notice
+    if router.fallback_active and result.get("model_used") not in ("none", None):
+        src = router.fallback_source
+        if src == "deepseek" and result.get("model_used") == "claude-sonnet-4-6":
+            response_text = (
+                "\u26a0\ufe0f _DeepSeek не отговаря. Превключвам към Anthropic._\n\n"
+                + response_text
+            )
+        elif src == "anthropic" and result.get("model_used") == "deepseek-chat":
+            response_text = (
+                "\u26a0\ufe0f _Anthropic не отговаря. Превключвам към DeepSeek._\n\n"
+                + response_text
+            )
+
+    st.session_state.messages.append(
+        {"role": "assistant", "content": response_text}
+    )
+
+    # Update schedule if changed
+    if result.get("schedule_updated") and result.get("schedule_data"):
+        st.session_state.schedule_data = result["schedule_data"]
+        st.session_state.current_schedule = result["schedule_data"]
+
+    # Update usage stats
+    st.session_state.usage_stats = router.get_usage_stats()
+
+    # Persist chat history
+    _save_chat_history()
+
+    st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Schedule tabs (Table / Stats / Export) — shown below chat when schedule exists
+# ---------------------------------------------------------------------------
+schedule = _ensure_schedule_list(st.session_state.get("current_schedule"))
+if schedule != st.session_state.get("current_schedule"):
+    st.session_state.current_schedule = schedule
+    st.session_state.schedule_data = schedule
+
+if schedule:
+    st.divider()
+    tab_table, tab_stats, tab_export = st.tabs(
+        ["📋 Таблица", "📊 Статистика", "💾 Експорт"]
+    )
+
+    with tab_table:
+        tbl_builder = ScheduleBuilder()
+        start_date = st.session_state.get("project_start_date", "2025-04-01")
+        df = tbl_builder.to_dataframe(schedule, start_date)
+
+        def _highlight_critical(row):
+            if row["Критичен"] == "🔴":
+                return ["background-color: #FFF0F0"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(
+            df.style.apply(_highlight_critical, axis=1),
+            use_container_width=True,
+            hide_index=True,
+            height=min(500, len(df) * 35 + 40),
         )
 
-    # ── Status bar ────────────────────────────────────────────────────
-    st.divider()
-    status_cols = st.columns([3, 2, 2])
-    with status_cols[0]:
-        if st.session_state.project_loaded:
-            folder_name = Path(st.session_state.project_path).name
-            st.caption(f"\U0001f4c2 Проект: {folder_name}")
-        else:
-            st.caption("\U0001f4c2 Няма зареден проект")
-    with status_cols[1]:
-        st.caption(f"\U0001f4ca Задачи: {len(schedule) if schedule else 0}")
-    with status_cols[2]:
-        if schedule:
-            total_days = max(
-                (
-                    t.get(
-                        "end_day",
-                        t.get("start_day", 0) + t.get("duration", 0),
-                    )
-                    for t in schedule
-                ),
-                default=0,
+    with tab_stats:
+        stats = get_schedule_stats(schedule)
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        with mc1:
+            st.metric("Дейности", stats["total_tasks"])
+        with mc2:
+            st.metric("Критични", stats["critical_count"])
+        with mc3:
+            st.metric("Общо дни", stats["total_days"])
+        with mc4:
+            st.metric("Екипи", len(stats["teams"]))
+        if stats["teams"]:
+            st.caption(f"Екипи: {', '.join(stats['teams'])}")
+        if stats["type_breakdown"]:
+            st.markdown("**Разбивка по тип:**")
+            for type_code, bd in stats["type_breakdown"].items():
+                st.caption(f"• {type_code}: {bd['count']} дейности ({bd['days']}д)")
+
+    with tab_export:
+        project_name = st.session_state.get("project_name", "ВиК Проект")
+        export_start_date = st.session_state.get("project_start_date", "2026-06-01")
+        st.caption("**Налични формати:**")
+        exp_c1, exp_c2, exp_c3 = st.columns(3)
+
+        with exp_c1:
+            st.markdown("**📄 PDF (A3 Gantt)**")
+            st.caption("За печат и представяне")
+            show_critical = st.checkbox("Критичен път в PDF", value=True, key="pdf_critical")
+            if st.button("Генерирай PDF", type="primary", key="btn_pdf", use_container_width=True):
+                with st.spinner("Генерирам PDF..."):
+                    try:
+                        pdf_bytes = export_to_pdf(
+                            schedule, project_name,
+                            start_date=export_start_date,
+                            show_critical_path=show_critical,
+                        )
+                        if pdf_bytes:
+                            st.session_state["pdf_ready"] = pdf_bytes
+                        else:
+                            st.error("PDF генерирането не успя.")
+                    except Exception as e:
+                        st.error(f"Грешка при PDF: {e}")
+            if st.session_state.get("pdf_ready"):
+                st.download_button(
+                    label="⬇️ Свали PDF",
+                    data=st.session_state["pdf_ready"],
+                    file_name=f"график_{project_name}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+                st.caption(f"✅ {len(st.session_state['pdf_ready']):,} bytes")
+
+        with exp_c2:
+            st.markdown("**📋 XML (MS Project)**")
+            st.caption("За отваряне в MS Project")
+            st.info("MS Project → File → Open → XML Format", icon="💡")
+            if st.button("Генерирай XML", type="primary", key="btn_xml", use_container_width=True):
+                with st.spinner("Генерирам XML..."):
+                    try:
+                        xml_bytes = export_to_mspdi_xml(
+                            schedule, project_name, start_date=export_start_date,
+                        )
+                        if xml_bytes:
+                            st.session_state["xml_ready"] = xml_bytes
+                        else:
+                            st.error("XML генерирането не успя.")
+                    except Exception as e:
+                        st.error(f"Грешка при XML: {e}")
+            if st.session_state.get("xml_ready"):
+                st.download_button(
+                    label="⬇️ Свали XML",
+                    data=st.session_state["xml_ready"],
+                    file_name=f"график_{project_name}.xml",
+                    mime="application/xml",
+                    use_container_width=True,
+                )
+                st.caption(f"✅ {len(st.session_state['xml_ready']):,} bytes")
+
+        with exp_c3:
+            st.markdown("**🔧 JSON (суров)**")
+            st.caption("За програмна обработка")
+            from datetime import datetime as _dt_export
+            json_data = json.dumps(
+                {
+                    "metadata": {
+                        "project_name": project_name,
+                        "start_date": export_start_date,
+                        "total_activities": len(schedule),
+                        "exported": _dt_export.now().isoformat(),
+                    },
+                    "activities": schedule,
+                },
+                ensure_ascii=False, indent=2, default=str,
             )
-            st.caption(f"\U0001f4c5 Общо: {total_days} дни")
-        else:
-            st.caption("\U0001f4c5 Общо: \u2014")
+            st.download_button(
+                label="⬇️ Свали JSON",
+                data=json_data.encode("utf-8"),
+                file_name=f"график_{project_name}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+        st.divider()
+        st.caption(
+            "💡 За .mpp файл: отворете XML в MS Project → File → Save As → .mpp"
+        )
