@@ -221,7 +221,7 @@ def _build_tasks(
     ET.SubElement(root_task, "OutlineLevel").text = "0"
     ET.SubElement(root_task, "Duration").text = "PT0H0M0S"
     ET.SubElement(root_task, "DurationFormat").text = "5"
-    ET.SubElement(root_task, "Manual").text = "1"
+    ET.SubElement(root_task, "Manual").text = "0"
     ET.SubElement(root_task, "Summary").text = "1"
     ET.SubElement(root_task, "CalendarUID").text = "1"
 
@@ -272,16 +272,14 @@ def _build_tasks(
 
         # Duration: days × 8 hours → PT{hours}H0M0S
         hours = max(duration, 1) * 8
-        duration_str = f"PT{hours}H0M0S"
-        ET.SubElement(task_elem, "Duration").text = duration_str
-        ET.SubElement(task_elem, "DurationFormat").text = "5"  # CRITICAL: days
+        ET.SubElement(task_elem, "Duration").text = f"PT{hours}H0M0S"
+        ET.SubElement(task_elem, "DurationFormat").text = "5"  # days
 
-        # Manual scheduling (CRITICAL: prevents MS Project recalculation)
-        ET.SubElement(task_elem, "Manual").text = "1"
-        # Required for Manual=1 — without these MS Project shows "0 hrs?" and no bars
-        ET.SubElement(task_elem, "ManualStart").text = start_str
-        ET.SubElement(task_elem, "ManualFinish").text = finish_str
-        ET.SubElement(task_elem, "ManualDuration").text = duration_str
+        # Auto-scheduled (Manual=0) — no pin icons in Task Mode column
+        # Dates are locked via ConstraintType=2 (Must Start On)
+        ET.SubElement(task_elem, "Manual").text = "0"
+        ET.SubElement(task_elem, "ConstraintType").text = "2"  # Must Start On
+        ET.SubElement(task_elem, "ConstraintDate").text = start_str
 
         # Calendar
         ET.SubElement(task_elem, "CalendarUID").text = "1"

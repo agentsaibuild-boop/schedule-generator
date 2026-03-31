@@ -234,12 +234,12 @@ def test_duration_format_5_on_tasks():
 
 
 def test_manual_scheduling_on_all_tasks():
-    """Every task must have Manual=1."""
+    """Every task must have Manual=0 (auto-scheduled, no pin icons)."""
     schedule = [_minimal_task("t1", "Задача 1")]
     root = _parse_export(schedule)
     for task in _all_tasks(root):
         manual = task.find(f"{{{NS}}}Manual")
-        assert manual is not None and manual.text == "1"
+        assert manual is not None and manual.text == "0"
 
 
 def test_root_task_uid_zero():
