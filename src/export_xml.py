@@ -265,16 +265,23 @@ def _build_tasks(
         task_start = start_dt + timedelta(days=start_day - 1)
         task_finish = start_dt + timedelta(days=end_day - 1)
 
-        ET.SubElement(task_elem, "Start").text = task_start.strftime("%Y-%m-%dT08:00:00")
-        ET.SubElement(task_elem, "Finish").text = task_finish.strftime("%Y-%m-%dT17:00:00")
+        start_str = task_start.strftime("%Y-%m-%dT08:00:00")
+        finish_str = task_finish.strftime("%Y-%m-%dT17:00:00")
+        ET.SubElement(task_elem, "Start").text = start_str
+        ET.SubElement(task_elem, "Finish").text = finish_str
 
         # Duration: days × 8 hours → PT{hours}H0M0S
-        hours = max(duration, 0) * 8
-        ET.SubElement(task_elem, "Duration").text = f"PT{hours}H0M0S"
+        hours = max(duration, 1) * 8
+        duration_str = f"PT{hours}H0M0S"
+        ET.SubElement(task_elem, "Duration").text = duration_str
         ET.SubElement(task_elem, "DurationFormat").text = "5"  # CRITICAL: days
 
         # Manual scheduling (CRITICAL: prevents MS Project recalculation)
         ET.SubElement(task_elem, "Manual").text = "1"
+        # Required for Manual=1 — without these MS Project shows "0 hrs?" and no bars
+        ET.SubElement(task_elem, "ManualStart").text = start_str
+        ET.SubElement(task_elem, "ManualFinish").text = finish_str
+        ET.SubElement(task_elem, "ManualDuration").text = duration_str
 
         # Calendar
         ET.SubElement(task_elem, "CalendarUID").text = "1"
