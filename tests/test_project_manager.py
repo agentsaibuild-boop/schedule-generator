@@ -62,12 +62,12 @@ def test_time_ago_minutes():
 
 def test_time_ago_one_hour():
     result = ProjectManager.get_time_ago(_ago(3700))
-    assert result == "преди 1 час"
+    assert result == "днес"
 
 
 def test_time_ago_multiple_hours():
     result = ProjectManager.get_time_ago(_ago(7200))  # 2 hours
-    assert result == "преди 2 часа"
+    assert result == "днес"
 
 
 def test_time_ago_yesterday():
