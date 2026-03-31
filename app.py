@@ -618,9 +618,6 @@ with st.sidebar:
         elif src == "both":
             st.error("И двата AI модела са недостъпни!")
 
-    if st.session_state.current_model:
-        st.caption(f"Текущ модел: {st.session_state.current_model}")
-
     # Re-check button
     if st.button("\U0001f504 Провери отново", use_container_width=True, key="health_check"):
         with st.spinner("Проверка..."):

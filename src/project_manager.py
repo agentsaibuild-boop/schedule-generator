@@ -431,8 +431,7 @@ class ProjectManager:
             minutes = seconds // 60
             return f"преди {minutes} мин."
         if seconds < 86400:
-            hours = seconds // 3600
-            return f"преди {hours} {'час' if hours == 1 else 'часа'}"
+            return "днес"
         if seconds < 172800:
             return "вчера"
         if seconds < 604800:
