@@ -1305,8 +1305,8 @@ class ChatHandler:
             "канализация", "канал", "sewer",
             "отводняване", "канализационна", "фекална", "дъждовна",
         ]
-        # "вк мрежа" / "в/к" означава комбинирана В+К мрежа — задейства и двете
-        _COMBINED_KEYWORDS = ["вк мрежа", "в/к мрежа"]
+        # "вк мрежа" / "в/к мрежа" / "в и к" / "вик" означава комбинирана В+К мрежа — задейства и двете
+        _COMBINED_KEYWORDS = ["вк мрежа", "в/к мрежа", "вик мрежа", "вик инфраструктура", "в и к мрежа", "в и к инфраструктура", "вик", "в&к"]
         has_combined = any(w in combined for w in _COMBINED_KEYWORDS)
         has_water = has_combined or any(w in combined for w in _WATER_KEYWORDS)
         has_sewer = has_combined or any(w in combined for w in _SEWER_KEYWORDS)
