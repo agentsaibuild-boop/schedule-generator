@@ -238,6 +238,38 @@ CITE_UNKNOWN = "unknown_ref"
 CITE_UNCITED = "uncited"
 
 
+def _norm_unit(unit: str) -> str:
+    """Нормализирай мярка за сравнение: 'м2' == 'M2' == 'кв.м'."""
+    u = str(unit or "").strip().lower().replace(" ", "").replace(".", "")
+    return {"кв.м": "м2", "кв.м.": "м2", "куб.м": "м3", "квм": "м2",
+            "кубм": "м3", "m2": "м2", "m3": "м3", "m": "м", "бр": "бр"}.get(u, u)
+
+
+def _cross_check(task: dict, row: QuantityRow) -> str:
+    """Провери дали задачата и цитираният ред са за ЕДНА И СЪЩА позиция.
+
+    Числото вече съвпада; тук се лови случаят, в който то съвпада случайно
+    между различни позиции.  Проверяват се мярка и материал — но само
+    когато и двете страни ги имат (липсваща стойност не обвинява).
+
+    Returns:
+        Празен низ ако всичко пасва; иначе обяснение защо е несъответствие.
+    """
+    from src.duration_calculator import detect_material
+
+    task_unit = _norm_unit(task.get("unit", ""))
+    row_unit = _norm_unit(row.unit)
+    if task_unit and row_unit and task_unit != row_unit:
+        return f"мярката не съвпада: задача '{task_unit}' vs ред '{row_unit}'"
+
+    task_mat = detect_material(task)
+    row_mat = detect_material({"name": row.description})
+    if task_mat and row_mat and task_mat != row_mat:
+        return f"материалът не съвпада: задача '{task_mat}' vs ред '{row_mat}'"
+
+    return ""
+
+
 def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
     """Провери цитатите, които моделът е дал за количествата.
 
@@ -287,11 +319,21 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
             if actual is None:
                 check = CitationCheck(CITE_MISMATCH, ref, quantity, None,
                                       "редът няма количество")
-            elif abs(actual - quantity) / max(abs(actual), 1e-9) <= _QUANTITY_TOLERANCE:
-                check = CitationCheck(CITE_VERIFIED, ref, quantity, actual)
-            else:
+            elif abs(actual - quantity) / max(abs(actual), 1e-9) > _QUANTITY_TOLERANCE:
                 check = CitationCheck(CITE_MISMATCH, ref, quantity, actual,
                                       "числото не съвпада с цитирания ред")
+            else:
+                # Одит 2026-07-24: числото съвпадаше → verified, БЕЗ да се
+                # проверява мярка/материал.  Възпроизведено: „Асфалт 420 м2"
+                # цитира „PE DN110, 420 м" и получаваше verified само защото
+                # 420=420.  Това е ФАЛШИВО доказателство за произход.  Сега
+                # съвпадащото число, но различна МЯРКА или МАТЕРИАЛ, е mismatch.
+                mismatch_note = _cross_check(task, row)
+                if mismatch_note:
+                    check = CitationCheck(CITE_MISMATCH, ref, quantity, actual,
+                                          mismatch_note)
+                else:
+                    check = CitationCheck(CITE_VERIFIED, ref, quantity, actual)
 
         counts[check.status] += 1
         task["quantity_provenance"] = {
@@ -388,29 +430,58 @@ def _quantity_of(task: dict) -> float | None:
     return _number(task.get("length_m") or task.get("quantity"))
 
 
-def mark_human_overrides(before: list[dict], after: list[dict]) -> int:
-    """Бележи количествата, ПРОМЕНЕНИ при ръчна модификация през чата.
+def requested_task_ids(message: str, known_ids: set[str]) -> set[str]:
+    """Кои от СЪЩЕСТВУВАЩИТЕ task ID-та човекът е споменал в съобщението.
+
+    Търсят се известните ID-та като цели думи в текста — така се хващат и
+    „T5", и „В01", и голо „A", без да се разчита на строг шаблон, и без
+    случаен низ да мине за задача.
+    """
+    text = f" {(message or '').upper()} "
+    hits: set[str] = set()
+    for tid in known_ids:
+        token = str(tid).upper()
+        if not token:
+            continue
+        # Цяла дума: обградена от неалфанумерични граници.
+        pattern = r"(?<![A-ZА-Я0-9])" + re.escape(token) + r"(?![A-ZА-Я0-9])"
+        if re.search(pattern, text):
+            hits.add(tid)
+    return hits
+
+
+def mark_human_overrides(
+    before: list[dict], after: list[dict], message: str = "",
+) -> int:
+    """Бележи количествата, които ЧОВЕКЪТ изрично е поискал да промени.
 
     BACKLOG т.3 етап 3: когато човек каже „промени количеството на T5 на 450"
-    и промяната мине през gate-а, новата стойност вече не идва нито от AI,
-    нито от документ — идва от ЧОВЕК.  Произходът трябва да го отразява,
-    иначе човешката корекция изглежда като AI число.
+    и промяната мине през gate-а, новата стойност идва от ЧОВЕК, не от AI.
 
-    Записва се само маркер `human_override` — по решение на потребителя не
-    се пази старата стойност (виж AskUserQuestion 2026-07-24).  Идентичността
-    на човека не се пази: всеки с достъп може да редактира.
+    Одит 2026-07-24: досега се маркираше ВСЯКА променена задача.  Но AI връща
+    целия график и може да пипне и задачи, които човекът не е поискал —
+    те получаваха погрешно `human_override`.  Възпроизведено: човек променя
+    A, AI променя и B; и двете ставаха human_override.
+
+    Сега: ако в съобщението има конкретни task ID-та, се маркират САМО те.
+    Промени по други задачи остават `ai_modified` — човекът не отговаря за тях.
+    Ако съобщението няма ID-та (напр. „намали всички с 10%"), се пада към
+    старото поведение — всяка промяна е човешка, защото е поискана общо.
 
     Args:
         before: Графикът ПРЕДИ модификацията.
-        after: Графикът СЛЕД нея (МУТИРА се — маркира се `quantity_provenance`).
+        after: Графикът СЛЕД нея (МУТИРА се).
+        message: Заявката на човека — за да се разбере какво е поискал.
 
     Returns:
-        Брой маркирани задачи.
+        Брой маркирани като human_override.
     """
     before_qty = {
         str(t.get("id")): _quantity_of(t)
         for t in before if isinstance(t, dict) and t.get("id")
     }
+    known_ids = set(before_qty)
+    requested = requested_task_ids(message, known_ids)
 
     marked = 0
     for task in after:
@@ -422,17 +493,28 @@ def mark_human_overrides(before: list[dict], after: list[dict]) -> int:
             continue
 
         old_qty = before_qty.get(tid)
-        # Маркира се само реална промяна на количеството.  Задача, която
-        # човек не е пипал, запазва произхода си (документ / AI).
-        if old_qty is not None and abs((old_qty or 0) - new_qty) > 1e-9:
+        if old_qty is None or abs((old_qty or 0) - new_qty) <= 1e-9:
+            continue  # непроменена задача
+
+        # Ако човекът е посочил конкретни задачи, промяна по ДРУГА задача не е
+        # негова — не е поискана.  Маркира се като AI намеса.
+        if requested and tid not in requested:
             task["quantity_provenance"] = {
-                "status": STATUS_HUMAN,
+                "status": STATUS_AI_REPORTED,
                 "citation": None,
-                "source": "ръчно въведено през чата",
-                "expected": new_qty,
-                "actual": None,
+                "source": None,
+                "note": "AI промени тази задача без изрична заявка от човека",
             }
-            marked += 1
+            continue
+
+        task["quantity_provenance"] = {
+            "status": STATUS_HUMAN,
+            "citation": None,
+            "source": "ръчно въведено през чата",
+            "expected": new_qty,
+            "actual": None,
+        }
+        marked += 1
 
     if marked:
         logger.info("Маркирани %d ръчно променени количества (human_override).", marked)

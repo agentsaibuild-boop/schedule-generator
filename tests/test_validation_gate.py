@@ -200,10 +200,23 @@ def test_blocked_flag_is_always_a_real_bool(validation):
     assert isinstance(_blocked_flag(validation), bool)
 
 
-def test_app_uses_bool_for_disabled():
-    """Регресия: без bool() Streamlit не приема стойността."""
+def test_app_blocks_export_when_unvalidated():
+    """Липсваща валидация за текущия график → блокиран експорт (fail-closed).
+
+    Одит 2026-07-24: зареден стар проект се възстановяваше без повторна
+    валидация и оставаше експортируем.  Сега без валидация за ТАЗИ версия
+    експортът е блокиран."""
     source = (Path(__file__).parent.parent / "app.py").read_text(encoding="utf-8")
-    assert 'bool(_validation.get("checked"))' in source
+    # Всеки клон задава _blocked изрично на bool — Streamlit иска булево.
+    assert "_blocked = True" in source
+    assert "_blocked = not" in source
+
+
+def test_app_binds_validation_to_schedule_hash():
+    """Регресия: export gate сравнява hash-а на текущия график с валидирания."""
+    source = (Path(__file__).parent.parent / "app.py").read_text(encoding="utf-8")
+    assert "schedule_hash" in source
+    assert "_stale" in source
 
 
 def test_app_wires_validation_into_session_state():

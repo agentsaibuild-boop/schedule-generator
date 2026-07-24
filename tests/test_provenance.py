@@ -503,3 +503,96 @@ def test_modification_flow_marks_overrides():
     source = (Path(__file__).parent.parent / "src" / "chat_handler.py").read_text(
         encoding="utf-8")
     assert "mark_human_overrides" in source
+
+
+# ===================================================================
+# Одит 2026-07-24: строгост на съвпадението
+# ===================================================================
+
+from src.provenance import requested_task_ids  # noqa: E402
+
+
+class TestCrossCheck:
+    """Съвпадащо число не стига — мярка и материал също се проверяват.
+
+    Одит: „Асфалт 420 м2" цитираше „PE DN110, 420 м" и получаваше verified,
+    защото 420=420.  Фалшиво доказателство за произход.
+    """
+
+    def test_matching_number_but_wrong_unit_is_mismatch(self, index):
+        # ред 4 е "Доставка и полагане PE 100 RC DN110", м, 420
+        schedule = [{"id": "T1", "name": "Асфалтова настилка", "quantity": 420,
+                     "unit": "м2", "source_ref": "КСС.xlsx!Водопровод!4"}]
+        report = verify_citations(schedule, index)
+        assert report["mismatch"] == 1
+        assert "мярка" in report["problems"][0]["note"]
+
+    def test_matching_number_but_wrong_material_is_mismatch(self, index):
+        # ред 4 е PE; задачата казва чугун
+        schedule = [{"id": "T1", "name": "Полагане чугун DN300", "length_m": 420,
+                     "unit": "м", "source_ref": "КСС.xlsx!Водопровод!4"}]
+        report = verify_citations(schedule, index)
+        assert report["mismatch"] == 1
+        assert "материал" in report["problems"][0]["note"]
+
+    def test_matching_number_and_unit_and_material_is_verified(self, index):
+        schedule = [{"id": "T1", "name": "Полагане PE DN110", "length_m": 420,
+                     "unit": "м", "source_ref": "КСС.xlsx!Водопровод!4"}]
+        report = verify_citations(schedule, index)
+        assert report["verified"] == 1
+
+    def test_missing_unit_does_not_block(self, index):
+        """Липсваща мярка не обвинява — проверява се само когато и двете я имат."""
+        schedule = [{"id": "T1", "name": "Полагане PE DN110", "length_m": 420,
+                     "source_ref": "КСС.xlsx!Водопровод!4"}]
+        report = verify_citations(schedule, index)
+        assert report["verified"] == 1
+
+    def test_unit_synonyms_are_accepted(self, index):
+        """'кв.м' и 'м2' са една и съща мярка."""
+        from src.provenance import _norm_unit
+        assert _norm_unit("кв.м") == _norm_unit("м2")
+        assert _norm_unit("куб.м") == _norm_unit("м3")
+
+
+class TestAttribution:
+    """AI промени на непоискани задачи не се бележат като човешки.
+
+    Одит: човек променя A, AI променя и B; и двете ставаха human_override.
+    """
+
+    def test_only_requested_task_is_human(self):
+        before = [{"id": "A", "length_m": 100}, {"id": "B", "length_m": 200}]
+        after = [{"id": "A", "length_m": 150}, {"id": "B", "length_m": 999}]
+        mark_human_overrides(before, after, "промени количеството на A на 150")
+        assert after[0]["quantity_provenance"]["status"] == STATUS_HUMAN
+        assert after[1]["quantity_provenance"]["status"] == STATUS_AI_REPORTED
+
+    def test_unrequested_change_is_flagged(self):
+        before = [{"id": "A", "length_m": 100}, {"id": "B", "length_m": 200}]
+        after = [{"id": "A", "length_m": 150}, {"id": "B", "length_m": 999}]
+        mark_human_overrides(before, after, "промени A на 150")
+        assert "без изрична заявка" in after[1]["quantity_provenance"]["note"]
+
+    def test_global_message_marks_all_as_human(self):
+        """„намали всички с 10%" — няма конкретна задача, всичко е поискано."""
+        before = [{"id": "A", "length_m": 100}, {"id": "B", "length_m": 200}]
+        after = [{"id": "A", "length_m": 90}, {"id": "B", "length_m": 180}]
+        n = mark_human_overrides(before, after, "намали всички количества с 10%")
+        assert n == 2
+
+    def test_requested_ids_finds_known_tasks(self):
+        assert requested_task_ids("промени T5 на 450", {"T5", "T6"}) == {"T5"}
+
+    def test_requested_ids_ignores_unknown(self):
+        """Случаен низ не бива да мине за задача."""
+        assert requested_task_ids("промени на ул. 5", {"T5"}) == set()
+
+    def test_requested_ids_matches_cyrillic_codes(self):
+        assert requested_task_ids("удължи В01", {"В01", "К02"}) == {"В01"}
+
+
+def test_message_passed_from_chat_handler():
+    source = (Path(__file__).parent.parent / "src" / "chat_handler.py").read_text(
+        encoding="utf-8")
+    assert "mark_human_overrides(before_tasks, modified_tasks, message)" in source

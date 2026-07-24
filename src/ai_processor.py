@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -703,10 +704,26 @@ class AIProcessor:
                 "; ".join(validation.get("errors", [])[:3]),
             )
 
+        # EXPORT GATE (одит 2026-07-24, точки 3 и 4).
+        #
+        # Досега `exportable = validation.valid`.  Но детерминистично валиден
+        # НЕ значи готов за възложител:
+        #   - `needs_human_review` (AI сигнализира липсваща дейност) минаваше
+        #     за експортируем;
+        #   - количества, които кодът НЕ може да докаже (`unresolved`),
+        #     минаваха за експортируеми.
+        # Provenance беше информация, не контрол.
+        #
+        # Тук се решава по политика (EXPORT_POLICY), не автоматично.
+        export = self._export_decision(status, validation, correction_report,
+                                       duration_report)
+
         return {
             "status": status,
             "ai_status": cycle_result["status"],
-            "exportable": bool(validation.get("valid")),
+            "exportable": export["exportable"],
+            "export_blockers": export["blockers"],
+            "export_policy": export["policy"],
             "correction_report": correction_report,
             "schedule": verified_schedule,
             "cycles": cycle_result["cycles"],
@@ -922,6 +939,87 @@ class AIProcessor:
         return reverted
 
     @staticmethod
+    def _export_decision(
+        status: str, validation: dict, correction_report: dict,
+        duration_report: dict,
+    ) -> dict:
+        """Реши дали графикът е готов за ЕКСПОРТ — не само дали е валиден.
+
+        Три политики (env `EXPORT_POLICY`):
+          strict      — експорт само при чист график: валиден, човешки
+                        преглед не е нужен, всички количества доказани.
+          provisional — (по подразбиране) експорт при валиден график, но с
+                        видими предупреждения; PDF/XML носят маркер
+                        „предварителен".
+          lenient     — старото поведение: валиден = експортируем.
+
+        Detерминистично валиден е ПРЕДПОСТАВКА за всички: невалиден график не
+        се експортира при никоя политика.
+        """
+        policy = (os.getenv("EXPORT_POLICY", "provisional") or "provisional").strip().lower()
+        if policy not in {"strict", "provisional", "lenient"}:
+            policy = "provisional"
+
+        blockers: list[str] = []
+
+        # Невалиден → никога.
+        if not validation.get("valid"):
+            return {"exportable": False, "policy": policy,
+                    "blockers": ["графикът не минава детерминистичната проверка"]}
+
+        needs_review = status == "needs_human_review"
+        unresolved = int((duration_report or {}).get("summary", {}).get("unresolved", 0))
+
+        if needs_review:
+            blockers.append("AI сигнализира нужда от човешки преглед "
+                            "(needs_human_review)")
+        if unresolved:
+            blockers.append(f"{unresolved} продължителности не са доказани от нормите")
+
+        if policy == "lenient":
+            exportable = True                      # старото поведение
+        elif policy == "strict":
+            exportable = not blockers              # само чист график
+        else:  # provisional
+            # Експорт се разрешава, но с предупреждения; needs_human_review
+            # все пак блокира — той е изрична човешка нужда, не просто липса
+            # на доказан произход.
+            exportable = not needs_review
+
+        return {"exportable": exportable, "policy": policy, "blockers": blockers}
+
+    @staticmethod
+    def schedule_hash(schedule: Any) -> str:
+        """Стабилен hash на графика — за обвързване на валидацията с версия.
+
+        Хешира само полетата, които влияят на ВАЛИДНОСТТА (id, дати,
+        продължителност, зависимости, пикетаж).  Козметика (име, бележки) не
+        участва — преименуване на задача не отменя проверката.
+        """
+        import hashlib
+
+        tasks = AIProcessor._tasks_from(schedule)
+        signature: list = []
+        for task in sorted(tasks, key=lambda t: str(t.get("id", ""))):
+            deps = sorted(
+                f"{d.get('predecessor_id') or d.get('id')}:"
+                f"{str(d.get('type', 'FS')).upper()}:{d.get('lag_days', 0)}"
+                if isinstance(d, dict) else str(d)
+                for d in (task.get("dependencies") or [])
+            )
+            signature.append((
+                str(task.get("id", "")),
+                task.get("start_day"), task.get("end_day"), task.get("duration"),
+                task.get("length_m"), task.get("quantity"),
+                task.get("dn"), task.get("diameter"), task.get("material"),
+                task.get("alignment_id"),
+                task.get("start_chainage"), task.get("end_chainage"),
+                tuple(deps),
+            ))
+        blob = json.dumps(signature, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
     def _validate_final_schedule(schedule: Any) -> dict:
         """Пусни детерминистичната валидация върху окончателния график.
 
@@ -962,6 +1060,11 @@ class AIProcessor:
         result = ScheduleBuilder().validate_schedule(tasks)
         result["checked"] = True
         result["task_count"] = len(tasks)
+        # Одит 2026-07-24: валидацията се обвързва с КОНКРЕТНИЯ график.
+        # Export gate сравнява този hash с hash-а на графика, който ще се
+        # експортира — при разминаване експортът се блокира, защото
+        # валидацията е за друга версия.
+        result["schedule_hash"] = AIProcessor.schedule_hash(tasks)
 
         if result["errors"]:
             logger.error(

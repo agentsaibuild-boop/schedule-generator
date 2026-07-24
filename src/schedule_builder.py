@@ -329,7 +329,7 @@ class ScheduleBuilder:
                 "shifted": [],
             }
 
-        # --- Запомни оригиналните позиции и празнините по ребрата ---
+        # --- Запомни оригиналните позиции ---
         orig_start: dict[str, int] = {}
         orig_end: dict[str, int] = {}
         for task in updated:
@@ -342,12 +342,32 @@ class ScheduleBuilder:
             else:
                 orig_end[tid] = start + max(self._as_int(task.get("duration"), 0), 1) - 1
 
-        gaps: dict[tuple[str, str], int] = {}
+        # --- Офсет по ребро, ПОДХОДЯЩ ЗА ТИПА на връзката ---
+        #
+        # Одит 2026-07-24: досега пазехме само `succ.start - pred.end - 1` —
+        # това е FS офсет.  Валидаторът, XML експортът и import_xml разбираха
+        # SS/FF/SF, а rescheduler-ът превръщаше всичко във FS: SS връзка се
+        # местеше грешно при промяна на продължителност.
+        #
+        # Сега за всеки тип се пази СВОЯТ офсет, изведен от оригиналните дати,
+        # за да оцелее умишлената празнина (настилки FS+30, урок #36) И да се
+        # спазва семантиката на SS/FF/SF.
+        edges: dict[tuple[str, str], tuple[str, int]] = {}
         for task in updated:
             tid = task.get("id", "")
-            for dep_id in dependency_ids(task):
-                if dep_id in orig_end:
-                    gaps[(dep_id, tid)] = orig_start[tid] - orig_end[dep_id] - 1
+            for link in dependency_links(task):
+                dep_id = link.predecessor_id
+                if dep_id not in orig_end:
+                    continue
+                if link.type == "SS":
+                    offset = orig_start[tid] - orig_start[dep_id]
+                elif link.type == "FF":
+                    offset = orig_end[tid] - orig_end[dep_id]
+                elif link.type == "SF":
+                    offset = orig_end[tid] - orig_start[dep_id]
+                else:  # FS
+                    offset = orig_start[tid] - orig_end[dep_id] - 1
+                edges[(dep_id, tid)] = (link.type, offset)
 
         # --- Топологичен ред (Kahn) ---
         order = self._topological_order(updated, task_by_id)
@@ -364,22 +384,35 @@ class ScheduleBuilder:
 
         for tid in order:
             task = task_by_id[tid]
-            deps = [d for d in dependency_ids(task) if d in new_end]
-
-            if deps:
-                start = max(new_end[d] + 1 + gaps.get((d, tid), 0) for d in deps)
-            else:
-                start = orig_start[tid]
-            start = max(start, 1)
-
             duration = self._as_int(task.get("duration"), 0)
-            end = start if duration <= 0 else start + duration - 1
+            span = max(duration, 1) - 1  # end = start + span
+
+            # Всяка връзка налага най-ранно начало според ТИПА си.
+            candidates: list[int] = []
+            for dep_id in dependency_ids(task):
+                if dep_id not in new_end:
+                    continue
+                link_type, offset = edges.get((dep_id, tid), ("FS", 0))
+                if link_type == "SS":
+                    # succ.start = pred.start + offset
+                    candidates.append(new_start[dep_id] + offset)
+                elif link_type == "FF":
+                    # succ.end = pred.end + offset → start = end - span
+                    candidates.append(new_end[dep_id] + offset - span)
+                elif link_type == "SF":
+                    # succ.end = pred.start + offset → start = end - span
+                    candidates.append(new_start[dep_id] + offset - span)
+                else:  # FS
+                    candidates.append(new_end[dep_id] + 1 + offset)
+
+            start = max(candidates) if candidates else orig_start[tid]
+            start = max(start, 1)
+            end = start if duration <= 0 else start + span
 
             delta = start - orig_start[tid]
             if delta or end != orig_end[tid]:
                 shifted.append(tid)
 
-            # Поддейностите се местят със същата разлика.
             if delta:
                 for sub in task.get("sub_activities", []) or []:
                     sub["start_day"] = self._as_int(sub.get("start_day"), 1) + delta

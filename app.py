@@ -1306,6 +1306,8 @@ if user_input:
     # Пази се дори когато графикът е отхвърлен — точно тогава е нужен.
     if "validation" in result:
         st.session_state.last_validation = result["validation"]
+    if "export" in result:
+        st.session_state.last_export = result["export"]
 
     # Update schedule if changed
     if result.get("schedule_updated") and result.get("schedule_data"):
@@ -1378,18 +1380,52 @@ if schedule:
         # наличен график, без да поглеждат резултата от валидацията.
         # Невалиден график можеше да излезе като XML/PDF при възложителя.
         _validation = st.session_state.get("last_validation") or {}
-        # bool() е задължителен: при липсваща валидация `.get("checked")` е
-        # None, `None and ...` също е None, а Streamlit иска булева стойност
-        # за `disabled` и хвърля TypeError.
-        _blocked = bool(_validation.get("checked")) and not _validation.get("valid")
+        _export = st.session_state.get("last_export") or {}
+
+        # Одит 2026-07-24: валидацията е обвързана с КОНКРЕТНАТА версия на
+        # графика.  Ако текущият график е различен от онзи, който е бил
+        # валидиран (зареден стар проект, приложена корекция, ръчна промяна),
+        # старата валидация НЕ важи — export се блокира, докато не мине нова
+        # проверка.  Иначе:
+        #   - сменен график ползва стара „валидна" валидация;
+        #   - или валиден стар график се блокира от валидацията на отхвърлена
+        #     ревизия.
+        _current_hash = AIProcessor.schedule_hash(schedule)
+        _validated_hash = _validation.get("schedule_hash")
+        _stale = bool(_validated_hash) and _validated_hash != _current_hash
+
+        # Одит 2026-07-24 (точки 3, 4): export gate чете РЕШЕНИЕТО от
+        # pipeline-а (политика strict/provisional/lenient), не само валидност.
+        if _stale:
+            _blocked = True
+            _blockers = ["графикът е променен след последната проверка — "
+                         "генерирайте отново, за да се валидира тази версия"]
+        elif "exportable" in _export:
+            _blocked = not _export["exportable"]
+            _blockers = _export.get("export_blockers") or []
+        elif _validation.get("checked"):
+            _blocked = not _validation.get("valid")
+            _blockers = _validation.get("errors", [])
+        else:
+            # Няма валидация за ТОЗИ график (напр. зареден стар проект) —
+            # блокирай, вместо да разрешиш непроверен експорт.
+            _blocked = True
+            _blockers = ["графикът не е валидиран в тази сесия — "
+                         "генерирайте или регенерирайте, за да мине проверка"]
+
         if _blocked:
             st.error(
-                "🛑 **Експортът е блокиран.** Графикът не минава "
-                f"детерминистичната проверка ({len(_validation.get('errors', []))} "
-                "грешки в зависимости/дати). Поправете ги и генерирайте отново."
+                "🛑 **Експортът е блокиран.** Графикът не е готов за възложител."
             )
-            for _err in _validation.get("errors", [])[:5]:
-                st.caption(f"• {_err}")
+            for _b in _blockers[:5]:
+                st.caption(f"• {_b}")
+        elif _export.get("export_blockers"):
+            # Експортът е разрешен, но с уговорки (provisional).
+            st.warning(
+                "⚠️ **Предварителен график** — експортът е разрешен, но:"
+            )
+            for _b in _export["export_blockers"][:5]:
+                st.caption(f"• {_b}")
 
         st.caption("**Налични формати:**")
         exp_c1, exp_c2, exp_c3 = st.columns(3)

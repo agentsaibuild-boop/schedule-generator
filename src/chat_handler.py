@@ -1081,6 +1081,9 @@ class ChatHandler:
             "schedule_updated": _valid and status in ("approved", "needs_human_review"),
             "schedule_data": self.current_schedule,
             "validation": gen_result.get("validation"),
+            "export": {"exportable": gen_result.get("exportable"),
+                       "export_blockers": gen_result.get("export_blockers"),
+                       "export_policy": gen_result.get("export_policy")},
             "correction_info": {
                 "status": status,
                 "cycles": cycles,
@@ -1238,7 +1241,7 @@ class ChatHandler:
         try:
             from src.provenance import mark_human_overrides
             before_tasks = AIProcessor._tasks_from(self.current_schedule)
-            mark_human_overrides(before_tasks, modified_tasks)
+            mark_human_overrides(before_tasks, modified_tasks, message)
         except Exception as exc:
             logger.debug("Маркирането на ръчни промени се провали: %s", exc)
 
@@ -2101,6 +2104,9 @@ class ChatHandler:
             "schedule_updated": _valid and bool(self.current_schedule),
             "schedule_data": self.current_schedule,
             "validation": gen_result.get("validation"),
+            "export": {"exportable": gen_result.get("exportable"),
+                       "export_blockers": gen_result.get("export_blockers"),
+                       "export_policy": gen_result.get("export_policy")},
             "correction_info": {
                 "status": status,
                 "cycles": cycles,
