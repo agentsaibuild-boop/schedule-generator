@@ -10,18 +10,26 @@ src/
   ai_processor.py       ← System prompts + генериране
   chat_handler.py       ← Intent detection + чат логика
   file_manager.py       ← PDF/Excel/DOCX → JSON конвертиране
-  schedule_builder.py   ← Изграждане на графика
+  schedule_builder.py   ← Изграждане, валидация, преизчисляване на графика
+  duration_calculator.py ← Детерминистични продължителности (НЕ от LLM)
   gantt_chart.py        ← Plotly Gantt (9 слоя)
   export_pdf.py         ← A3 PDF експорт
   export_xml.py         ← MSPDI XML за MS Project
-  knowledge_manager.py  ← Зарежда knowledge/ за AI промптове
+  knowledge_manager.py  ← Зарежда knowledge/ + подбор на уроци по релевантност
+  prompt_safety.py      ← Ограждане на недоверен текст (anti prompt-injection)
+  spatial.py            ← Пикетаж, сблъсък на бригади, открит изкоп
+  provenance.py         ← Произход на количествата (документ, лист, ред)
+  json_contract.py      ← Договор за JSON отговорите от AI (без тихи провали)
+  ai_disclosure.py      ← Маркиране „генерирано от AI" (EU AI Act чл. 50)
   project_manager.py    ← Скорошни проекти + прогрес
   self_evolution.py     ← AI пише собствен код (с rollback)
   docs_updater.py       ← Auto-update на документацията
 
 ## Ключови правила
 - knowledge/ съдържа знания за AI-а — НЕ ги редактирай без причина
-- config/productivities.json — производителности v0.4, верифицирани
+- config/productivities.json — производителности v0.4, верифицирани.
+  Това е ЕДИНСТВЕНИЯТ източник за продължителности — чете се от
+  duration_calculator.py. НЕ връщай аритметика (ceil, тарифи) в промптовете.
 - XML експорт ЗАДЪЛЖИТЕЛНО с DurationFormat=5 и Manual=1
 - Кирилица в PDF изисква DejaVu Sans от fonts/
 - .env файловете НЕ са в git
@@ -30,7 +38,7 @@ src/
 start.bat  ← стартира app на localhost:8501
 
 ## Тестове
-uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e   ← unit тестове (665 теста в 25 файла)
+uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e   ← unit тестове (1509 теста в 52 файла)
 pytest tests/e2e/ -v               ← E2E Playwright тестове (10 теста)
 
 - Unit тестовете не изискват стартирано приложение, но изискват пълния Python стек (.env не е нужен)

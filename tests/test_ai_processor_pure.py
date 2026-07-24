@@ -179,7 +179,17 @@ class TestBuildSystemPrompt:
         result = proc.build_system_prompt(project_type="distribution_network")
         assert result == "FULL PROMPT CONTENT"
         km.get_all_knowledge_for_prompt.assert_called_once_with(
-            project_type="distribution_network", level="full"
+            project_type="distribution_network", level="full", query=""
+        )
+
+    def test_query_is_forwarded_for_lesson_retrieval(self):
+        """P3: текстът на анализа стига до подбора на уроци."""
+        km = MagicMock()
+        km.get_all_knowledge_for_prompt.return_value = "PROMPT"
+        proc = _processor(knowledge=km)
+        proc.build_system_prompt(project_type="довеждащ", query="DN300 чугун горски")
+        assert km.get_all_knowledge_for_prompt.call_args.kwargs["query"] == (
+            "DN300 чугун горски"
         )
 
     def test_project_type_none_is_passed_through(self):
@@ -189,7 +199,7 @@ class TestBuildSystemPrompt:
         proc = _processor(knowledge=km)
         proc.build_system_prompt()
         km.get_all_knowledge_for_prompt.assert_called_once_with(
-            project_type=None, level="full"
+            project_type=None, level="full", query=""
         )
 
     def test_returns_string_type(self):
@@ -311,101 +321,137 @@ class TestBuildVerificationPrompt:
 # rates from productivities.md v0.4 and does NOT contain the old wrong values.
 # ---------------------------------------------------------------------------
 
-class TestGenerateSchedulePromptRates:
-    """Checks that AI prompt has correct productivity rates (verified v0.4).
+class TestProductivityRates:
+    """Производителностите живеят в конфига, НЕ в промпта (P2).
 
-    If these tests fail it means someone has edited the prompt in
-    ai_processor.py with incorrect rates that contradict productivities.md.
+    До юли 2026 тези норми бяха зашити в текста на промпта и LLM-ът смяташе
+    ceil() наум.  Сега `duration_calculator` ги чете от
+    config/productivities.json, а промптът само иска параметрите.
+
+    Тези тестове пазят и двете страни: че нормите в конфига са верните
+    v0.4 стойности, и че никой не връща аритметиката обратно в промпта.
     """
 
-    def _build_prompt(self) -> str:
-        """Build the generate-schedule system prompt (knowledge-free path)."""
-        km = MagicMock()
-        km.get_skills.return_value = ""
-        km.get_methodology.return_value = ""
-        km.get_productivities.return_value = ""
-        km.get_lessons.return_value = ""
-        km.get_workflow_rules.return_value = ""
-        proc = _processor(knowledge=km)
-        # Call build_system_prompt which is used inside generate_schedule
-        return proc.build_system_prompt()
-
     def _build_generate_prompt_fragment(self) -> str:
-        """Extract the hardcoded production-rate section from generate_schedule source.
-
-        We inspect the source string directly to avoid needing a real router call.
-        We grab the relevant constant strings from the module.
-        """
+        """Върни изходния код на generate_schedule (там живее промптът)."""
         import inspect
         import src.ai_processor as mod
-        src_text = inspect.getsource(mod.AIProcessor.generate_schedule)
-        return src_text
+        return inspect.getsource(mod.AIProcessor.generate_schedule)
 
-    def test_dn300_ci_correct_rate_8(self):
-        """Prompt must contain DN300 CI effective rate of 8 м/ден (verified)."""
-        fragment = self._build_generate_prompt_fragment()
-        # The correct verified rate is 8 м/ден; old wrong value was 3-5 м/ден
-        assert "8 м/ден" in fragment, (
-            "DN300 CI effective rate must be 8 м/ден (verified productivities.md). "
-            "Old wrong value '3-5 м/ден' was overestimating schedule duration by 1.6-2.7×."
+    def _rates(self) -> dict:
+        from src.duration_calculator import load_productivities
+        return load_productivities()["productivities"]
+
+    # --- Верифицирани норми в конфига (v0.4) ---
+
+    def test_dn300_ci_effective_rate_is_8(self):
+        """DN300 CI = 8 м/ден. Старата грешна стойност беше 3-5 м/ден."""
+        assert self._rates()["DN300_CI_open"]["effective_rate"] == 8
+
+    def test_dn500_pe_effective_rate_is_15(self):
+        """DN500 PE = 15 м/ден. Старата грешна стойност беше 20-25 м/ден."""
+        assert self._rates()["DN500_PE_open"]["effective_rate"] == 15
+
+    def test_hdd_effective_rate_differs_from_drill_rate(self):
+        """Урок #32: HDD DN90 = 12 м/ден ефективна, 56 м/ден е ПРОБИВНАТА."""
+        entry = self._rates()["DN90_PE_HDD"]
+        assert entry["effective_rate"] == 12
+        assert entry["drill_rate"] == 56
+
+    def test_calculator_uses_effective_rate_not_drill_rate(self):
+        """Изчислението трябва да мине по 12 м/ден, не по 56 — иначе е 4.7× занижение."""
+        from src.duration_calculator import calculate_task_duration
+        result = calculate_task_duration(
+            {"name": "Безизкопно полагане DN90 PE", "length_m": 560, "diameter": 90}
         )
+        assert result.rate == 12
+        assert result.days == 47
+
+    # --- Промптът не бива да съдържа аритметика или зашити норми ---
+
+    def test_prompt_no_longer_asks_llm_to_compute_duration(self):
+        """P2: `ceil(length/rate)` в промпта = аритметика от LLM. Не се връща."""
+        fragment = self._build_generate_prompt_fragment()
+        assert "ceil(length_m" not in fragment
+        assert "duration_days =" not in fragment
+
+    def test_prompt_requires_material_parameter(self):
+        """Без material изчислението се пропуска — промптът трябва да го иска."""
+        fragment = self._build_generate_prompt_fragment()
+        assert "material" in fragment
+
+    def test_prompt_states_system_computes_durations(self):
+        fragment = self._build_generate_prompt_fragment()
+        assert "СИСТЕМАТА" in fragment
+
+    # --- Старите грешни стойности не бива да се връщат никъде ---
 
     def test_dn300_ci_old_wrong_rate_absent(self):
-        """Prompt must NOT contain the old wrong DN300 CI rate of '3-5 м/ден'."""
+        """'3-5 м/ден' противоречи на productivities.md (effective_rate: 8)."""
         fragment = self._build_generate_prompt_fragment()
-        assert "3-5 м/ден" not in fragment, (
-            "Old wrong DN300 CI rate '3-5 м/ден' found in prompt. "
-            "This contradicts productivities.md which specifies effective_rate: 8."
-        )
-
-    def test_dn500_pe_correct_rate_15(self):
-        """Prompt must contain DN500 PE effective rate of 15 м/ден (verified)."""
-        fragment = self._build_generate_prompt_fragment()
-        assert "15 м/ден" in fragment, (
-            "DN500 PE effective rate must be 15 м/ден (verified productivities.md). "
-            "Old wrong value '20-25 м/ден' underestimated schedule duration by 33-67%."
-        )
+        assert "3-5 м/ден" not in fragment
 
     def test_dn500_pe_old_wrong_rate_absent(self):
-        """Prompt must NOT contain the old wrong DN500 PE rate of '20-25 м/ден'."""
+        """'20-25 м/ден' е занижение — вярната норма е 15 м/ден."""
         fragment = self._build_generate_prompt_fragment()
-        assert "20-25 м/ден" not in fragment, (
-            "Old wrong DN500 PE rate '20-25 м/ден' found in prompt. "
-            "Correct verified rate from productivities.md is 15 м/ден."
-        )
-
-    def test_hdd_effective_rate_not_drill_rate(self):
-        """Prompt must clarify that HDD effective rate (12-13 м/ден) ≠ drill rate (56 м/ден)."""
-        fragment = self._build_generate_prompt_fragment()
-        # Should explicitly mention the word "ЕФЕКТИВНА" near HDD to prevent using drill rate
-        assert "ЕФЕКТИВНА" in fragment, (
-            "Prompt must explicitly mark HDD effective rate as 'ЕФЕКТИВНА' "
-            "to prevent AI from using the drill rate (56 м/ден) which is 4-5× higher."
-        )
-
-    def test_hdd_56_is_drill_rate_warning_present(self):
-        """Prompt must warn that 56 м/ден is drill rate, not effective rate."""
-        fragment = self._build_generate_prompt_fragment()
-        # The drill rate of 56 should still be mentioned, but labeled as пробивна (drill)
-        assert "пробивна" in fragment.lower(), (
-            "Prompt must label '56 м/ден' as 'пробивна скорост' (drill rate) "
-            "so AI knows NOT to use it for duration calculations."
-        )
-
-    def test_dn90_pe_rate_12(self):
-        """Prompt must contain DN90 PE rate of 12 м/ден (verified)."""
-        fragment = self._build_generate_prompt_fragment()
-        assert "12 м/ден" in fragment, (
-            "DN90 PE effective rate must be 12 м/ден per productivities.md v0.4."
-        )
+        assert "20-25 м/ден" not in fragment
 
     def test_ci_multiplier_comment_is_realistic(self):
-        """CI slowdown vs PE should be ~3-4×, not the old wrong '10-12×'."""
+        """CI vs PE ≈ 3×, не '10-12×' — конфигът дава 8 срещу 15 м/ден."""
         fragment = self._build_generate_prompt_fragment()
-        assert "10-12×" not in fragment, (
-            "Old wrong comment '10-12× по-бавно от PE' found. "
-            "Correct: DN300 CI (8 м/ден) vs DN300 PE (~25 м/ден) ≈ 3× slower, not 10-12×."
-        )
+        assert "10-12×" not in fragment
+
+
+class TestKnowledgeBaseHasNoHardcodedRates:
+    """Методологиите също влизат в промпта — и там не бива да има норми.
+
+    Дупка, открита на 2026-07-22: тестовете по-горе проверяваха само
+    ai_processor.py, а knowledge/methodologies/*.md се инжектират в същия
+    промпт през KnowledgeManager (Tier 2).  Там живееха точно забранените
+    стойности — DN300 CI '3-5 м/ден' (вярно: 8) и DN500 PE '20-25 м/ден'
+    (вярно: 15), плюс HDD '56 м/ден', което е пробивната, не ефективната
+    скорост (урок #32 — 4.7× занижение).
+    """
+
+    def _methodology_texts(self) -> dict[str, str]:
+        root = Path(__file__).parent.parent / "knowledge" / "methodologies"
+        return {p.name: p.read_text(encoding="utf-8") for p in root.glob("*.md")}
+
+    @pytest.mark.parametrize("wrong_rate", ["3-5 м/ден", "20-25 м/ден", "25-30 м/ден"])
+    def test_no_wrong_rates_in_methodologies(self, wrong_rate):
+        for filename, text in self._methodology_texts().items():
+            assert wrong_rate not in text, (
+                f"{filename} съдържа '{wrong_rate}' — противоречи на "
+                f"config/productivities.json и влиза в промпта."
+            )
+
+    def test_no_unqualified_multiplier_in_methodologies(self):
+        for filename, text in self._methodology_texts().items():
+            assert "10-12×" not in text, f"{filename} съдържа неподкрепеното '10-12×'."
+
+    def test_hdd_drill_rate_is_labelled_when_mentioned(self):
+        """Ако 56 м/ден се спомене, ЗАДЪЛЖИТЕЛНО да е обявено като пробивна."""
+        for filename, text in self._methodology_texts().items():
+            if "56 м/ден" in text:
+                assert "ПРОБИВНАТА" in text or "пробивна" in text.lower(), (
+                    f"{filename} дава 56 м/ден без да го обяви за пробивна скорост — "
+                    f"ефективната е 12-13 м/ден (урок #32)."
+                )
+
+    def test_methodologies_do_not_ask_llm_to_compute(self):
+        """P2: `ceil(...)` в методологиите връща аритметиката при LLM-а."""
+        for filename, text in self._methodology_texts().items():
+            assert "ceil(" not in text, (
+                f"{filename} инструктира LLM-а да смята с ceil() — "
+                f"продължителностите се смятат от duration_calculator.py."
+            )
+
+    def test_minimal_knowledge_prompt_does_not_ask_llm_to_compute(self):
+        """Същото за минималния промпт в knowledge_manager.py."""
+        import inspect
+        import src.knowledge_manager as km_mod
+        source = inspect.getsource(km_mod.KnowledgeManager._build_minimal_prompt)
+        assert "ceil(" not in source
 
 
 if __name__ == "__main__":

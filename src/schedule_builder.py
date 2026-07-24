@@ -6,11 +6,17 @@ import copy
 import logging
 import re
 from collections import defaultdict
-from typing import Any
+from typing import Any, NamedTuple
 
 import pandas as pd
 
+from src.duration_calculator import (
+    DEFAULT_MIN_DAYS,
+    UNRESOLVED_CODES,
+    calculate_task_duration,
+)
 from src.gantt_chart import day_to_date, generate_demo_schedule, get_type_label
+from src.spatial import spatial_report
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +28,93 @@ _MAX_CASCADE_TASKS = 50
 
 # Regex for extracting task IDs from Bulgarian text (e.g. В01, К03, МС01, П12)
 _TASK_ID_RE = re.compile(r"[А-ЯA-Z]{1,3}\d{1,3}")
+
+
+class DependencyLink(NamedTuple):
+    """Връзка към предшественик — с тип и лаг, не само ID.
+
+    Одит 2026-07-23: валидаторът извличаше само ID-то и проверяваше ВСИЧКО
+    като FS.  Валидна SS връзка (двете задачи започват заедно) се обявяваше
+    за грешка, а реални нарушения на SS/FF/SF минаваха незабелязано.
+    """
+
+    predecessor_id: str
+    type: str = "FS"      # FS | SS | FF | SF
+    lag_days: int = 0
+
+
+_VALID_LINK_TYPES = frozenset({"FS", "SS", "FF", "SF"})
+
+
+def _as_lag(value: Any) -> int:
+    """Лаг в дни; всичко неразпознато е 0."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value)
+
+
+def dependency_links(task: dict) -> list[DependencyLink]:
+    """Извлечи зависимостите СЪС семантиката им.
+
+    Приема същите формати като `dependency_ids`, плюс типа и лага, когато
+    са налични.  Задачите, зададени като низ, наследяват `dependency_type` и
+    `lag_days` от самата задача (старият формат от `enrich_for_msproject`).
+    """
+    links: list[DependencyLink] = []
+    task_type = str(task.get("dependency_type") or "FS").upper()
+    task_lag = _as_lag(task.get("lag_days"))
+
+    for dep in task.get("dependencies") or []:
+        if isinstance(dep, dict):
+            pred = None
+            for key in ("predecessor_id", "id", "task_id", "uid"):
+                value = dep.get(key)
+                if isinstance(value, (str, int)) and not isinstance(value, bool):
+                    pred = str(value)
+                    break
+            if pred is None:
+                continue
+            link_type = str(dep.get("type") or dep.get("dependency_type") or "FS").upper()
+            lag = _as_lag(dep.get("lag_days", dep.get("lag")))
+        elif isinstance(dep, str) and dep:
+            pred, link_type, lag = dep, task_type, task_lag
+        elif isinstance(dep, int) and not isinstance(dep, bool):
+            pred, link_type, lag = str(dep), task_type, task_lag
+        else:
+            continue
+
+        if link_type not in _VALID_LINK_TYPES:
+            link_type = "FS"
+        links.append(DependencyLink(pred, link_type, lag))
+
+    return links
+
+
+def dependency_ids(task: dict) -> list[str]:
+    """Извлечи ID-тата на предшествениците, независимо от формата.
+
+    Одит 2026-07-23: `export_xml` поддържа зависимости и като речници
+    ({"predecessor_id": "T1", "type": "SS", "lag_days": 3}), а валидаторът
+    приемаше само низове и гърмеше с `TypeError: unhashable type: 'dict'`.
+    Тоест структура, поддържана от експорта, сриваше проверката преди него.
+
+    Приема: "T1" | {"predecessor_id": "T1"} | {"id": "T1"} | {"task_id": "T1"}
+    Игнорира всичко останало — валидаторът не бива да пада заради вход.
+    """
+    ids: list[str] = []
+    for dep in task.get("dependencies") or []:
+        if isinstance(dep, str):
+            if dep:
+                ids.append(dep)
+        elif isinstance(dep, int) and not isinstance(dep, bool):
+            ids.append(str(dep))
+        elif isinstance(dep, dict):
+            for key in ("predecessor_id", "id", "task_id", "uid"):
+                value = dep.get(key)
+                if isinstance(value, (str, int)) and not isinstance(value, bool):
+                    ids.append(str(value))
+                    break
+    return ids
 
 
 class ScheduleBuilder:
@@ -44,6 +137,327 @@ class ScheduleBuilder:
             return tasks
 
         return generate_demo_schedule()
+
+    # ------------------------------------------------------------------
+    # Deterministic durations (P2 — арифметиката излиза от промпта)
+    # ------------------------------------------------------------------
+
+    def recompute_durations(
+        self,
+        schedule: list[dict],
+        *,
+        min_days: int = DEFAULT_MIN_DAYS,
+        apply_terrain: bool = False,
+        reschedule: bool = True,
+        config: dict | None = None,
+    ) -> dict[str, Any]:
+        """Преизчисли продължителностите детерминистично, вместо да вярваш на LLM-а.
+
+        За всяка задача, за която `duration_calculator` може да сметне
+        СИГУРНО (тръбна дейност с DN + материал + дължина, или СРС/РШ по
+        бройки), продължителността се заменя.  Всичко останало запазва
+        стойността от AI-я и се отчита в `skipped` — модулът не гадае.
+
+        Args:
+            schedule: Списък задачи от генерирания график.
+            min_days: Минимум работни дни за параметрична дейност.
+            apply_terrain: Дали да се приложи теренният коефициент.  По
+                подразбиране False — ефективните норми вече са теренно
+                калибрирани (виж `duration_calculator.pipe_duration`).
+            reschedule: Дали да презакачи start_day/end_day след промяната.
+            config: Готов конфиг с производителности (за тестове).
+
+        Returns:
+            Dict с ключове:
+                schedule: Нов списък задачи (оригиналът не се мутира).
+                changes: Списък от {id, name, old, new, delta, reason}.
+                skipped: Списък от {id, name, reason}.
+                warnings: Списък предупреждения.
+                summary: {total, recomputed, unchanged, skipped,
+                          old_total_duration, new_total_duration}.
+        """
+        if not schedule:
+            return {
+                "schedule": [],
+                "changes": [],
+                "skipped": [],
+                "warnings": [],
+                "summary": {
+                    "total": 0, "recomputed": 0, "unchanged": 0, "skipped": 0,
+                    "old_total_duration": 0, "new_total_duration": 0,
+                },
+            }
+
+        updated = copy.deepcopy(schedule)
+        changes: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        unchanged = 0
+
+        old_total = self._total_duration(updated)
+
+        for task in updated:
+            tid = task.get("id", "?")
+            name = task.get("name", "?")
+
+            try:
+                result = calculate_task_duration(
+                    task,
+                    min_days=min_days,
+                    apply_terrain=apply_terrain,
+                    config=config,
+                )
+            except (ValueError, TypeError) as exc:
+                skipped.append({"id": tid, "name": name, "reason": f"грешка: {exc}"})
+                continue
+
+            if result.days is None:
+                # НЕРАЗРЕШЕНА продължителност.  Одит 2026-07-23: досега тук
+                # стойността на LLM-а просто оставаше в `duration` и ставаше
+                # неразличима от изчислена.  Сега произходът се записва явно,
+                # за да може експортът и човекът да знаят кое е доказано.
+                old_duration = task.get("duration")
+                task["duration_source"] = "suggested"
+                task["duration_status"] = result.code
+                if old_duration is not None:
+                    task["suggested_duration"] = old_duration
+                task.pop("calculated_duration", None)
+
+                skipped.append({
+                    "id": tid, "name": name,
+                    "reason": result.reason, "code": result.code,
+                    "suggested_duration": old_duration,
+                })
+                continue
+
+            old_duration = task.get("duration")
+
+            # Доказана стойност — записва се и отделно от `duration`, за да
+            # оцелее, ако някой по-надолу пипне `duration`.
+            task["calculated_duration"] = result.days
+            task["duration_source"] = "calculated"
+            task["duration_status"] = result.code
+            task.pop("suggested_duration", None)
+
+            if old_duration == result.days:
+                unchanged += 1
+                continue
+
+            task["duration"] = result.days
+            changes.append({
+                "id": tid,
+                "name": name,
+                "old": old_duration,
+                "new": result.days,
+                "delta": (result.days - old_duration)
+                if isinstance(old_duration, (int, float)) and not isinstance(old_duration, bool)
+                else None,
+                "reason": result.reason,
+            })
+
+        if changes and reschedule:
+            resched = self.reschedule(updated)
+            updated = resched["schedule"]
+            warnings.extend(resched["warnings"])
+
+        new_total = self._total_duration(updated)
+
+        # Разбивка по причина — за да се вижда КАКВО липсва, не само колко.
+        by_code: dict[str, int] = {}
+        for entry in skipped:
+            code = entry.get("code", "UNKNOWN")
+            by_code[code] = by_code.get(code, 0) + 1
+
+        unresolved = sum(
+            count for code, count in by_code.items() if code in UNRESOLVED_CODES
+        )
+        if unresolved:
+            logger.warning(
+                "%d задачи остават с НЕДОКАЗАНА продължителност (стойност от AI): %s",
+                unresolved,
+                ", ".join(f"{c}={n}" for c, n in sorted(by_code.items())),
+            )
+
+        return {
+            "schedule": updated,
+            "changes": changes,
+            "skipped": skipped,
+            "warnings": warnings,
+            "summary": {
+                "total": len(updated),
+                "recomputed": len(changes),
+                "unchanged": unchanged,
+                "skipped": len(skipped),
+                "unresolved": unresolved,
+                "by_code": by_code,
+                "old_total_duration": old_total,
+                "new_total_duration": new_total,
+            },
+        }
+
+    def reschedule(self, schedule: list[dict]) -> dict[str, Any]:
+        """Преизчисли start_day/end_day след промяна на продължителности.
+
+        Запазва ПРАЗНИНАТА (lag) на всяко ребро такава, каквато я е замислил
+        AI-ят — включително отрицателна (SS припокриване, урок #15) и
+        големите умишлени lag-ове (настилки SS+30, урок #36).  Така промяна
+        в продължителност мести наследниците, без да изтрива логиката.
+
+        При кръгова зависимост връща графика непроменен с предупреждение.
+
+        Args:
+            schedule: Списък задачи (не се мутира).
+
+        Returns:
+            Dict с schedule, warnings, shifted (списък ID-та с нови дати).
+        """
+        if not schedule:
+            return {"schedule": [], "warnings": [], "shifted": []}
+
+        updated = copy.deepcopy(schedule)
+        task_by_id: dict[str, dict] = {t.get("id", ""): t for t in updated}
+
+        cycle = self._detect_cycle(updated, task_by_id)
+        if cycle:
+            return {
+                "schedule": updated,
+                "warnings": [
+                    f"Датите не са преизчислени — кръгова зависимост: {' → '.join(cycle)}."
+                ],
+                "shifted": [],
+            }
+
+        # --- Запомни оригиналните позиции и празнините по ребрата ---
+        orig_start: dict[str, int] = {}
+        orig_end: dict[str, int] = {}
+        for task in updated:
+            tid = task.get("id", "")
+            start = self._as_int(task.get("start_day"), 1)
+            orig_start[tid] = start
+            end = task.get("end_day")
+            if isinstance(end, (int, float)) and not isinstance(end, bool):
+                orig_end[tid] = int(end)
+            else:
+                orig_end[tid] = start + max(self._as_int(task.get("duration"), 0), 1) - 1
+
+        gaps: dict[tuple[str, str], int] = {}
+        for task in updated:
+            tid = task.get("id", "")
+            for dep_id in dependency_ids(task):
+                if dep_id in orig_end:
+                    gaps[(dep_id, tid)] = orig_start[tid] - orig_end[dep_id] - 1
+
+        # --- Топологичен ред (Kahn) ---
+        order = self._topological_order(updated, task_by_id)
+        if order is None:
+            return {
+                "schedule": updated,
+                "warnings": ["Датите не са преизчислени — не може да се подреди топологично."],
+                "shifted": [],
+            }
+
+        new_start: dict[str, int] = {}
+        new_end: dict[str, int] = {}
+        shifted: list[str] = []
+
+        for tid in order:
+            task = task_by_id[tid]
+            deps = [d for d in dependency_ids(task) if d in new_end]
+
+            if deps:
+                start = max(new_end[d] + 1 + gaps.get((d, tid), 0) for d in deps)
+            else:
+                start = orig_start[tid]
+            start = max(start, 1)
+
+            duration = self._as_int(task.get("duration"), 0)
+            end = start if duration <= 0 else start + duration - 1
+
+            delta = start - orig_start[tid]
+            if delta or end != orig_end[tid]:
+                shifted.append(tid)
+
+            # Поддейностите се местят със същата разлика.
+            if delta:
+                for sub in task.get("sub_activities", []) or []:
+                    sub["start_day"] = self._as_int(sub.get("start_day"), 1) + delta
+                    if isinstance(sub.get("end_day"), (int, float)):
+                        sub["end_day"] = int(sub["end_day"]) + delta
+
+            task["start_day"] = start
+            task["end_day"] = end
+            new_start[tid] = start
+            new_end[tid] = end
+
+        return {"schedule": updated, "warnings": [], "shifted": shifted}
+
+    # ------------------------------------------------------------------
+    # Helpers for deterministic durations
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _task_end(cls, task: dict) -> int:
+        """Краен ден на задача — от end_day, иначе изведен от start+duration."""
+        end = task.get("end_day")
+        if isinstance(end, (int, float)) and not isinstance(end, bool):
+            return int(end)
+        start = cls._as_int(task.get("start_day"), 0)
+        return start + max(cls._as_int(task.get("duration"), 0), 1) - 1
+
+    @staticmethod
+    def _as_int(value: Any, default: int) -> int:
+        """Cast to int, falling back to default for None/bool/non-numeric."""
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return default
+        return int(value)
+
+    @staticmethod
+    def _topological_order(
+        schedule: list[dict], task_by_id: dict[str, dict]
+    ) -> list[str] | None:
+        """Kahn topological sort over dependencies. None if not sortable."""
+        indegree: dict[str, int] = {t.get("id", ""): 0 for t in schedule}
+        successors: dict[str, list[str]] = defaultdict(list)
+
+        for task in schedule:
+            tid = task.get("id", "")
+            for dep_id in dependency_ids(task):
+                if dep_id in indegree:
+                    successors[dep_id].append(tid)
+                    indegree[tid] += 1
+
+        queue = [tid for tid, deg in indegree.items() if deg == 0]
+        order: list[str] = []
+
+        while queue:
+            tid = queue.pop(0)
+            order.append(tid)
+            for succ in successors.get(tid, []):
+                indegree[succ] -= 1
+                if indegree[succ] == 0:
+                    queue.append(succ)
+
+        return order if len(order) == len(indegree) else None
+
+    @classmethod
+    def _total_duration(cls, schedule: list[dict]) -> int:
+        """Span from earliest start to latest end, in days."""
+        if not schedule:
+            return 0
+        min_start = None
+        max_end = None
+        for task in schedule:
+            start = cls._as_int(task.get("start_day"), 1)
+            end = task.get("end_day")
+            if isinstance(end, (int, float)) and not isinstance(end, bool):
+                end = int(end)
+            else:
+                end = start + max(cls._as_int(task.get("duration"), 0), 1) - 1
+            min_start = start if min_start is None else min(min_start, start)
+            max_end = end if max_end is None else max(max_end, end)
+        if min_start is None or max_end is None or max_end < min_start:
+            return 0
+        return max_end - min_start + 1
 
     # ------------------------------------------------------------------
     # Validation
@@ -104,17 +518,55 @@ class ScheduleBuilder:
             duration = task.get("duration", 0)
             end = task.get("end_day")
 
-            if start < 0:
+            # Одит 2026-07-23: `start_day: "утре"` сваляше валидатора с
+            # TypeError и с него ЦЯЛОТО генериране — вместо да върне грешка.
+            # Типът се проверява ПРЕДИ всяко сравнение.
+            for field, value in (("start_day", start), ("end_day", end)):
+                if value is None:
+                    continue
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    errors.append(
+                        f"Задача '{task.get('name')}' ({tid}) има {field} "
+                        f"от невалиден тип: {value!r}."
+                    )
+
+            if isinstance(start, (int, float)) and not isinstance(start, bool):
+                if start < 0:
+                    errors.append(
+                        f"Задача '{task.get('name')}' ({tid}) има отрицателен начален ден."
+                    )
+
+            # Празно ID е твърда грешка, не изчаква втора празна задача,
+            # за да се появи като „дублирано ID".
+            if not str(tid).strip():
                 errors.append(
-                    f"Задача '{task.get('name')}' ({tid}) има отрицателен начален ден."
+                    f"Задача '{task.get('name')}' няма ID."
                 )
-            if duration < 0:
-                warnings.append(
-                    f"Задача '{task.get('name')}' ({tid}) има отрицателна продължителност."
+            # Одит 2026-07-23: отрицателната продължителност беше само
+            # предупреждение, тоест график с duration=-5 получаваше valid=True.
+            # Това е невъзможна стойност, не спорна — грешка е.
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                if duration < 0:
+                    errors.append(
+                        f"Задача '{task.get('name')}' ({tid}) има отрицателна "
+                        f"продължителност ({duration})."
+                    )
+            elif duration is not None:
+                errors.append(
+                    f"Задача '{task.get('name')}' ({tid}) има продължителност "
+                    f"от невалиден тип: {duration!r}."
                 )
 
             # --- Duration / end_day consistency ---
-            if duration > 0 and end is not None:
+            # Сравненията стават само след като типовете са потвърдени —
+            # иначе низ в което и да е от трите полета сваля валидатора и
+            # заедно с него цялото генериране.
+            numeric = (
+                isinstance(duration, (int, float)) and not isinstance(duration, bool)
+                and isinstance(start, (int, float)) and not isinstance(start, bool)
+                and isinstance(end, (int, float)) and not isinstance(end, bool)
+            )
+            if numeric and duration > 0:
                 expected_end = start + duration - 1
                 if end != expected_end:
                     errors.append(
@@ -125,7 +577,7 @@ class ScheduleBuilder:
         # --- Dependency existence ---
         for task in schedule:
             tid = task.get("id", "")
-            for dep_id in task.get("dependencies", []):
+            for dep_id in dependency_ids(task):
                 if dep_id not in task_by_id:
                     errors.append(
                         f"Задача '{task.get('name')}' ({tid}) зависи от "
@@ -143,24 +595,54 @@ class ScheduleBuilder:
                 f"(графикът има {len(schedule)} задачи, лимит: {_MAX_TASKS_FOR_CYCLE_CHECK})."
             )
 
-        # --- FS violation: task starts before predecessor ends ---
+        # --- Dependency violations, ПО ТИП на връзката ---
+        #
+        # Одит 2026-07-23: всички зависимости се проверяваха като FS.  Валидна
+        # SS връзка (изкоп и полагане тръгват заедно — урок #15) се обявяваше
+        # за грешка, а нарушения на SS/FF/SF минаваха незабелязано.
         for task in schedule:
             tid = task.get("id", "")
-            start = task.get("start_day", 0)
-            for dep_id in task.get("dependencies", []):
-                pred = task_by_id.get(dep_id)
+            start = self._as_int(task.get("start_day"), 0)
+            end = self._task_end(task)
+
+            for link in dependency_links(task):
+                pred = task_by_id.get(link.predecessor_id)
                 if pred is None:
                     continue  # already reported above
-                pred_end = pred.get("end_day")
-                if pred_end is None:
-                    pred_dur = pred.get("duration", 0)
-                    pred_end = pred.get("start_day", 0) + max(pred_dur, 1) - 1
-                if start <= pred_end:
-                    errors.append(
-                        f"Задача '{task.get('name')}' ({tid}) започва ден {start}, "
-                        f"но предшественик '{pred.get('name')}' ({dep_id}) "
-                        f"завършва ден {pred_end}."
-                    )
+                pred_start = self._as_int(pred.get("start_day"), 0)
+                pred_end = self._task_end(pred)
+                label = f"'{pred.get('name')}' ({link.predecessor_id})"
+                lag = link.lag_days
+
+                if link.type == "SS":
+                    # Наследникът не бива да започва преди предшественика (+лаг)
+                    if start < pred_start + lag:
+                        errors.append(
+                            f"Задача '{task.get('name')}' ({tid}) [SS] започва ден "
+                            f"{start}, но предшественик {label} започва ден "
+                            f"{pred_start}" + (f" + лаг {lag}д" if lag else "") + "."
+                        )
+                elif link.type == "FF":
+                    if end < pred_end + lag:
+                        errors.append(
+                            f"Задача '{task.get('name')}' ({tid}) [FF] завършва ден "
+                            f"{end}, но предшественик {label} завършва ден "
+                            f"{pred_end}" + (f" + лаг {lag}д" if lag else "") + "."
+                        )
+                elif link.type == "SF":
+                    if end < pred_start + lag:
+                        errors.append(
+                            f"Задача '{task.get('name')}' ({tid}) [SF] завършва ден "
+                            f"{end}, но предшественик {label} започва ден "
+                            f"{pred_start}" + (f" + лаг {lag}д" if lag else "") + "."
+                        )
+                else:  # FS
+                    if start <= pred_end + lag:
+                        errors.append(
+                            f"Задача '{task.get('name')}' ({tid}) започва ден {start}, "
+                            f"но предшественик {label} завършва ден {pred_end}"
+                            + (f" + лаг {lag}д" if lag else "") + "."
+                        )
 
         # --- Sub-activity bounds ---
         for task in schedule:
@@ -219,7 +701,7 @@ class ScheduleBuilder:
         for task in schedule:
             tid = task.get("id", "")
             name = task.get("name", "?")
-            duration = task.get("duration", 0)
+            duration = self._as_int(task.get("duration"), 0)
 
             # --- Suspiciously long task ---
             if duration > 365:
@@ -269,9 +751,12 @@ class ScheduleBuilder:
                     if s2 <= e1 and e2 >= s1:
                         overlap_count += 1
                         overlap_ids.append(id2)
-                if overlap_count >= 2:
+                # Одит 2026-07-23: прагът беше `>= 2`, тоест нужни бяха ТРИ
+                # застъпени задачи.  За неделим екип конфликтът започва още
+                # при втория едновременен ангажимент.
+                if overlap_count >= 1:
                     warnings.append(
-                        f"Екип '{team}' е назначен на повече от 2 задачи "
+                        f"Екип '{team}' е назначен на {overlap_count + 1} задачи "
                         f"едновременно (вкл. {id1} и {', '.join(overlap_ids[:3])})."
                     )
                     break  # one warning per team is enough
@@ -280,7 +765,7 @@ class ScheduleBuilder:
         for task in schedule:
             tid = task.get("id", "")
             start = task.get("start_day", 0)
-            for dep_id in task.get("dependencies", []):
+            for dep_id in dependency_ids(task):
                 pred = task_by_id.get(dep_id)
                 if pred is None:
                     continue
@@ -295,10 +780,57 @@ class ScheduleBuilder:
                         f"'{task.get('name')}' ({tid}) има празнина от {gap} дни."
                     )
 
+        # --- ПРОСТРАНСТВЕНИ проверки (одит 2026-07-23, точка 3) ---
+        #
+        # Мрежовият график не може да ги направи: две задачи може да са
+        # напълно коректни по зависимости и пак да изпращат два екипа на един
+        # и същи метър в един и същи ден.
+        #
+        # Проверките са ДОБАВЪЧНИ — задачи без пикетаж просто не участват.
+        spatial = spatial_report(schedule)
+
+        for collision in spatial["collisions"]:
+            crews = ""
+            if collision["crew_a"] and collision["crew_b"]:
+                crews = f" ({collision['crew_a']} и {collision['crew_b']})"
+            pair = (
+                f"'{collision['name_a']}' ({collision['task_a']}) и "
+                f"'{collision['name_b']}' ({collision['task_b']})"
+            )
+            days = f"дни {collision['days'][0]}–{collision['days'][1]}"
+
+            if collision["kind"] == "overlap":
+                errors.append(
+                    f"Пространствен конфликт по '{collision['alignment']}': {pair} "
+                    f"работят на едни и същи {collision['overlap_m']:.0f}м през "
+                    f"{days}{crews}."
+                )
+            else:
+                # Допират се или са по-близо от изисквания буфер — технологично
+                # изискване, не физически сблъсък.
+                warnings.append(
+                    f"Недостатъчно изоставане по '{collision['alignment']}': {pair} "
+                    f"работят на по-малко от {collision['buffer_m']:.0f}м един от "
+                    f"друг през {days}{crews}."
+                )
+
+        for violation in spatial["open_trench"]:
+            warnings.append(
+                f"Открит изкоп по '{violation['alignment']}' достига "
+                f"{violation['open_m']:.0f}м на ден {violation['day']} "
+                f"(лимит {violation['limit_m']:.0f}м) — задачи: "
+                f"{', '.join(violation['tasks'][:4])}."
+            )
+
         return {
             "valid": len(errors) == 0,
             "errors": errors,
             "warnings": warnings,
+            "spatial": {
+                "covered": spatial["covered"],
+                "total": spatial["total"],
+                "alignments": spatial["alignments"],
+            },
         }
 
     # ------------------------------------------------------------------
@@ -323,7 +855,7 @@ class ScheduleBuilder:
             if not task:
                 color[tid] = BLACK
                 return None
-            for dep_id in task.get("dependencies", []):
+            for dep_id in dependency_ids(task):
                 if dep_id not in color:
                     continue
                 if color[dep_id] == GRAY:
@@ -478,7 +1010,7 @@ class ScheduleBuilder:
         successors: dict[str, list[str]] = defaultdict(list)
         for task in schedule:
             tid = task.get("id", "")
-            for dep_id in task.get("dependencies", []):
+            for dep_id in dependency_ids(task):
                 successors[dep_id].append(tid)
 
         # BFS from source_id
@@ -612,7 +1144,7 @@ class ScheduleBuilder:
         successors: dict[str, list[str]] = defaultdict(list)
         for task in schedule:
             tid = task.get("id", "")
-            for dep_id in task.get("dependencies", []):
+            for dep_id in dependency_ids(task):
                 successors[dep_id].append(tid)
 
         queue = list(allowed_ids)
@@ -639,8 +1171,8 @@ class ScheduleBuilder:
                 changed.append(f)
 
         # Compare dependencies as sets
-        old_deps = set(old.get("dependencies") or [])
-        new_deps = set(new.get("dependencies") or [])
+        old_deps = set(dependency_ids(old))
+        new_deps = set(dependency_ids(new))
         if old_deps != new_deps:
             changed.append("dependencies")
 

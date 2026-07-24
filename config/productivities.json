@@ -1,6 +1,11 @@
 {
   "version": "0.4",
+  "_source": "knowledge/skills/references/productivities.md — верифицирана таблица v0.4",
+  "_note": "Единствен източник за продължителности. Чете се от src/duration_calculator.py. effective_rate е ЕДИНСТВЕНАТА стойност, използвана за duration (урок #16): drill_rate/dig_rate са технически скорости на отделна операция, НЕ на цикъла.",
   "productivities": {
+    "DN90_PE_open": {"dig_rate": 57.6, "effective_rate": 12, "unit": "м/ден"},
+    "DN110_PE_open": {"dig_rate": 55.2, "effective_rate": 13, "unit": "м/ден"},
+    "DN160_PE_open": {"dig_rate": 52.8, "effective_rate": 14, "unit": "м/ден"},
     "DN90_PE_HDD": {"drill_rate": 56, "effective_rate": 12, "unit": "м/ден"},
     "DN110_PE_HDD": {"drill_rate": 60, "effective_rate": 13, "unit": "м/ден"},
     "DN125_PE_HDD": {"drill_rate": 65, "effective_rate": 14, "unit": "м/ден"},

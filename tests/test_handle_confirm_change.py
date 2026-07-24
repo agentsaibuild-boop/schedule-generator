@@ -20,12 +20,27 @@ FAILURE означава: src/chat_handler.py :: _handle_confirm_change е сч�
 from __future__ import annotations
 
 import sys
+
+import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.chat_handler import ChatHandler
+
+
+@pytest.fixture(autouse=True)
+def _enable_self_evolution(monkeypatch):
+    """Тези тестове проверяват ВЪТРЕШНИТЕ бариери на self-evolution.
+
+    От одит 2026-07-23 функцията е изключена по подразбиране
+    (ENABLE_SELF_EVOLUTION).  Тук я включваме нарочно, за да се тества това,
+    което пази, КОГАТО е включена.  Поведението при изключена функция си има
+    отделни тестове по-долу.
+    """
+    monkeypatch.setenv("ENABLE_SELF_EVOLUTION", "1")
+
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +203,23 @@ def test_yellow_apply_fails_returns_error_no_commit():
     assert result.get("evolution_cleared") is True
     assert result.get("evolution_applied") is not True
     evo.commit_changes.assert_not_called()
-    # For yellow level (no backup), rollback should NOT be called
-    evo.rollback.assert_not_called()
+    # P6 (2026-07-22): бекъп се прави на ВСЯКО ниво, затова провалено
+    # прилагане на жълта промяна вече се връща назад.  Преди това
+    # полусработила промяна в config/ оставаше без път за възстановяване.
+    evo.rollback.assert_called_once()
+
+
+def test_yellow_creates_backup_before_applying():
+    h, evo = _handler_with_evolution()
+    h._handle_confirm_change("да", _yellow_pending())
+    evo.create_backup.assert_called_once()
+
+
+def test_apply_receives_the_declared_level():
+    """Нивото стига до apply_changes, за да може да се сверят файловете."""
+    h, evo = _handler_with_evolution()
+    h._handle_confirm_change("да", _yellow_pending())
+    assert evo.apply_changes.call_args.kwargs["declared_level"] == "yellow"
 
 
 # ---------------------------------------------------------------------------

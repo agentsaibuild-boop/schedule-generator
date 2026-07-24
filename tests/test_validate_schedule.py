@@ -276,11 +276,38 @@ def test_valid_schedule_no_warnings():
 # Edge cases — lines not covered by the above tests
 # ---------------------------------------------------------------------------
 
-def test_negative_duration_produces_warning():
-    """Line 112: negative duration should generate a warning (not an error)."""
-    task = _task("T1", "Задача", start=1, duration=-3, end=1)
-    result = _v([task])
-    assert any("отрицателна продължителност" in w for w in result["warnings"])
+def test_negative_duration_is_an_error():
+    """Одит 2026-07-23: беше само предупреждение, тоест график с duration=-3
+    получаваше valid=True.  Отрицателна продължителност е невъзможна, не
+    спорна — трябва да е твърда грешка."""
+    result = _v([_task("T1", "Задача", start=1, duration=-3, end=1)])
+    assert result["valid"] is False
+    assert any("отрицателна продължителност" in e for e in result["errors"])
+
+
+def test_non_numeric_duration_is_an_error_not_a_crash():
+    """Низ в duration сваляше валидатора с TypeError и заедно с него
+    цялото генериране."""
+    result = _v([_task("T1", "Задача", start=1, duration="пет", end=1)])
+    assert result["valid"] is False
+    assert any("невалиден тип" in e for e in result["errors"])
+
+
+def test_dict_dependency_does_not_crash_the_validator():
+    """`export_xml` поддържа този формат; валидаторът гърмеше с
+    TypeError: unhashable type: 'dict'."""
+    t1 = _task("T1", "Изкоп", start=1, duration=5, end=5)
+    t2 = _task("T2", "Полагане", start=6, duration=5, end=10)
+    t2["dependencies"] = [{"predecessor_id": "T1", "type": "SS", "lag_days": 3}]
+    result = _v([t1, t2])
+    assert result["valid"] is True
+
+
+def test_dict_dependency_to_missing_task_is_still_caught():
+    t = _task("T1", "Задача", start=1, duration=5, end=5)
+    t["dependencies"] = [{"predecessor_id": "НЯМА"}]
+    result = _v([t])
+    assert result["valid"] is False
 
 
 def test_sub_activity_without_end_day_out_of_bounds():

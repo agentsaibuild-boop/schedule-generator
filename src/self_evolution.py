@@ -5,8 +5,8 @@ Levels:
   - YELLOW: Config files (.json) — no admin code, requires confirmation
   - RED:    Code files (.py, requirements.txt) — requires admin code + confirmation
 
-Uses Anthropic Claude (claude-sonnet-4-6) for code analysis and generation.
-Git backup is created before every RED-level change.
+Uses the Anthropic controller model (see ai_router.MODEL_CONTROLLER) for code
+analysis and generation. Git backup is created before every RED-level change.
 """
 
 from __future__ import annotations
@@ -14,16 +14,55 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import secrets
 import subprocess
 import sys
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
+
+from src.ai_router import MODEL_CONTROLLER
 
 if TYPE_CHECKING:
     from src.ai_router import AIRouter
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Feature flag — ИЗКЛЮЧЕНО по подразбиране
+# ---------------------------------------------------------------------------
+# Одит 2026-07-23: това приложение приема недоверени тръжни документи, праща
+# съдържанието им към AI И позволява на AI да пише в собствения си код — в
+# същия процес, със същите ключове и същия достъп до файловата система.
+# Това е верига за отдалечено изпълнение на код, а не функция.
+#
+# Бариерите вътре (детерминистична класификация, ограничени пътища, валидиран
+# pip, git бекъп) намаляват вероятността, но не и класа риск.  Освен това
+# GREEN нивото не иска нито admin код, нито потвърждение, а четенето на
+# файлове се случва ПРЕДИ каквато и да е проверка.
+#
+# Правилното решение е изнасяне в отделен процес: предложение → изолиран
+# sandbox → статичен анализ и тестове → човешки review → PR → merge.
+# Докато това не е направено, функцията стои ИЗКЛЮЧЕНА.
+#
+# Включва се съзнателно с ENABLE_SELF_EVOLUTION=1 в .env — и НЕ бива да се
+# включва на машина, която обработва реални тръжни документи.
+def is_enabled() -> bool:
+    """Дали self-evolution е разрешен (по подразбиране: НЕ)."""
+    return os.getenv("ENABLE_SELF_EVOLUTION", "").strip().lower() in {
+        "1", "true", "yes", "да",
+    }
+
+
+DISABLED_MESSAGE = (
+    "🔒 **Самопромяната на приложението е изключена.**\n\n"
+    "Функцията позволява на AI да пише в кода на приложението — в същия "
+    "процес, който обработва тръжни документи и държи API ключовете. "
+    "Изключена е след одит на 2026-07-23.\n\n"
+    "Ако наистина ти трябва: `ENABLE_SELF_EVOLUTION=1` в `.env`, на машина "
+    "БЕЗ реални тръжни документи и без production ключове."
+)
 
 # ---------------------------------------------------------------------------
 # Change level definitions
@@ -49,6 +88,62 @@ CHANGE_LEVELS: dict[str, dict[str, Any]] = {
         "requires_confirm": True,
     },
 }
+
+# Тежест на нивата — за сравнение „не по-опасно от обявеното".
+_LEVEL_RANK: dict[str, int] = {"green": 0, "yellow": 1, "red": 2}
+
+# Име на пакет по PEP 508 + евентуален спецификатор на версия.  Всичко
+# извън този шаблон се отхвърля — иначе моделът може да подаде
+# „package --index-url http://…" или произволен git+ssh адрес.
+_SAFE_REQUIREMENT_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*"           # име
+    r"(\[[A-Za-z0-9,._-]+\])?"               # extras
+    r"\s*((==|>=|<=|~=|!=|<|>)\s*[A-Za-z0-9][A-Za-z0-9.*+!_-]*)?$"
+)
+
+
+def classify_path(rel_path: str) -> str:
+    """Определи нивото на файл ДЕТЕРМИНИСТИЧНО, по пътя и разширението.
+
+    ЗАЩО (P6): досега нивото идваше единствено от преценката на модела в
+    `analyze_request`.  Моделът, който пише промяната, сам си оценяваше и
+    опасността ѝ — и тази оценка беше единственото, което решаваше дали ще
+    се иска admin код.  План, обявен за „green", можеше да съдържа промяна
+    в `src/ai_router.py` и тя минаваше без никаква бариера.
+
+    Тук нивото се извежда от самия файл и служи за КРЪСТОСАНА ПРОВЕРКА
+    срещу обявеното от модела.
+
+    Args:
+        rel_path: Път спрямо корена на приложението.
+
+    Returns:
+        'green' | 'yellow' | 'red'.  При съмнение — 'red'.
+    """
+    path = PurePosixPath(str(rel_path).replace("\\", "/"))
+    parts = path.parts
+    suffix = path.suffix.lower()
+
+    if suffix == ".md" and parts and parts[0] == "knowledge":
+        return "green"
+    if suffix == ".json" and parts and parts[0] == "config":
+        return "yellow"
+    return "red"
+
+
+def max_level(rel_paths: list[str]) -> str:
+    """Най-високото ниво сред подадените файлове ('green', ако няма файлове)."""
+    level = "green"
+    for rel_path in rel_paths:
+        candidate = classify_path(rel_path)
+        if _LEVEL_RANK[candidate] > _LEVEL_RANK[level]:
+            level = candidate
+    return level
+
+
+def is_safe_requirement(spec: str) -> bool:
+    """Дали редът е безобиден requirement (име + евентуална версия)."""
+    return bool(_SAFE_REQUIREMENT_RE.match(spec.strip()))
 
 # ---------------------------------------------------------------------------
 # Prompt templates
@@ -170,6 +265,12 @@ class SelfEvolution:
         Returns:
             Parsed dict with level, description, affected_files, risks, etc.
         """
+        if not is_enabled():
+            logger.warning("Self-evolution е изключен — %s отказан.", "analyze_request")
+            return {"level": "red", "description": DISABLED_MESSAGE,
+                    "affected_files": [], "risks": ["функцията е изключена"],
+                    "error": "disabled"}
+
         file_tree = self._get_file_tree()
         prompt = ANALYZE_REQUEST_PROMPT.format(
             user_request=user_request,
@@ -179,14 +280,14 @@ class SelfEvolution:
         try:
             client = self.router.get_anthropic_client()
             response = client.messages.create(
-                model="claude-sonnet-4-6",
+                model=MODEL_CONTROLLER,
                 max_tokens=2048,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
             )
             raw = response.content[0].text if response.content else "{}"
             self.router.log_usage(
-                "claude-sonnet-4-6",
+                MODEL_CONTROLLER,
                 response.usage.input_tokens,
                 response.usage.output_tokens,
                 "evolution_analyze",
@@ -217,10 +318,28 @@ class SelfEvolution:
         Returns:
             Parsed dict with changes list, new_requirements, test_instructions.
         """
+        if not is_enabled():
+            logger.warning("Self-evolution е изключен — %s отказан.", "generate_changes")
+            return {"changes": [], "new_requirements": [], "test_instructions": "",
+                    "error": "disabled"}
+
         # Read current contents of affected files
         file_contents_parts: list[str] = []
         for af in plan.get("affected_files", []):
-            fpath = Path(self.app_root) / af["path"]
+            # Одит 2026-07-23: тук пътят се ползваше СУРОВ, докато
+            # `resolve_safe_path` пазеше само записа.  Абсолютен път в плана
+            # (който идва от модел) прочиташе произволен файл — включително
+            # `.env` — и съдържанието му отиваше в промпта към Anthropic.
+            # Тоест пробойна за изнасяне на ключове, не само за запис.
+            try:
+                fpath = self.resolve_safe_path(af.get("path", ""))
+            except ValueError as exc:
+                logger.error("Отказано четене при self-evolution: %s", exc)
+                file_contents_parts.append(
+                    f"--- {af.get('path')} --- (отказан път: {exc})\n"
+                )
+                continue
+
             if fpath.exists() and fpath.is_file():
                 try:
                     content = fpath.read_text(encoding="utf-8")
@@ -246,14 +365,14 @@ class SelfEvolution:
         try:
             client = self.router.get_anthropic_client()
             response = client.messages.create(
-                model="claude-sonnet-4-6",
+                model=MODEL_CONTROLLER,
                 max_tokens=8192,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
             )
             raw = response.content[0].text if response.content else "{}"
             self.router.log_usage(
-                "claude-sonnet-4-6",
+                MODEL_CONTROLLER,
                 response.usage.input_tokens,
                 response.usage.output_tokens,
                 "evolution_generate",
@@ -344,7 +463,10 @@ class SelfEvolution:
         if not self.admin_code:
             logger.warning("ADMIN_CODE is not set in .env — all admin checks will fail")
             return False
-        return input_code == self.admin_code
+        # Постоянно време: обикновеното `==` спира при първата различна буква
+        # и позволява кодът да се отгатне символ по символ по времето за
+        # отговор.  Никога не логвай нито въведения, нито очаквания код.
+        return secrets.compare_digest(str(input_code), str(self.admin_code))
 
     # ------------------------------------------------------------------
     # Git backup
@@ -359,6 +481,8 @@ class SelfEvolution:
         Returns:
             Dict with success, commit_hash, timestamp.
         """
+        if not is_enabled():
+            return {"success": False, "error": "Самопромяната е изключена."}
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         message = f"backup: преди self-evolution промяна — {description}" if description else "backup: преди self-evolution промяна"
 
@@ -413,24 +537,125 @@ class SelfEvolution:
     # Apply changes
     # ------------------------------------------------------------------
 
-    def apply_changes(self, changes: dict[str, Any]) -> dict[str, Any]:
+    def resolve_safe_path(self, rel_path: str) -> Path:
+        """Преобразувай път спрямо корена и се убеди, че НЕ излиза от него.
+
+        ЗАЩО (P6): `Path(app_root) / rel_path` изглежда безобидно, но ако
+        `rel_path` е АБСОЛЮТЕН, Python изхвърля основата — `Path("/app") /
+        "/etc/passwd"` дава `/etc/passwd`.  Комбинирано с `..` това е
+        произволен запис по файловата система с текста, който моделът е
+        генерирал.
+
+        Raises:
+            ValueError: ако пътят е празен, абсолютен или излиза от корена.
+        """
+        raw = str(rel_path or "").strip()
+        if not raw:
+            raise ValueError("празен път")
+
+        candidate = Path(raw.replace("\\", "/"))
+        if candidate.is_absolute() or (len(raw) > 1 and raw[1] == ":"):
+            raise ValueError(f"абсолютен път не е разрешен: {raw}")
+
+        root = Path(self.app_root).resolve()
+        target = (root / candidate).resolve()
+
+        if target != root and root not in target.parents:
+            raise ValueError(f"пътят излиза извън приложението: {raw}")
+
+        return target
+
+    def check_changes_against_level(
+        self, changes: dict[str, Any], declared_level: str
+    ) -> list[str]:
+        """Сверѝ кои файлове се пипат срещу обявеното ниво.
+
+        Моделът обявява нивото; тук проверяваме дали то отговаря на
+        РЕАЛНИТЕ файлове.  Несъответствие = отказ, не предупреждение.
+
+        Args:
+            changes: Резултатът от `generate_changes()`.
+            declared_level: Нивото от плана ('green'/'yellow'/'red').
+
+        Returns:
+            Списък с нарушения (празен = всичко е наред).
+        """
+        declared_rank = _LEVEL_RANK.get(declared_level, _LEVEL_RANK["red"])
+        violations: list[str] = []
+
+        for change in changes.get("changes", []):
+            rel_path = change.get("file_path", "")
+            actual = classify_path(rel_path)
+            if _LEVEL_RANK[actual] > declared_rank:
+                violations.append(
+                    f"{rel_path} е ниво '{actual}', а планът е обявен като "
+                    f"'{declared_level}'"
+                )
+
+        if changes.get("new_requirements") and declared_rank < _LEVEL_RANK["red"]:
+            violations.append(
+                "промяна в зависимостите (requirements) е ниво 'red', "
+                f"а планът е обявен като '{declared_level}'"
+            )
+
+        return violations
+
+    def apply_changes(
+        self, changes: dict[str, Any], declared_level: str = "red"
+    ) -> dict[str, Any]:
         """Apply generated changes to the filesystem.
 
         Args:
             changes: The changes dict from generate_changes().
+            declared_level: Нивото, обявено от плана.  Всеки файл се сверява
+                срещу него — план „green", който пипа `.py`, се отказва.
 
         Returns:
             Dict with applied count, failed count, errors, details.
         """
+        if not is_enabled():
+            logger.error("Self-evolution е изключен — apply_changes ОТКАЗАН.")
+            return {"applied": 0, "failed": 1, "blocked": True, "details": [],
+                    "errors": ["Самопромяната е изключена (ENABLE_SELF_EVOLUTION)."]}
         results: list[dict[str, Any]] = []
         applied = 0
         failed = 0
         errors: list[str] = []
 
+        # Бариера 1: обявеното ниво трябва да покрива реалните файлове.
+        violations = self.check_changes_against_level(changes, declared_level)
+        if violations:
+            logger.error(
+                "Self-evolution отказан — нивото не отговаря на файловете: %s",
+                "; ".join(violations),
+            )
+            return {
+                "applied": 0,
+                "failed": len(violations),
+                "errors": [
+                    "Промяната е отказана: обявеното ниво не отговаря на "
+                    "засегнатите файлове."
+                ] + violations,
+                "details": [],
+                "blocked": True,
+            }
+
         for change in changes.get("changes", []):
             action = change.get("action", "modify")
             rel_path = change.get("file_path", "")
-            abs_path = Path(self.app_root) / rel_path
+
+            # Бариера 2: пътят трябва да остане вътре в приложението.
+            try:
+                abs_path = self.resolve_safe_path(rel_path)
+            except ValueError as exc:
+                logger.error("Отказан път при self-evolution: %s", exc)
+                errors.append(f"Отказан път {rel_path!r}: {exc}")
+                results.append({
+                    "file": rel_path, "action": action,
+                    "status": "blocked", "error": str(exc),
+                })
+                failed += 1
+                continue
 
             try:
                 if action == "create":
@@ -485,6 +710,21 @@ class SelfEvolution:
         # Handle new requirements
         new_reqs = changes.get("new_requirements", [])
         if new_reqs:
+            # Бариера 3: имената на пакетите идват от модел — приемат се само
+            # чисти PEP 508 спецификации.  Без това „пакет --index-url http://…"
+            # или „git+ssh://…" стигат директно до pip.
+            unsafe = [r for r in new_reqs if not is_safe_requirement(str(r))]
+            if unsafe:
+                logger.error("Отказани requirements: %s", unsafe)
+                errors.append(
+                    "Отказани пакети (недопустим формат): " + ", ".join(map(str, unsafe))
+                )
+                # Брои се като провал, за да го види извикващият: той решава
+                # дали да върне промяната по `failed`, не по `errors`.
+                failed += len(unsafe)
+                new_reqs = []
+
+        if new_reqs:
             req_path = Path(self.app_root) / "requirements.txt"
             try:
                 existing = req_path.read_text(encoding="utf-8") if req_path.exists() else ""
@@ -494,9 +734,10 @@ class SelfEvolution:
                         existing += f"\n{req}"
                 req_path.write_text(existing.strip() + "\n", encoding="utf-8")
 
-                # Install new requirements
+                # Install new requirements.  `--` спира разчитането на флагове,
+                # за да не може име на пакет да се представи за опция на pip.
                 pip_result = subprocess.run(
-                    [sys.executable, "-m", "pip", "install"] + new_reqs,
+                    [sys.executable, "-m", "pip", "install", "--"] + list(new_reqs),
                     cwd=self.app_root,
                     capture_output=True,
                     text=True,

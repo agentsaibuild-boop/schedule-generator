@@ -104,52 +104,54 @@ def test_nested_json_object_extracted_correctly():
 # Невалиден вход — fallback error dict
 # ---------------------------------------------------------------------------
 
-def test_completely_invalid_json_returns_fallback():
-    """Non-JSON text returns the standard fallback error dict."""
-    raw = "Не мога да отговоря на тази заявка."
-    result = _parse(raw)
-    assert result.get("approved") is False
-    assert "issues" in result
-    assert len(result["issues"]) > 0
+# P7 (2026-07-22): при провал вече се връща ПРАЗЕН dict, не измислен
+# резултат от верификация.  Старото поведение връщаше
+# {"approved": False, "issues": ["Invalid JSON response from AI"]} — което
+# верификацията четеше като „графикът има проблеми" и задействаше корекционни
+# цикли за несъществуващ дефект, а извикващите за класификация на файлове и
+# разпознаване на намерение получаваха напълно чужди полета.
+
+def test_completely_invalid_json_returns_empty():
+    """Non-JSON text returns {} — не измислена верификация."""
+    result = _parse("Не мога да отговоря на тази заявка.")
+    assert result == {}
 
 
-def test_empty_string_returns_fallback():
-    """Empty string returns the standard fallback error dict."""
-    result = _parse("")
-    assert result.get("approved") is False
-    assert "issues" in result
+def test_empty_string_returns_empty():
+    assert _parse("") == {}
 
 
-def test_only_whitespace_returns_fallback():
-    """String of only whitespace returns the standard fallback error dict."""
-    result = _parse("   \n\t  ")
-    assert result.get("approved") is False
+def test_only_whitespace_returns_empty():
+    assert _parse("   \n\t  ") == {}
 
 
-def test_partial_json_no_closing_brace_returns_fallback():
-    """Truncated JSON without closing brace returns fallback."""
-    raw = '{"approved": true, "issues": ['
-    result = _parse(raw)
-    # Can't be parsed — fallback
-    assert result.get("approved") is False
-    assert "issues" in result
+def test_partial_json_no_closing_brace_returns_empty():
+    """Отрязан JSON не бива да се представя за отговор."""
+    assert _parse('{"approved": true, "issues": [') == {}
+
+
+def test_failure_is_not_mistakable_for_a_rejection():
+    """Регресия за P7: провалът не бива да прилича на 'approved: False'."""
+    result = _parse("моделът се обърка")
+    assert "approved" not in result
+    assert "issues" not in result
 
 
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
 
-def test_json_array_parsed_as_list():
-    """A bare JSON array is valid JSON — json.loads parses it as a list.
+def test_bare_json_array_returns_empty_dict():
+    """Масив на най-горно ниво вече дава {}, не list.
 
-    The function does not restrict return type to dict, so callers should
-    guard against list returns when the AI unexpectedly wraps output in [].
+    ВСИЧКИ извикващи правят `.get()` върху резултата (classify_files,
+    _detect_intent_ai, analyze_request).  Връщането на list им даваше
+    AttributeError — това беше латентен срив, не функция.  Празният dict
+    ги оставя с празни стойности по подразбиране.
     """
-    raw = '[{"task": 1}, {"task": 2}]'
-    result = _parse(raw)
-    # json.loads succeeds → list is returned (not the fallback dict)
-    assert isinstance(result, list)
-    assert result[0]["task"] == 1
+    result = _parse('[{"task": 1}, {"task": 2}]')
+    assert result == {}
+    assert result.get("anything") is None   # callers survive
 
 
 def test_multiple_json_objects_takes_outermost():
@@ -172,11 +174,12 @@ if __name__ == "__main__":
         test_json_embedded_in_explanation,
         test_json_embedded_after_newline,
         test_nested_json_object_extracted_correctly,
-        test_completely_invalid_json_returns_fallback,
-        test_empty_string_returns_fallback,
-        test_only_whitespace_returns_fallback,
-        test_partial_json_no_closing_brace_returns_fallback,
-        test_json_array_parsed_as_list,
+        test_completely_invalid_json_returns_empty,
+        test_empty_string_returns_empty,
+        test_only_whitespace_returns_empty,
+        test_partial_json_no_closing_brace_returns_empty,
+        test_failure_is_not_mistakable_for_a_rejection,
+        test_bare_json_array_returns_empty_dict,
         test_multiple_json_objects_takes_outermost,
     ]
     passed = 0

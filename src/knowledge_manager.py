@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,6 +18,129 @@ if TYPE_CHECKING:
     from src.ai_router import AIRouter
 
 logger = logging.getLogger(__name__)
+
+# Колко знака уроци се събират в един промпт.  Под този таван влизат ВСИЧКИ
+# уроци — при ~45 урока извличането е излишно усложнение.  Над него се
+# подрежда по релевантност, за да не расте промптът безкрайно (P3).
+_LESSONS_CHAR_BUDGET = 14000
+
+# Дължина на префикса, по който се сравняват думи.  Българският е силно
+# флектиран — „дезинфекция/дезинфекцията/дезинфекциите" трябва да съвпадат,
+# без да влачим морфологичен анализатор.
+_STEM_LEN = 5
+_MIN_TOKEN_LEN = 3
+
+# Думи без различаваща сила — изхвърлят се от заявката и от индекса.
+_STOPWORDS = frozenset({
+    "the", "and", "for", "with",
+    "или", "като", "него", "нея", "тях", "този", "тази", "това", "тези",
+    "който", "която", "което", "които", "при", "след", "преди", "върху",
+    "между", "над", "под", "без", "със", "все", "още", "само", "също",
+    "може", "трябва", "има", "няма", "бъде", "били", "беше", "став",
+    "ако", "защото", "затова", "така", "тогава", "много", "малко",
+    "проект", "проекта", "проекти", "дейност", "дейности",
+})
+
+_LESSON_NUM_RE = re.compile(r"#(\d+)")
+_WORD_RE = re.compile(r"[\wА-Яа-яЁё]+", re.UNICODE)
+
+
+def _parse_lesson_number(title: str) -> int:
+    """Извлечи номера на урока от заглавието (0, ако липсва)."""
+    match = _LESSON_NUM_RE.search(title)
+    return int(match.group(1)) if match else 0
+
+
+def _tokenize(text: str) -> list[str]:
+    """Разбий текст на нормализирани основи за лексикално сравнение."""
+    tokens = []
+    for raw in _WORD_RE.findall(text.lower()):
+        if len(raw) < _MIN_TOKEN_LEN or raw in _STOPWORDS:
+            continue
+        tokens.append(raw[:_STEM_LEN])
+    return tokens
+
+
+def rank_lessons(blocks: list[dict], query: str) -> list[tuple[float, dict]]:
+    """Подреди уроци по лексикална близост до заявката (TF-IDF, насищащ TF).
+
+    Умишлено БЕЗ embeddings: корпусът е десетки кратки текста на български,
+    лексикалното съвпадение се справя, а резултатът остава детерминистичен,
+    тестваем и без мрежова заявка при всяко генериране.
+
+    Args:
+        blocks: Уроци от `get_lesson_blocks()`.
+        query: Свободен текст — тип проект, анализ, съдържание на документи.
+
+    Returns:
+        Списък от (резултат, урок), най-релевантните първи.  При празна
+        заявка всички получават резултат 0.0 и редът се запазва.
+    """
+    if not blocks:
+        return []
+
+    query_stems = set(_tokenize(query))
+    if not query_stems:
+        return [(0.0, block) for block in blocks]
+
+    doc_tokens = [_tokenize(block.get("text", "")) for block in blocks]
+
+    # Документна честота за всяка основа.
+    doc_freq: dict[str, int] = {}
+    for tokens in doc_tokens:
+        for stem in set(tokens):
+            doc_freq[stem] = doc_freq.get(stem, 0) + 1
+
+    total = len(blocks)
+    scored: list[tuple[float, dict]] = []
+
+    for block, tokens in zip(blocks, doc_tokens):
+        counts: dict[str, int] = {}
+        for stem in tokens:
+            counts[stem] = counts.get(stem, 0) + 1
+
+        score = 0.0
+        for stem in query_stems:
+            tf = counts.get(stem, 0)
+            if not tf:
+                continue
+            idf = math.log(1 + total / doc_freq.get(stem, 1))
+            # Насищане: десетото повторение не тежи колкото първото.
+            score += idf * (tf / (tf + 1.5))
+        scored.append((score, block))
+
+    # Стабилно подреждане: при равен резултат печели по-новият урок.
+    scored.sort(key=lambda pair: (-pair[0], -pair[1].get("number", 0)))
+    return scored
+
+
+def select_lessons(
+    blocks: list[dict], query: str = "", char_budget: int = _LESSONS_CHAR_BUDGET
+) -> list[dict]:
+    """Избери уроците, които влизат в промпта, в рамките на бюджет знаци.
+
+    Ако всички се събират — влизат всички (в реда от файла).  Ако не се
+    събират, подрежда по релевантност и взима най-подходящите, после ги
+    връща отново в реда от файла, за да е четим промптът.
+    """
+    if not blocks:
+        return []
+
+    total_chars = sum(len(b.get("text", "")) for b in blocks)
+    if total_chars <= char_budget:
+        return list(blocks)
+
+    chosen: list[dict] = []
+    used = 0
+    for _score, block in rank_lessons(blocks, query):
+        size = len(block.get("text", ""))
+        if used + size > char_budget:
+            continue
+        chosen.append(block)
+        used += size
+
+    chosen.sort(key=lambda b: b.get("number", 0))
+    return chosen
 
 
 class KnowledgeManager:
@@ -81,10 +206,14 @@ class KnowledgeManager:
     # ------------------------------------------------------------------
 
     def get_lessons(self) -> list[str]:
-        """Read all learned lessons from lessons_learned.md.
+        """Read all lesson TITLES from lessons_learned.md.
+
+        Внимание: връща само заглавните редове — за броене и за списъци в UI.
+        За промптове ползвай `get_lesson_blocks()`, което носи и тялото на
+        урока (там са числата и причините).
 
         Returns:
-            List of lesson strings.
+            List of lesson title strings.
         """
         filepath = self.lessons_path / "lessons_learned.md"
         content = self._read_cached(filepath)
@@ -97,6 +226,68 @@ class KnowledgeManager:
             if stripped.startswith("**#"):
                 lessons.append(stripped)
         return lessons
+
+    def get_lesson_blocks(self) -> list[dict]:
+        """Read lessons as FULL blocks — заглавие + тяло + раздел.
+
+        ЗАЩО (P3 от REVISION_2026-07.md): досега в промпта влизаха само
+        заглавията, и то последните 20 по ред във файла.  Тоест генераторът
+        получаваше „#26 PowerShell -STA флаг" и „#27 pre-commit hook", а
+        губеше #09–#17 — дезинфекция per section, теренни фактори, CI vs PE.
+        Знанието за домейна отпадаше, а бележките за разработчика оставаха.
+
+        Returns:
+            Списък от {number, title, body, section, text}, подреден по
+            реда във файла.  `text` е заглавие + тяло (за търсене).
+        """
+        filepath = self.lessons_path / "lessons_learned.md"
+        content = self._read_cached(filepath)
+        if not content:
+            return []
+
+        blocks: list[dict] = []
+        section = ""
+        current: dict | None = None
+
+        for line in content.split("\n"):
+            stripped = line.strip()
+
+            if stripped.startswith("## "):
+                heading = stripped[3:].strip()
+                # „Формат"/„РАЗДЕЛ А: ..." — пази само реалните раздели.
+                if heading.lower() != "формат":
+                    section = heading
+                continue
+
+            if stripped.startswith("**#"):
+                if current:
+                    blocks.append(current)
+                title = stripped.strip("*").strip()
+                number = _parse_lesson_number(title)
+                current = {
+                    "number": number,
+                    "title": title,
+                    "body": "",
+                    "section": section,
+                    "lines": [],
+                }
+                continue
+
+            if current is not None:
+                if stripped == "---":
+                    blocks.append(current)
+                    current = None
+                elif stripped:
+                    current["lines"].append(stripped)
+
+        if current:
+            blocks.append(current)
+
+        for block in blocks:
+            block["body"] = "\n".join(block.pop("lines")).strip()
+            block["text"] = f"{block['title']}\n{block['body']}".strip()
+
+        return blocks
 
     def add_lesson(self, lesson: str) -> None:
         """Add a new lesson to the pending lessons file.
@@ -300,26 +491,31 @@ class KnowledgeManager:
     # Multi-level system prompt builders
     # ------------------------------------------------------------------
 
-    def build_system_prompt(self, project_type: str | None = None) -> str:
+    def build_system_prompt(
+        self, project_type: str | None = None, query: str = ""
+    ) -> str:
         """Build a FULL system prompt combining all knowledge tiers.
 
-        Includes: SKILL.md + references + methodology + last 20 lessons + productivities.
-        ~5000-8000 tokens. Use for schedule generation and document analysis.
+        Includes: SKILL.md + references + methodology + relevant lessons
+        (пълни, не само заглавия) + productivities.  ~5000-8000 tokens.
 
         Args:
             project_type: Optional project type to include specific methodology.
+            query: Свободен текст (анализ, съдържание на документи), по който
+                се подбират най-релевантните уроци, ако всички не се събират.
 
         Returns:
             Combined system prompt string for AI.
         """
         return self.get_all_knowledge_for_prompt(
-            project_type=project_type, level="full"
+            project_type=project_type, level="full", query=query
         )
 
     def get_all_knowledge_for_prompt(
         self,
         project_type: str | None = None,
         level: str = "full",
+        query: str = "",
     ) -> str:
         """Collect all knowledge into a single text for system prompt.
 
@@ -327,8 +523,10 @@ class KnowledgeManager:
             project_type: Optional project type for methodology inclusion.
             level: One of 'minimal', 'full', 'verification'.
                 - minimal: Core rules + productivities (~1500-2000 tokens)
-                - full: SKILL.md + methodology + 20 lessons + productivities + workflow (~5000-8000 tokens)
+                - full: SKILL.md + methodology + relevant lessons + productivities
+                  + workflow (~5000-8000 tokens)
                 - verification: Everything including ALL lessons (~8000-12000 tokens)
+            query: Текст за подбор на уроци по релевантност (level='full').
 
         Returns:
             Combined knowledge text.
@@ -338,7 +536,25 @@ class KnowledgeManager:
         elif level == "verification":
             return self._build_verification_knowledge(project_type)
         else:
-            return self._build_full_prompt(project_type)
+            return self._build_full_prompt(project_type, query=query)
+
+    def _lessons_section(self, query: str) -> list[str]:
+        """Изгради секцията с уроци за промпта (пълни блокове, подбрани)."""
+        blocks = self.get_lesson_blocks()
+        if not blocks:
+            return []
+
+        selected = select_lessons(blocks, query)
+        parts = ["\n=== LESSONS LEARNED ==="]
+        if len(selected) < len(blocks):
+            parts.append(
+                f"Total lessons: {len(blocks)} "
+                f"(показани {len(selected)} най-релевантни)"
+            )
+        else:
+            parts.append(f"Total lessons: {len(blocks)}")
+        parts.extend(block["text"] for block in selected)
+        return parts
 
     def _build_minimal_prompt(self) -> str:
         """Build minimal knowledge prompt for lightweight tasks (OCR, simple questions).
@@ -358,7 +574,9 @@ class KnowledgeManager:
             "- Water supply BEFORE sewage; Sewage BOTTOM-UP",
             "- Disinfection: 2d (DN90-110 short), 4d (mixed/DN500), 6d (DN300 CI)",
             "- Testing: 2 days (strength + pressure drop)",
-            "- days = ceil(length_m / productivity_rate)",
+            "- Durations are computed deterministically by the system from "
+            "config/productivities.json — do NOT calculate them yourself; "
+            "supply length_m, dn, material and method instead",
             "- Rolling Wave: Water -> Sewage -> Roads with 10-12d LAG",
         ]
 
@@ -370,11 +588,13 @@ class KnowledgeManager:
 
         return "\n".join(parts)
 
-    def _build_full_prompt(self, project_type: str | None = None) -> str:
+    def _build_full_prompt(
+        self, project_type: str | None = None, query: str = ""
+    ) -> str:
         """Build full knowledge prompt for generation and analysis tasks.
 
-        Includes: SKILL.md + methodology + last 20 lessons + productivities + workflow rules.
-        ~5000-8000 tokens.
+        Includes: SKILL.md + methodology + relevant lessons (пълни блокове)
+        + productivities + workflow rules.  ~5000-8000 tokens.
         """
         parts = []
 
@@ -399,14 +619,8 @@ class KnowledgeManager:
             parts.append(f"\n=== METHODOLOGY ({project_type}) ===")
             parts.append(methodology)
 
-        # Tier 3: Lessons learned (last 20)
-        lessons = self.get_lessons()
-        if lessons:
-            parts.append("\n=== LESSONS LEARNED ===")
-            parts.append(f"Total lessons: {len(lessons)}")
-            recent = lessons[-20:]
-            for lesson in recent:
-                parts.append(lesson)
+        # Tier 3: Lessons learned — пълни блокове, подбрани по релевантност
+        parts.extend(self._lessons_section(f"{project_type or ''} {query}"))
 
         # Tier 4: Productivities
         prod = self.get_productivities()
@@ -451,13 +665,13 @@ class KnowledgeManager:
             parts.append(f"\n=== METHODOLOGY ({project_type}) ===")
             parts.append(methodology)
 
-        # ALL lessons (not just last 20)
-        lessons = self.get_lessons()
-        if lessons:
+        # ALL lessons — с телата им, не само заглавията
+        blocks = self.get_lesson_blocks()
+        if blocks:
             parts.append("\n=== ALL LESSONS LEARNED ===")
-            parts.append(f"Total lessons: {len(lessons)}")
-            for lesson in lessons:
-                parts.append(lesson)
+            parts.append(f"Total lessons: {len(blocks)}")
+            for block in blocks:
+                parts.append(block["text"])
 
         # Productivities
         prod = self.get_productivities()

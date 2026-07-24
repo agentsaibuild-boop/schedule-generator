@@ -13,6 +13,7 @@ import csv
 import io
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -25,6 +26,11 @@ SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".csv", ".json", ".txt", ".docx
 
 # Minimum average characters per page to consider a PDF "text-based"
 _MIN_CHARS_PER_PAGE = 50
+# Под този брой знаци страницата няма годен текстов слой.
+_THIN_TEXT_CHARS = 10
+# Дял от площта на страницата, покрит с изображения, над който я третираме
+# като сканирана — тогава решава vision, а не броят знаци (P1).
+_SCANNED_IMAGE_COVERAGE = 0.5
 
 APP_VERSION = "0.1"
 
@@ -79,6 +85,91 @@ class FileManager:
     # ------------------------------------------------------------------
     # File listing helpers
     # ------------------------------------------------------------------
+
+    @classmethod
+    def looks_like_boq(cls, text: str) -> dict:
+        """Дали текстът е количествена сметка — по СЪДЪРЖАНИЕ, не по име.
+
+        Две независими улики, за да не се хване всеки документ, споменал „м3":
+          1. заглавия на колони, които вървят заедно само в КСС;
+          2. достатъчно на брой редове с мерна единица.
+
+        Args:
+            text: Извлеченият текст на документа.
+
+        Returns:
+            {is_boq, confidence, evidence} — `evidence` казва КОЕ го е решило,
+            за да може човек да провери преценката, а не да я приема наум.
+        """
+        if not text or len(text) < 100:
+            return {"is_boq": False, "confidence": 0.0, "evidence": []}
+
+        lowered = text.lower()
+        evidence: list[str] = []
+        score = 0.0
+
+        for markers in cls._BOQ_COLUMN_MARKERS:
+            if all(marker in lowered for marker in markers):
+                evidence.append("колони: " + " + ".join(sorted(markers)))
+                score += 0.6
+                break
+
+        # Броим РЕДОВЕ с мерна единица, не позиции в знаци.  Групирането по
+        # 200-знакови блокове недоброяваше сбити таблици — при 6 реда даваше 2.
+        unit_rows = sum(
+            1 for line in text.splitlines() if cls._BOQ_UNIT_RE.search(line)
+        )
+        if unit_rows >= cls._BOQ_MIN_UNIT_ROWS:
+            evidence.append(f"{unit_rows} реда с мерна единица")
+            score += 0.4
+        elif unit_rows:
+            evidence.append(f"само {unit_rows} реда с мерна единица")
+
+        confidence = min(score, 1.0)
+        return {
+            "is_boq": confidence >= 0.6,
+            "confidence": round(confidence, 2),
+            "evidence": evidence,
+        }
+
+    def find_boq_by_content(self) -> dict:
+        """Потърси количествена сметка сред ВЕЧЕ КОНВЕРТИРАНИТЕ документи.
+
+        Ползва се, когато по имена не е намерен задължителен файл.  Работи
+        върху `converted/`, тоест изисква конверсията да е минала.
+
+        Returns:
+            {found: [имена], details: {име: {confidence, evidence}}}
+        """
+        found: list[str] = []
+        details: dict[str, dict] = {}
+
+        if self.base_path is None:
+            return {"found": found, "details": details}
+
+        converted_dir = self.base_path / "converted"
+        if not converted_dir.exists():
+            return {"found": found, "details": details}
+
+        for jf in sorted(converted_dir.glob("*.json")):
+            if jf.name == "_manifest.json":
+                continue
+            try:
+                data = json.loads(jf.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+
+            source = data.get("source_file", jf.stem)
+            verdict = self.looks_like_boq(data.get("full_text", ""))
+            details[source] = verdict
+            if verdict["is_boq"]:
+                found.append(source)
+                logger.info(
+                    "Количествена сметка разпозната по СЪДЪРЖАНИЕ: %s (%s)",
+                    source, "; ".join(verdict["evidence"]),
+                )
+
+        return {"found": found, "details": details}
 
     def _list_supported_files(self) -> list[Path]:
         """List supported files in project dir (full recursive scan).
@@ -281,6 +372,33 @@ class FileManager:
     _REQUIRED_KEYWORDS: frozenset[str] = frozenset({
         "ксс", "кс ", "количествен", "сметка", "bill", "boq",
     })
+
+    # Маркери на количествена таблица В СЪДЪРЖАНИЕТО на документа.
+    #
+    # BACKLOG т.1: класификацията решаваше само по ИМЕТО на файла.  Файл
+    # „Техническо предложение.pdf" с таблицата с количества вътре се
+    # отхвърляше като незадължителен и генерирането се блокираше — при
+    # налични количества.  В българската практика количествата често са
+    # приложение към предложението или целият пакет е един PDF.
+    #
+    # Търсят се заглавия на колони, които се срещат заедно САМО в
+    # количествена сметка.
+    _BOQ_COLUMN_MARKERS: tuple[frozenset[str], ...] = (
+        frozenset({"мярка", "количество"}),
+        frozenset({"ед. мярка", "количество"}),
+        frozenset({"мярка", "к-во"}),
+        frozenset({"unit", "quantity"}),
+        frozenset({"наименование", "мярка", "количество"}),
+    )
+
+    # Мерни единици, характерни за строителна количествена сметка.
+    _BOQ_UNIT_RE = re.compile(
+        r"(?:^|[\s|;,\t])(м\s*[23]?|m\s*[23]?|бр\.?|кг|т|л\.?м\.?)(?=[\s|;,\t]|$)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    # Колко различни реда с мерна единица правят документа количествена сметка.
+    _BOQ_MIN_UNIT_ROWS = 5
 
     # Keywords that indicate useful-but-optional supporting documents
     _USEFUL_KEYWORDS: frozenset[str] = frozenset({
@@ -581,33 +699,53 @@ class FileManager:
     ) -> dict:
         """Convert a PDF file to structured JSON.
 
-        Strategy (optimized for speed and cost):
+        Strategy (optimized for speed and cost) — решението е ЗА ВСЯКА
+        СТРАНИЦА поотделно, не по средно аритметично на документа:
         1. Extract text with PyMuPDF/fitz (best quality, local, free)
-        2. If good text (>=50 avg chars/page) -> use directly
-        3. If partial text (10-49 avg chars/page) -> send to DeepSeek
-           for reformatting (cheap text task, no vision needed)
-        4. If no text (<10 avg chars/page) -> truly scanned -> OCR via
-           DeepSeek vision (last resort, expensive)
+        2. Класифицирай всяка страница (`_classify_pdf_pages`)
+        3. Сканираните страници -> OCR САМО тях, останалите вървят с fitz текста
+        4. Ако няма сканирани, но текстът е рядък -> reformat през DeepSeek
+        5. Иначе -> директно fitz текста
+
+        ЗАЩО не средно аритметично (поправено 2026-07-22): документ с 27
+        текстови страници и 3 сканирани чертежа дава високо средно и трите
+        чертежа минаваха като празни — тиха загуба на данни.  Обратно,
+        сканирана страница с тънък текстов слой (10-49 знака от печат или
+        колонтитул) попадаше в „reformat", където vision изобщо не се вика,
+        и AI-ят преформатираше боклук в убедително изглеждащ боклук.
         """
         import fitz  # PyMuPDF — much better than PyPDF2
 
         doc = fitz.open(filepath)
-        pages_text: list[dict] = []
-        total_chars = 0
-
-        for i, page in enumerate(doc):
-            text = page.get_text().strip()
-            total_chars += len(text)
-            pages_text.append({"page": i + 1, "text": text})
-
+        page_info = self._classify_pdf_pages(doc)
         num_pages = len(doc) or 1
-        avg_chars = total_chars / num_pages
         doc.close()
+
+        pages_text = [{"page": p["page"], "text": p["text"]} for p in page_info]
+        total_chars = sum(p["chars"] for p in page_info)
+        avg_chars = total_chars / num_pages
+        scanned = [p for p in page_info if p["kind"] == "scanned"]
+        thin = [p for p in page_info if p["kind"] == "thin"]
 
         source_name = Path(filepath).name
 
-        # --- GOOD TEXT (>=50 chars/page avg) — use directly ---
-        if avg_chars >= _MIN_CHARS_PER_PAGE:
+        # --- СКАНИРАНИ СТРАНИЦИ — OCR само тях, останалите остават с fitz ---
+        if scanned and ai_processor is not None and hasattr(ai_processor, "ocr_pdf"):
+            merged = self._ocr_scanned_pages(
+                filepath, source_name, pages_text, scanned, num_pages, ai_processor
+            )
+            if merged is not None:
+                return merged
+
+        if scanned:
+            # Няма API за OCR — не се преструвай, че документът е прочетен.
+            logger.warning(
+                "%s: %d сканирани страници останаха без OCR (няма AI processor).",
+                source_name, len(scanned),
+            )
+
+        # --- ВСИЧКИ СТРАНИЦИ С ТЕКСТ — използвай директно ---
+        if not scanned and not thin:
             full_text = "\n\n".join(p["text"] for p in pages_text if p["text"])
             data = {
                 "source_file": source_name,
@@ -625,8 +763,8 @@ class FileManager:
                 "pages_or_rows": num_pages,
             }
 
-        # --- PARTIAL TEXT (10-49 chars/page) — reformat via DeepSeek ---
-        if avg_chars >= 10:
+        # --- РЯДЪК ТЕКСТ без сканирани страници — reformat през DeepSeek ---
+        if not scanned:
             raw_text = "\n\n".join(p["text"] for p in pages_text if p["text"])
 
             if ai_processor is not None and hasattr(ai_processor, "reformat_text"):
@@ -668,41 +806,171 @@ class FileManager:
                 "pages_or_rows": num_pages,
             }
 
-        # --- NO TEXT (<10 chars/page) — truly scanned, try OCR ---
-        if ai_processor is not None and hasattr(ai_processor, "ocr_pdf"):
-            try:
-                ocr_result = ai_processor.ocr_pdf(filepath)
-                if ocr_result.get("status") == "ok":
-                    return {
-                        "status": "ok",
-                        "data": ocr_result["data"],
-                        "method": "ocr_vision",
-                        "detail": f"OCR {num_pages} стр. (DeepSeek)",
-                        "pages_or_rows": num_pages,
-                    }
-                else:
-                    return {
-                        "status": "error",
-                        "error": ocr_result.get("error", "OCR failed"),
-                    }
-            except Exception as exc:
-                logger.exception("OCR failed for %s", source_name)
-                return {"status": "error", "error": f"OCR error: {exc}"}
-
-        # No API available — save empty placeholder
+        # --- Сканирани страници, но OCR не е бил възможен ---
+        full_text = "\n\n".join(p["text"] for p in pages_text if p["text"])
         data = {
             "source_file": source_name,
             "type": "pdf",
             "extraction_method": "no_text",
             "pages": num_pages,
-            "content": [],
-            "full_text": "",
+            "scanned_pages": [p["page"] for p in scanned],
+            "content": pages_text,
+            "full_text": full_text,
         }
         return {
             "status": "ok",
             "data": data,
             "method": "no_text",
-            "detail": f"Сканиран, {num_pages} стр. (нужен API за OCR)",
+            "detail": (
+                f"{num_pages} стр., {len(scanned)} сканирани БЕЗ OCR "
+                f"(нужен API) — стр. {', '.join(str(p['page']) for p in scanned[:5])}"
+            ),
+            "pages_or_rows": num_pages,
+        }
+
+    # ------------------------------------------------------------------
+    # PDF page classification (P1)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _classify_pdf_pages(doc: Any) -> list[dict]:
+        """Класифицирай всяка страница като text / thin / scanned / empty.
+
+        Решаващият сигнал за „сканирана" НЕ е броят знаци, а голямо
+        изображение, покриващо страницата.  Титулна страница с 30 знака и
+        без картинка е просто рядка (thin) — там OCR няма какво да добави.
+        Сканиран чертеж с 30 знака от печат е СКАНИРАН и иска vision.
+
+        Args:
+            doc: Отворен fitz документ.
+
+        Returns:
+            Списък от {page, text, chars, image_coverage, kind}.
+        """
+        pages: list[dict] = []
+
+        for i, page in enumerate(doc):
+            text = page.get_text().strip()
+            chars = len(text)
+            coverage = FileManager._image_coverage(page)
+
+            if coverage >= _SCANNED_IMAGE_COVERAGE and chars < _MIN_CHARS_PER_PAGE:
+                kind = "scanned"
+            elif chars >= _MIN_CHARS_PER_PAGE:
+                kind = "text"
+            elif chars >= _THIN_TEXT_CHARS:
+                kind = "thin"
+            else:
+                # Без текст и без голямо изображение — празна страница.
+                # OCR няма какво да извлече от нея.
+                kind = "empty"
+
+            pages.append({
+                "page": i + 1,
+                "text": text,
+                "chars": chars,
+                "image_coverage": round(coverage, 3),
+                "kind": kind,
+            })
+
+        return pages
+
+    @staticmethod
+    def _image_coverage(page: Any) -> float:
+        """Каква част от страницата е покрита с изображения (0.0–1.0).
+
+        Използва се за разпознаване на сканирани страници.  При грешка или
+        липсваща поддръжка връща 0.0 — тогава класификацията пада обратно
+        към броя знаци, т.е. към старото поведение.
+        """
+        try:
+            page_rect = page.rect
+            page_area = float(page_rect.width) * float(page_rect.height)
+            if page_area <= 0:
+                return 0.0
+
+            covered = 0.0
+            for info in page.get_image_info():
+                bbox = info.get("bbox")
+                if not bbox or len(bbox) != 4:
+                    continue
+                width = abs(float(bbox[2]) - float(bbox[0]))
+                height = abs(float(bbox[3]) - float(bbox[1]))
+                covered += width * height
+
+            return min(covered / page_area, 1.0)
+        except Exception as exc:
+            logger.debug("Не мога да измеря покритието с изображения: %s", exc)
+            return 0.0
+
+    @staticmethod
+    def _ocr_scanned_pages(
+        filepath: str,
+        source_name: str,
+        pages_text: list[dict],
+        scanned: list[dict],
+        num_pages: int,
+        ai_processor: Any,
+    ) -> dict | None:
+        """OCR само сканираните страници и слей резултата с fitz текста.
+
+        Returns:
+            Готов conversion резултат, или None ако OCR-ът се провали
+            (тогава извикващият продължава по другите пътища).
+        """
+        indices = [p["page"] - 1 for p in scanned]
+        try:
+            ocr_result = ai_processor.ocr_pdf(filepath, pages=indices)
+        except TypeError:
+            # По-стар ai_processor без параметър pages — OCR на целия документ.
+            try:
+                ocr_result = ai_processor.ocr_pdf(filepath)
+            except Exception:
+                logger.exception("OCR failed for %s", source_name)
+                return None
+        except Exception:
+            logger.exception("OCR failed for %s", source_name)
+            return None
+
+        if ocr_result.get("status") != "ok":
+            logger.warning(
+                "OCR за %s върна грешка: %s",
+                source_name, ocr_result.get("error", "неизвестна"),
+            )
+            return None
+
+        # Слей: OCR текстът замества само страниците, които са били сканирани.
+        ocr_by_page = {
+            p.get("page"): p.get("text", "")
+            for p in ocr_result.get("data", {}).get("content", [])
+        }
+        merged = [
+            {"page": p["page"], "text": ocr_by_page.get(p["page"], p["text"])}
+            for p in pages_text
+        ]
+        full_text = "\n\n".join(p["text"] for p in merged if p["text"])
+
+        all_scanned = len(scanned) == num_pages
+        method = "ocr_vision" if all_scanned else "fitz_ocr_hybrid"
+        data = {
+            "source_file": source_name,
+            "type": "pdf",
+            "extraction_method": method,
+            "pages": num_pages,
+            "ocr_pages": [p["page"] for p in scanned],
+            "content": merged,
+            "full_text": full_text,
+        }
+        detail = (
+            f"OCR {num_pages} стр."
+            if all_scanned
+            else f"{num_pages} стр., OCR на {len(scanned)} сканирани"
+        )
+        return {
+            "status": "ok",
+            "data": data,
+            "method": method,
+            "detail": detail,
             "pages_or_rows": num_pages,
         }
 
@@ -1024,10 +1292,16 @@ class FileManager:
 
         return json.loads(converted_path.read_text(encoding="utf-8"))
 
-    def get_all_text(self) -> str:
+    def get_all_text(self, priority: list[str] | None = None) -> str:
         """Combine text from ALL converted files into one large string.
 
         Useful for sending to AI for analysis.
+
+        Args:
+            priority: Имена на файлове, които да излязат ПЪРВИ.  BACKLOG т.2:
+                съдържанието се реже по дължина, а редът досега беше азбучен —
+                тоест КСС-то можеше да отпадне, защото се казва „К..." и е
+                трето по азбука.  Задължителните документи трябва да са отпред.
 
         Returns:
             Combined text from all converted documents.
@@ -1037,8 +1311,21 @@ class FileManager:
         if not converted_dir.exists():
             return ""
 
+        wanted = {str(p) for p in (priority or [])}
+
+        def _rank(path: Path) -> tuple[int, str]:
+            """Приоритетните — първи; останалите по азбучен ред."""
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                source = data.get("source_file", path.stem)
+            except (json.JSONDecodeError, OSError):
+                source = path.stem
+            return (0 if source in wanted else 1, path.name)
+
+        files = sorted(converted_dir.glob("*.json"), key=_rank)
+
         parts: list[str] = []
-        for jf in sorted(converted_dir.glob("*.json")):
+        for jf in files:
             if jf.name == "_manifest.json":
                 continue
             try:
