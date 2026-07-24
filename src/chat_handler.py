@@ -510,9 +510,12 @@ class ChatHandler:
             return []
 
         verified = report.get("verified", 0)
+        human = report.get("human", 0)
         lines = [
             f"\n📄 **Количества, сверени срещу КСС:** {verified} от {total}"
         ]
+        if human:
+            lines.append(f"  ({human} ръчно въведени от човек — не се сверяват)")
 
         # Етап 2: моделът цитира ред, кодът проверява цитата.  Разликата
         # между „няма цитат" и „цитатът не съвпада" е съществена —
@@ -1229,6 +1232,15 @@ class ChatHandler:
                 new_schedule = {**new_schedule, "tasks": modified_tasks}
             else:
                 new_schedule = modified_tasks
+
+        # BACKLOG т.3 етап 3: количествата, които тази ръчна промяна е сменила,
+        # вече идват от ЧОВЕК, не от AI или документ.  Произходът го отразява.
+        try:
+            from src.provenance import mark_human_overrides
+            before_tasks = AIProcessor._tasks_from(self.current_schedule)
+            mark_human_overrides(before_tasks, modified_tasks)
+        except Exception as exc:
+            logger.debug("Маркирането на ръчни промени се провали: %s", exc)
 
         validation = AIProcessor._validate_final_schedule(new_schedule)
         _valid = bool(validation.get("valid"))

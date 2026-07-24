@@ -425,3 +425,81 @@ def test_prompt_asks_for_citations():
         encoding="utf-8")
     assert "source_ref" in source
     assert "НЕ измисляй ref" in source
+
+
+# ===================================================================
+# Етап 3 — ръчна корекция (human_override)
+# ===================================================================
+
+from src.provenance import STATUS_HUMAN, mark_human_overrides  # noqa: E402
+
+
+class TestHumanOverride:
+    """Количество, сменено ръчно през чата, идва от ЧОВЕК — не от AI/документ.
+
+    Решение на потребителя 2026-07-24: само маркер, без стара стойност, без
+    идентичност. Всеки с достъп може да редактира.
+    """
+
+    def test_changed_quantity_is_marked_human(self):
+        before = [{"id": "T5", "name": "Полагане", "length_m": 420}]
+        after = [{"id": "T5", "name": "Полагане", "length_m": 450}]
+        marked = mark_human_overrides(before, after)
+        assert marked == 1
+        assert after[0]["quantity_provenance"]["status"] == STATUS_HUMAN
+
+    def test_unchanged_quantity_keeps_its_provenance(self):
+        """Задача, която човек не е пипал, запазва произхода си."""
+        before = [{"id": "T5", "name": "Полагане", "length_m": 420}]
+        after = [{"id": "T5", "name": "Полагане", "length_m": 420,
+                  "quantity_provenance": {"status": STATUS_EXTRACTED}}]
+        mark_human_overrides(before, after)
+        assert after[0]["quantity_provenance"]["status"] == STATUS_EXTRACTED
+
+    def test_source_says_manual(self):
+        before = [{"id": "T5", "length_m": 420}]
+        after = [{"id": "T5", "length_m": 450}]
+        mark_human_overrides(before, after)
+        assert "ръчно" in after[0]["quantity_provenance"]["source"]
+
+    def test_new_task_without_prior_is_not_marked(self):
+        """Нова задача няма 'преди' — не е override, а добавяне."""
+        marked = mark_human_overrides([], [{"id": "T9", "length_m": 100}])
+        assert marked == 0
+
+    def test_quantity_field_change_is_detected(self):
+        before = [{"id": "Ш1", "name": "СРС", "quantity": 6}]
+        after = [{"id": "Ш1", "name": "СРС", "quantity": 8}]
+        assert mark_human_overrides(before, after) == 1
+
+    def test_tasks_without_quantity_are_ignored(self):
+        before = [{"id": "M", "name": "ФИНАЛ", "milestone": True}]
+        after = [{"id": "M", "name": "ФИНАЛ", "milestone": True}]
+        assert mark_human_overrides(before, after) == 0
+
+    def test_multiple_changes_all_marked(self):
+        before = [{"id": "A", "length_m": 100}, {"id": "B", "length_m": 200}]
+        after = [{"id": "A", "length_m": 150}, {"id": "B", "length_m": 250}]
+        assert mark_human_overrides(before, after) == 2
+
+    def test_human_value_is_not_verified_against_documents(self, index):
+        """Ръчната стойност ЗАМЕНЯ документа — не се сверява срещу него."""
+        schedule = [{"id": "T5", "name": "Полагане", "length_m": 999,
+                     "source_ref": "КСС.xlsx!Водопровод!4",
+                     "quantity_provenance": {"status": STATUS_HUMAN}}]
+        report = verify_citations(schedule, index)
+        assert report["human"] == 1
+        assert report["mismatch"] == 0
+
+    def test_report_shows_human_count(self):
+        lines = ChatHandler._format_quantity_provenance({
+            "total": 3, "verified": 2, "human": 1, "mismatch": 0,
+            "unknown_ref": 0, "uncited": 0, "problems": [],
+        })
+        assert any("ръчно въведени" in ln for ln in lines)
+
+
+def test_modification_flow_marks_overrides():
+    source = (Path(__file__).parent.parent / "src" / "chat_handler.py").read_text(
+        encoding="utf-8")
+    assert "mark_human_overrides" in source

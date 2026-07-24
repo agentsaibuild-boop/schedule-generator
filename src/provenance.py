@@ -259,12 +259,19 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
     by_ref = {row.ref: row for row in index}
     counts = {CITE_VERIFIED: 0, CITE_MISMATCH: 0, CITE_UNKNOWN: 0, CITE_UNCITED: 0}
     problems: list[dict] = []
+    human = 0
 
     for task in schedule:
         if not isinstance(task, dict):
             continue
         quantity = _number(task.get("length_m") or task.get("quantity"))
         if quantity is None:
+            continue
+
+        # Ръчно въведена стойност не се сверява срещу документ — тя ГО
+        # заменя.  Иначе човешката корекция би изглеждала като несъответствие.
+        if (task.get("quantity_provenance") or {}).get("status") == STATUS_HUMAN:
+            human += 1
             continue
 
         ref = str(task.get("source_ref") or "").strip()
@@ -314,13 +321,14 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
             counts[CITE_MISMATCH], counts[CITE_UNKNOWN],
         )
 
-    total = sum(counts.values())
+    total = sum(counts.values()) + human
     return {
         "total": total,
         "verified": counts[CITE_VERIFIED],
         "mismatch": counts[CITE_MISMATCH],
         "unknown_ref": counts[CITE_UNKNOWN],
         "uncited": counts[CITE_UNCITED],
+        "human": human,
         "problems": problems,
     }
 
@@ -374,6 +382,61 @@ def find_source(
             best = Match(row, round(score, 3), qty_ok)
 
     return best
+
+
+def _quantity_of(task: dict) -> float | None:
+    return _number(task.get("length_m") or task.get("quantity"))
+
+
+def mark_human_overrides(before: list[dict], after: list[dict]) -> int:
+    """Бележи количествата, ПРОМЕНЕНИ при ръчна модификация през чата.
+
+    BACKLOG т.3 етап 3: когато човек каже „промени количеството на T5 на 450"
+    и промяната мине през gate-а, новата стойност вече не идва нито от AI,
+    нито от документ — идва от ЧОВЕК.  Произходът трябва да го отразява,
+    иначе човешката корекция изглежда като AI число.
+
+    Записва се само маркер `human_override` — по решение на потребителя не
+    се пази старата стойност (виж AskUserQuestion 2026-07-24).  Идентичността
+    на човека не се пази: всеки с достъп може да редактира.
+
+    Args:
+        before: Графикът ПРЕДИ модификацията.
+        after: Графикът СЛЕД нея (МУТИРА се — маркира се `quantity_provenance`).
+
+    Returns:
+        Брой маркирани задачи.
+    """
+    before_qty = {
+        str(t.get("id")): _quantity_of(t)
+        for t in before if isinstance(t, dict) and t.get("id")
+    }
+
+    marked = 0
+    for task in after:
+        if not isinstance(task, dict):
+            continue
+        tid = str(task.get("id"))
+        new_qty = _quantity_of(task)
+        if new_qty is None:
+            continue
+
+        old_qty = before_qty.get(tid)
+        # Маркира се само реална промяна на количеството.  Задача, която
+        # човек не е пипал, запазва произхода си (документ / AI).
+        if old_qty is not None and abs((old_qty or 0) - new_qty) > 1e-9:
+            task["quantity_provenance"] = {
+                "status": STATUS_HUMAN,
+                "citation": None,
+                "source": "ръчно въведено през чата",
+                "expected": new_qty,
+                "actual": None,
+            }
+            marked += 1
+
+    if marked:
+        logger.info("Маркирани %d ръчно променени количества (human_override).", marked)
+    return marked
 
 
 def annotate_schedule(schedule: list[dict], index: list[QuantityRow]) -> dict:
