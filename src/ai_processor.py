@@ -802,7 +802,9 @@ class AIProcessor:
         if not after_tasks:
             return cycle_result, {"applied": False, "reason": "няма задачи след correction"}
 
-        before_ids = {t.get("id") for t in self._tasks_from(before_json) if t.get("id")}
+        before_tasks = self._tasks_from(before_json)
+        before_by_id = {t.get("id"): t for t in before_tasks if t.get("id")}
+        before_ids = set(before_by_id)
         after_ids = {t.get("id") for t in after_tasks if t.get("id")}
 
         removed = sorted(i for i in before_ids - after_ids if i)
@@ -810,6 +812,19 @@ class AIProcessor:
 
         if progress_callback and (removed or added):
             progress_callback("AI корекцията промени структурата — проверявам...")
+
+        # ЗАЩИТА НА ВХОДОВЕТЕ (одит 2026-07-24, точка 1).
+        #
+        # Дотук се възстановяваше само `duration`.  Но AI correction връща
+        # цял график и може да подмени количество, DN, материал — а после
+        # кодът коректно смята ВЪРХУ подменения вход, и резултатът изглежда
+        # доказан.  Възпроизведено: length_m 720 → 15000, duration 1000д,
+        # статус approved.
+        #
+        # Тези полета са ИЗМЕРВАНИЯ от документа, не решения на модела.  AI
+        # correction няма право да ги пипа — при разминаване се връща
+        # оригиналната стойност и се отбелязва.
+        reverted = self._revert_protected_fields(after_tasks, before_by_id)
 
         # Преизчисли наново: връща `calculated_duration` и `duration_source`,
         # които AI-ят може да е изтрил, и налага числата, които кодът доказва.
@@ -828,18 +843,39 @@ class AIProcessor:
         updated = dict(cycle_result)
         updated["schedule"] = data
 
+        # Структурна промяна (добавена/премахната задача) НЕ се одобрява
+        # автоматично — иска човешки поглед.  Одит: досега само се докладваше.
+        structural_change = bool(removed or added)
+
         report = {
             "applied": True,
             "removed_tasks": removed,
             "added_tasks": added,
+            "reverted_fields": reverted,
+            "structural_change": structural_change,
             "recomputed": result["summary"]["recomputed"],
             "unresolved": result["summary"]["unresolved"],
             "by_code": result["summary"]["by_code"],
         }
-        if removed or added:
+        if structural_change:
             logger.warning(
-                "AI корекцията промени СТРУКТУРАТА: премахнати %s, добавени %s",
+                "AI корекцията промени СТРУКТУРАТА: премахнати %s, добавени %s "
+                "— форсирам needs_human_review.",
                 removed[:5] or "няма", added[:5] or "няма",
+            )
+            # Не позволявай „approved" при променена структура.
+            if updated.get("status") == "approved":
+                updated["status"] = "needs_human_review"
+                updated.setdefault("remaining_issues", []).append(
+                    f"AI корекцията промени структурата на графика "
+                    f"(премахнати: {', '.join(removed) or 'няма'}; "
+                    f"добавени: {', '.join(added) or 'няма'}) — нужен е човешки преглед."
+                )
+        if reverted:
+            logger.warning(
+                "AI correction опита да смени защитени входове в %d задачи — "
+                "върнати към оригинала: %s", len(reverted),
+                ", ".join(f"{r['id']}.{r['field']}" for r in reverted[:5]),
             )
         if result["summary"]["recomputed"]:
             logger.info(
@@ -847,6 +883,43 @@ class AIProcessor:
                 result["summary"]["recomputed"],
             )
         return updated, report
+
+    # Полета, които са ИЗМЕРВАНИЯ от документа, не решения на модела.
+    # AI correction няма право да ги мени.
+    _PROTECTED_FIELDS = ("length_m", "quantity", "dn", "diameter", "material",
+                         "method", "source_ref")
+
+    @classmethod
+    def _revert_protected_fields(
+        cls, after_tasks: list[dict], before_by_id: dict
+    ) -> list[dict]:
+        """Върни защитените входове към оригиналните им стойности.
+
+        Ако AI correction е сменил количество/DN/материал на СЪЩЕСТВУВАЩА
+        задача, промяната се отменя и се записва.  Нови задачи нямат „преди"
+        — техните стойности се оставят, но структурната промяна се хваща
+        отделно.
+
+        Returns:
+            Списък от {id, field, ai_value, restored} за отменените промени.
+        """
+        reverted: list[dict] = []
+        for task in after_tasks:
+            original = before_by_id.get(task.get("id"))
+            if original is None:
+                continue
+            for field in cls._PROTECTED_FIELDS:
+                if field not in original:
+                    continue
+                if task.get(field) != original[field]:
+                    reverted.append({
+                        "id": task.get("id"),
+                        "field": field,
+                        "ai_value": task.get(field),
+                        "restored": original[field],
+                    })
+                    task[field] = original[field]
+        return reverted
 
     @staticmethod
     def _validate_final_schedule(schedule: Any) -> dict:

@@ -20,8 +20,10 @@ from src.spatial import spatial_report
 
 logger = logging.getLogger(__name__)
 
-# Maximum task count before skipping expensive checks (circular deps)
-_MAX_TASKS_FOR_CYCLE_CHECK = 1000
+# Над този брой задачи DFS проверката за цикли не се изпълнява и графикът
+# се ОТХВЪРЛЯ (fail-closed).  DFS е O(V+E), затова лимитът е висок — реален
+# ВиК график рядко минава няколко хиляди задачи; над 20 000 се разделя.
+_MAX_TASKS_FOR_CYCLE_CHECK = 20_000
 
 # Cascade safety limit
 _MAX_CASCADE_TASKS = 50
@@ -585,14 +587,23 @@ class ScheduleBuilder:
                     )
 
         # --- Circular dependencies (DFS) ---
+        #
+        # Одит 2026-07-24: лимитът беше 1000 и над него проверката се
+        # ПРОПУСКАШЕ с предупреждение — цикъл в 1001 задачи минаваше за
+        # валиден (fail-OPEN).  DFS е O(V+E); 1000 не е мащаб, който оправдава
+        # това.  Лимитът е вдигнат далеч над всеки реален график, а над него
+        # графикът се ОТХВЪРЛЯ, не се одобрява (fail-CLOSED): непроверена
+        # логика не е доказана логика.
         if len(schedule) <= _MAX_TASKS_FOR_CYCLE_CHECK:
             cycle = self._detect_cycle(schedule, task_by_id)
             if cycle:
                 errors.append(f"Кръгова зависимост: {' → '.join(cycle)}.")
         else:
-            warnings.append(
-                f"Проверката за кръгови зависимости е пропусната "
-                f"(графикът има {len(schedule)} задачи, лимит: {_MAX_TASKS_FOR_CYCLE_CHECK})."
+            errors.append(
+                f"Графикът има {len(schedule)} задачи (над лимита "
+                f"{_MAX_TASKS_FOR_CYCLE_CHECK}) — проверката за кръгови "
+                "зависимости не може да се изпълни, затова графикът НЕ е "
+                "потвърден. Разделете го на етапи."
             )
 
         # --- Dependency violations, ПО ТИП на връзката ---
@@ -845,43 +856,54 @@ class ScheduleBuilder:
 
         Returns the cycle path (list of IDs) or None.
         """
+        # Одит 2026-07-24: рекурсивният DFS блъскаше стека при над ~1000
+        # задачи — точно затова лимитът беше нисък и цикълът минаваше за
+        # валиден над него.  Итеративна реализация с явен стек няма това
+        # ограничение и позволява fail-closed при голям график.
         WHITE, GRAY, BLACK = 0, 1, 2
         color: dict[str, int] = {t.get("id", ""): WHITE for t in schedule}
         parent: dict[str, str | None] = {}
 
-        def dfs(tid: str) -> list[str] | None:
-            color[tid] = GRAY
-            task = task_by_id.get(tid)
-            if not task:
-                color[tid] = BLACK
-                return None
-            for dep_id in dependency_ids(task):
-                if dep_id not in color:
-                    continue
-                if color[dep_id] == GRAY:
-                    # Found a cycle — reconstruct path
-                    path = [dep_id, tid]
-                    node = tid
-                    while node != dep_id:
-                        node = parent.get(node, "")
-                        if not node or node == dep_id:
-                            break
-                        path.insert(1, node)
-                    path.append(dep_id)
-                    return path
-                if color[dep_id] == WHITE:
-                    parent[dep_id] = tid
-                    result = dfs(dep_id)
-                    if result:
-                        return result
-            color[tid] = BLACK
-            return None
+        def _cycle_path(start: str, back_to: str) -> list[str]:
+            path = [back_to, start]
+            node = start
+            while node != back_to:
+                node = parent.get(node, "")
+                if not node or node == back_to:
+                    break
+                path.insert(1, node)
+            path.append(back_to)
+            return path
 
-        for tid in list(color.keys()):
-            if color.get(tid) == WHITE:
-                result = dfs(tid)
-                if result:
-                    return result
+        for root in list(color.keys()):
+            if color.get(root) != WHITE:
+                continue
+            # Стек от (tid, итератор по зависимостите).
+            stack: list[tuple[str, Any]] = [
+                (root, iter(dependency_ids(task_by_id.get(root, {}))))
+            ]
+            color[root] = GRAY
+
+            while stack:
+                tid, deps = stack[-1]
+                advanced = False
+                for dep_id in deps:
+                    if dep_id not in color:
+                        continue
+                    if color[dep_id] == GRAY:
+                        return _cycle_path(tid, dep_id)
+                    if color[dep_id] == WHITE:
+                        color[dep_id] = GRAY
+                        parent[dep_id] = tid
+                        stack.append(
+                            (dep_id, iter(dependency_ids(task_by_id.get(dep_id, {}))))
+                        )
+                        advanced = True
+                        break
+                if not advanced:
+                    color[tid] = BLACK
+                    stack.pop()
+
         return None
 
     # ------------------------------------------------------------------
