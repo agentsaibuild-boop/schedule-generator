@@ -1,6 +1,6 @@
 {
-  "version": "0.4",
-  "_source": "knowledge/skills/references/productivities.md — верифицирана таблица v0.4",
+  "version": "0.5",
+  "_source": "knowledge/skills/references/productivities.md — верифицирана таблица v0.4; PP канализация добавена v0.5 по полево правило на изпълнителя (2026-08).",
   "_note": "Единствен източник за продължителности. Чете се от src/duration_calculator.py. effective_rate е ЕДИНСТВЕНАТА стойност, използвана за duration (урок #16): drill_rate/dig_rate са технически скорости на отделна операция, НЕ на цикъла.",
   "productivities": {
     "DN90_PE_open": {"dig_rate": 57.6, "effective_rate": 12, "unit": "м/ден"},
@@ -13,7 +13,28 @@
     "DN400_PVC_open": {"dig_rate": 45, "effective_rate": 11, "unit": "м/ден"},
     "DN500_PE_open": {"dig_rate": 48, "effective_rate": 15, "unit": "м/ден"},
     "DN630_open": {"dig_rate": 35, "effective_rate": 9, "unit": "м/ден"},
-    "DN300_CI_open": {"dig_rate": 10.5, "effective_rate": 8, "unit": "м/ден"}
+    "DN300_CI_open": {"dig_rate": 10.5, "effective_rate": 8, "unit": "м/ден"},
+    "DN200_PE_open": {"effective_rate": 40, "unit": "м/ден", "_src": "полево правило: PE Ф200-350=40 (2026-08)"},
+    "DN225_PE_open": {"effective_rate": 40, "unit": "м/ден", "_src": "полево правило: PE Ф200-350=40 (2026-08)"},
+    "DN250_PE_open": {"effective_rate": 40, "unit": "м/ден", "_src": "полево правило: PE Ф200-350=40 (2026-08)"},
+    "DN280_PE_open": {"effective_rate": 40, "unit": "м/ден", "_src": "полево правило: PE Ф200-350=40 (2026-08)"},
+    "DN315_PE_open": {"effective_rate": 40, "unit": "м/ден", "_src": "полево правило: PE Ф200-350=40 (2026-08)"},
+    "DN350_PE_open": {"effective_rate": 40, "unit": "м/ден", "_src": "полево правило: PE Ф200-350=40 (2026-08)"},
+    "DN300_PP_open": {"effective_rate": 12, "unit": "м/ден", "_src": "полево правило: Ф300-800=12 (2026-08)"},
+    "DN400_PP_open": {"effective_rate": 12, "unit": "м/ден", "_src": "полево правило: Ф300-800=12 (2026-08)"},
+    "DN500_PP_open": {"effective_rate": 12, "unit": "м/ден", "_src": "полево правило: Ф300-800=12 (2026-08)"},
+    "DN600_PP_open": {"effective_rate": 12, "unit": "м/ден", "_src": "полево правило: Ф300-800=12 (2026-08)"},
+    "DN700_PP_open": {"effective_rate": 12, "unit": "м/ден", "_src": "полево правило: Ф300-800=12 (2026-08)"},
+    "DN800_PP_open": {"effective_rate": 12, "unit": "м/ден", "_src": "полево правило: Ф300-800=12 (2026-08)"},
+    "DN1000_PP_open": {"effective_rate": 6, "unit": "м/ден", "_src": "полево правило: Ф>800=6 (2026-08)"},
+    "DN1200_PP_open": {"effective_rate": 6, "unit": "м/ден", "_src": "полево правило: Ф>800=6 (2026-08)"}
+  },
+  "area_productivities": {
+    "asphalt_restoration": {"effective_rate": 150, "unit": "м²/ден", "_src": "полево, градски обект 100-300, избрано 150 (2026-08)"},
+    "pavers_unipavage": {"effective_rate": 80, "unit": "м²/ден", "_src": "15-30 м²/работник × бригада 4 = 80 (2026-08)"}
+  },
+  "linear_productivities": {
+    "kerb_road": {"effective_rate": 20, "unit": "м/ден", "_src": "пътен бордюр 15/25/50, диапазон 15-30, избрано 20 (2026-08)"}
   },
   "terrain_factors": {
     "asphalt": 0.75,

@@ -1,7 +1,7 @@
 """Deterministic duration calculation — the arithmetic the LLM used to do.
 
 WHY THIS MODULE EXISTS (P2 от REVISION_2026-07.md):
-Продължителностите се смятаха вътре в промпта — `ceil(length/rate)`, Враца
+Продължителностите се смятаха вътре в промпта — `ceil(length/rate)`, Долноград
 tier lookup, СРС/РШ бройки, дни дезинфекция.  LLM аритметиката е тиха и
 недетерминистична: смяна на модел мълчаливо променя числата, а урок #40
 (параметрични продължителности) и #35 (CI ≠ PE) се нарушават без следа.
@@ -10,10 +10,10 @@ tier lookup, СРС/РШ бройки, дни дезинфекция.  LLM ар�
 `config/productivities.json` (v0.4, верифицирани — урок #18).
 
 ИЗВЕСТНО РАЗМИНАВАНЕ (решено 2026-07-22, не е бъг): ACCURACY.md сочи
-~14.6–15.9 м/д за DN90 при проект Иваняне, а конфигът дава 12 м/д.
-Иваняне е канализационен проект, конфигът мери водопровод — числата НЕ се
+~14.6–15.9 м/д за DN90 при проект Опитно, а конфигът дава 12 м/д.
+Опитно е канализационен проект, конфигът мери водопровод — числата НЕ се
 сливат (урок #42).  Резултатът е консервативен (по-дълъг) график.  Виж
-бележката в ACCURACY.md, раздел „Иваняне".
+бележката в ACCURACY.md, раздел „Опитно".
 
 Източници на всяко число са цитирани в коментар до него.  Нищо в този
 модул не гадае: ако материалът или DN не могат да се установят СИГУРНО,
@@ -43,6 +43,8 @@ DEFAULT_MIN_DAYS = 5
 COUNT_RATES: dict[str, float] = {
     "srs": 5.0,   # СРС (сградни ревизионни шахти) — 5 бр./ден
     "rsh": 2.0,   # РШ (ревизионни шахти) голям DN — 2 бр./ден
+    "svo": 4.0,   # СВО (сградни водопроводни отклонения) — 4 бр./ден (полево, 2026-08)
+    "sko": 4.0,   # СКО (сградни канализационни отклонения) — 4 бр./ден (полево, 2026-08)
 }
 
 # Изпитване на водопровод = 2 дни (урок #34: якост + спад на налягане,
@@ -91,7 +93,7 @@ CONDITION_FACTORS: dict[str, dict[str, float]] = {
     },
 }
 
-# Враца tier стълба (урок #45 / ACCURACY.md).  Праговете са по Act2+Act3.
+# Долноград tier стълба (урок #45 / ACCURACY.md).  Праговете са по Act2+Act3.
 _VRATSA_LADDER = (6, 7, 9, 10)
 _VRATSA_THRESHOLDS = ((1.0, 6), (2.0, 7), (3.5, 9))
 
@@ -99,7 +101,12 @@ _VRATSA_THRESHOLDS = ((1.0, 6), (2.0, 7), (3.5, 9))
 # Нормализация на вход
 # ---------------------------------------------------------------------------
 
-_DN_RE = re.compile(r"DN\s*[-–]?\s*(\d{2,4})", re.IGNORECASE)
+# Диаметърът в българските КСС се пише почти винаги с „Ф" (кирилско/латинско)
+# или знака за диаметър Ø/⌀ — напр. „Ф300", „Ф 1000", „Ф90".  Без тези
+# префикси всеки канализационен ред (Ф300–Ф1200 РP) падаше в MISSING_DN
+# (наблюдавано при жив тест на реален търг, 2026-08).  IGNORECASE покрива
+# и малки букви (ф, φ, ø).
+_DN_RE = re.compile(r"(?:DN|Ф|Φ|Ø|⌀)\s*[-–]?\s*(\d{2,4})", re.IGNORECASE)
 _BARE_DN_RE = re.compile(r"^\s*(\d{2,4})\s*$")
 
 # Материалите се разпознават само по ЕДНОЗНАЧНИ маркери.  „ПЕ" не се търси
@@ -108,6 +115,11 @@ _MATERIAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("CI", re.compile(r"\bCI\b|чугун|ковък\s+чугун|сив\s+чугун", re.IGNORECASE)),
     ("PVC", re.compile(r"\bPVC\b|\bПВЦ\b|поливинил", re.IGNORECASE)),
     ("PE", re.compile(r"\bPE\s*100|\bPE\b|\bПЕ\b|полиетилен", re.IGNORECASE)),
+    # PP (полипропилен) — стандартният материал за канализация в българските
+    # КСС („Ф300, РP", „Ф1000, РP").  „РP" минава през normalize_homoglyphs
+    # (кирилско Р → латинско P) и става „PP".  Без този шаблон цялата
+    # канализационна мрежа оставаше MISSING_MATERIAL (жив тест, 2026-08).
+    ("PP", re.compile(r"\bPP\b|\bПП\b|полипропил", re.IGNORECASE)),
     ("AC", re.compile(r"\bAC\b|азбест", re.IGNORECASE)),
     ("GRP", re.compile(r"\bGRP\b|стъклопласт", re.IGNORECASE)),
 )
@@ -128,9 +140,22 @@ _PIPE_TYPES = frozenset({"water_pipe", "sewer", "pipe", "pipeline"})
 
 _SRS_RE = re.compile(r"\bСРС\b|сградн\w*\s+ревизион", re.IGNORECASE)
 _RSH_RE = re.compile(r"\bРШ\b|ревизионн\w*\s+шахт", re.IGNORECASE)
+# Сградни отклонения (не са шахти) — водопроводни (СВО) и канализационни (СКО).
+# Норма 4 бр/ден по полево правило на изпълнителя (2026-08).  СКО се проверява
+# ПРЕДИ СВО в диспечера няма значение — шаблоните са взаимно изключващи се.
+_SVO_RE = re.compile(r"\bСВО\b|сградн\w*\s+водопроводн\w*\s+отклонени", re.IGNORECASE)
+_SKO_RE = re.compile(r"\bСКО\b|сградн\w*\s+канализационн\w*\s+отклонени", re.IGNORECASE)
 
 _FOREST_RE = re.compile(r"горск|залесен|скален", re.IGNORECASE)
 _ASPHALT_RE = re.compile(r"асфалт|настилк|урбанизиран", re.IGNORECASE)
+
+# Площни възстановявания (кв.м) и линейни не-тръбни (бордюри).  Нормите са
+# в config (area_productivities / linear_productivities); тук само
+# разпознаваме типа.  Плочите се проверяват ПРЕДИ асфалта, защото
+# „тротоарни плочи" не съдържа „асфалт", но пази реда ясен.
+_PAVERS_RE = re.compile(r"унипаваж|плочи|тротоарн\w*\s+плоч", re.IGNORECASE)
+_KERB_RE = re.compile(r"бордюр", re.IGNORECASE)
+_AREA_UNITS = frozenset({"кв.м", "кв. м", "м2", "м²", "m2", "квм", "sq.m"})
 
 # Кирилски букви, визуално идентични с латински.  Ползват се за поправяне
 # на OCR грешки при разпознаване на материала — виж `normalize_homoglyphs`.
@@ -287,8 +312,14 @@ def detect_material(task: dict) -> str | None:
     СЪЗНАТЕЛНО не гадае.  Урок #35: CI и PE имат различни норми (8 срещу
     15 м/д) — грешно предположение тук е по-скъпо от пропуснато изчисление.
     """
-    explicit = task.get("material") or task.get("pipe_material")
-    haystack = f"{explicit or ''} {task.get('name', '')}"
+    # Материалът в българските КСС често стои в диаметърната клетка, не в
+    # името: „Ф300, РP", „Ф90; РЕ".  Затова гледаме и diameter/dn/описание,
+    # а не само material/name (жив тест на реален търг, 2026-08).
+    parts = (
+        task.get("material"), task.get("pipe_material"), task.get("name"),
+        task.get("diameter"), task.get("dn"), task.get("description"),
+    )
+    haystack = " ".join(str(p) for p in parts if p)
     haystack = f"{haystack} {normalize_homoglyphs(haystack)}"
 
     for material, pattern in _MATERIAL_PATTERNS:
@@ -432,7 +463,7 @@ def pipe_duration(
 
     `factor` по подразбиране е 1.0 — теренният коефициент НЕ се прилага
     автоматично.  Причина: ефективните производителности в конфига вече са
-    теренно калибрирани.  ACCURACY.md (Харманли): DN300 CI, горски терен,
+    теренно калибрирани.  ACCURACY.md (Горноград): DN300 CI, горски терен,
     673м при 8 м/д → 84 дни, което е golden standard-ът.  Ако отгоре се
     приложи и ×0.6, се получават 141 дни — 67% надуване.  Коефициентът
     остава достъпен за терени, за които няма отделна ефективна норма.
@@ -492,7 +523,7 @@ def disinfection_days(
 
 
 def vratsa_tier_days(act2_act3_days: float, *, many_svo: bool = False) -> int:
-    """Враца lookup — продължителност/участък по сумата Act2+Act3 (урок #45).
+    """Долноград lookup — продължителност/участък по сумата Act2+Act3 (урок #45).
 
     Act1 (подготовка, 0.5д) и Act7 (почистване, 0.5д) са фиксирани и вече са
     включени в тиера.  При много сградни отклонения се качва едно ниво.
@@ -549,7 +580,7 @@ def calculate_task_duration(
     quantity = task.get("quantity")
     unit = str(task.get("unit", "")).strip().lower()
     if isinstance(quantity, (int, float)) and not isinstance(quantity, bool) and quantity > 0:
-        if unit in {"бр", "бр.", "броя", "pcs"}:
+        if unit in {"бр", "бр.", "брой", "броя", "бройки", "pcs", "pc"}:
             if _SRS_RE.search(name):
                 return DurationResult(
                     count_duration(quantity, COUNT_RATES["srs"]),
@@ -562,8 +593,59 @@ def calculate_task_duration(
                     f"РШ: {quantity:g} бр. ÷ {COUNT_RATES['rsh']:g} бр./ден",
                     COUNT_RATES["rsh"], "rsh",
                 )
-            return DurationResult(None, "бройки без известна норма (не е СРС/РШ)",
+            if _SKO_RE.search(name):
+                return DurationResult(
+                    count_duration(quantity, COUNT_RATES["sko"]),
+                    f"СКО: {quantity:g} бр. ÷ {COUNT_RATES['sko']:g} бр./ден",
+                    COUNT_RATES["sko"], "sko",
+                )
+            if _SVO_RE.search(name):
+                return DurationResult(
+                    count_duration(quantity, COUNT_RATES["svo"]),
+                    f"СВО: {quantity:g} бр. ÷ {COUNT_RATES['svo']:g} бр./ден",
+                    COUNT_RATES["svo"], "svo",
+                )
+            return DurationResult(None, "бройки без известна норма (не е СРС/РШ/СКО/СВО)",
                                   code=CODE_COUNT_NO_RATE)
+
+    # --- Площни настилки (кв.м): асфалт / тротоарни плочи ---
+    # Нормите са потвърдени полево за градски обект (2026-08).  Плочите се
+    # проверяват преди асфалта заради унипаважа.
+    if unit in _AREA_UNITS and isinstance(quantity, (int, float)) \
+            and not isinstance(quantity, bool) and quantity > 0:
+        area_cfg = cfg.get("area_productivities", {}) if isinstance(cfg, dict) else {}
+        if _PAVERS_RE.search(name):
+            area_key = "pavers_unipavage"
+        elif _ASPHALT_RE.search(name):
+            area_key = "asphalt_restoration"
+        else:
+            area_key = None
+        entry = area_cfg.get(area_key) if area_key else None
+        rate = entry.get("effective_rate") if isinstance(entry, dict) else None
+        if isinstance(rate, (int, float)) and rate > 0:
+            return DurationResult(
+                count_duration(quantity, rate),
+                f"{quantity:g} м² ÷ {rate:g} м²/ден [{area_key}]",
+                float(rate), area_key,
+            )
+        return DurationResult(None, "площна дейност без норма в конфига",
+                              code=CODE_NOT_PARAMETRIC)
+
+    # --- Линейни не-тръбни: бордюри (кв.цена на метър, но НЕ тръба) ---
+    if _KERB_RE.search(name):
+        lin_cfg = cfg.get("linear_productivities", {}) if isinstance(cfg, dict) else {}
+        entry = lin_cfg.get("kerb_road")
+        rate = entry.get("effective_rate") if isinstance(entry, dict) else None
+        metres = detect_length_m(task)
+        if isinstance(rate, (int, float)) and rate > 0 and metres:
+            return DurationResult(
+                count_duration(metres, rate),
+                f"{metres:g} м бордюр ÷ {rate:g} м/ден [kerb_road]",
+                float(rate), "kerb_road",
+            )
+        if not metres:
+            return DurationResult(None, "бордюр без дължина", code=CODE_MISSING_LENGTH)
+        return DurationResult(None, "бордюр без норма в конфига", code=CODE_NOT_PARAMETRIC)
 
     # --- Дължина: полагане на тръба ---
     if not is_pipe_task(task):

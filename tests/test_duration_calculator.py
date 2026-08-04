@@ -2,8 +2,8 @@
 
 Covers: нормализация на DN/материал/метод, търсене на производителност,
         параметрична продължителност по дължина, бройки (СРС/РШ),
-        дезинфекция (урок #33), Враца tier lookup (урок #45),
-        и golden values от ACCURACY.md (Перник, Харманли, Иваняне, Враца).
+        дезинфекция (урок #33), Долноград tier lookup (урок #45),
+        и golden values от ACCURACY.md (Среднево, Горноград, Опитно, Долноград).
 
 FAILURE означава: src/duration_calculator.py е счупен — продължителностите
 в генерирания график ще се върнат към стойностите, които LLM-ът си измисля
@@ -62,6 +62,13 @@ def config() -> dict:
         ("DN300", 300),
         ("DN 300", 300),
         ("dn-300", 300),
+        # „Ф" е стандартната българска нотация за диаметър в КСС (жив тест 2026-08)
+        ("Ф300", 300),
+        ("Ф 400", 400),
+        ("Ф1000, РP", 1000),
+        ("Ф90; РЕ", 90),
+        ("ф110", 110),
+        ("Ø200", 200),
         ("Полагане DN110 PE — ул. Витоша", 110),
         (None, None),
         ("", None),
@@ -106,12 +113,30 @@ def test_detect_dn_missing_returns_none():
         ("Полагане DN315 PVC", "PVC"),
         ("Полагане DN315 ПВЦ", "PVC"),
         ("Полагане азбестоциментова тръба", "AC"),
+        # PP (полипропилен) — стандартен за канализация (жив тест 2026-08)
+        ("Полагане DN300 PP", "PP"),
+        ("Полагане тръби полипропилен DN500", "PP"),
         ("Полагане DN500", None),
         ("Изкоп за траншея", None),
     ],
 )
 def test_detect_material(name, expected):
     assert detect_material({"name": name}) == expected
+
+
+def test_detect_material_pp_from_cyrillic_diameter_cell():
+    """КСС слага материала в диаметърната клетка: „Ф300, РP" (кирилско Р).
+
+    normalize_homoglyphs → „PP"; detect_material гледа и полето diameter.
+    Без това цялата канализационна мрежа оставаше MISSING_MATERIAL.
+    """
+    assert detect_material({"name": "Изграждане на канализация",
+                            "diameter": "Ф300, РP"}) == "PP"
+
+
+def test_detect_material_pe_from_diameter_cell():
+    assert detect_material({"name": "Водопроводна мрежа",
+                            "diameter": "Ф90; РЕ"}) == "PE"
 
 
 def test_detect_material_explicit_field_wins_over_silence():
@@ -249,6 +274,129 @@ def test_resolve_rate_unknown_dn_returns_none(config):
 def test_resolve_rate_no_silent_neighbour_approximation(config):
     """DN400 PE не заема нормата на DN400 PVC — тихото приближение е забранено."""
     assert resolve_rate(400, "PE", "open", config=config) is None
+
+
+# --- PP канализация v0.5 (полево правило: Ф300-800=12, Ф>800=6, 2026-08) ---
+
+@pytest.mark.parametrize("dn", [300, 400, 500, 600, 700, 800])
+def test_resolve_rate_pp_small_dn_is_12(dn, config):
+    """Ф300–Ф800 PP → 12 м/ден (полево правило на изпълнителя)."""
+    lookup = resolve_rate(dn, "PP", "open", config=config)
+    assert lookup is not None
+    assert lookup.rate == 12
+    assert lookup.key == f"DN{dn}_PP_open"
+
+
+@pytest.mark.parametrize("dn", [1000, 1200])
+def test_resolve_rate_pp_large_dn_is_6(dn, config):
+    """Ф>800 PP → 6 м/ден (колекторите вървят по-бавно)."""
+    lookup = resolve_rate(dn, "PP", "open", config=config)
+    assert lookup is not None
+    assert lookup.rate == 6
+
+
+def test_resolve_rate_pp_does_not_borrow_pvc(config):
+    """PP не заема PVC нормата и обратно — различни материали, различни ключове."""
+    assert resolve_rate(315, "PP", "open", config=config) is None  # PP DN315 няма
+    assert resolve_rate(300, "PVC", "open", config=config) is None  # PVC DN300 няма
+
+
+@pytest.mark.parametrize("dn", [200, 225, 250, 280, 315, 350])
+def test_resolve_rate_pe_mid_dn_is_40(dn, config):
+    """PE Ф200–350 → 40 м/ден (полево правило на изпълнителя, 2026-08)."""
+    lookup = resolve_rate(dn, "PE", "open", config=config)
+    assert lookup is not None
+    assert lookup.rate == 40
+    assert lookup.key == f"DN{dn}_PE_open"
+
+
+def test_calculate_pp_canalization_end_to_end():
+    """Реален канализационен ред „Ф1000, РP" се смята детерминистично."""
+    task = {"name": "Изграждане на смесена канализационна мрежа",
+            "diameter": "Ф1000, РP", "length_m": 300, "unit": "m"}
+    res = calculate_task_duration(task)
+    assert res.code == "CALCULATED"
+    assert res.days == 50  # 300м ÷ 6 м/ден
+
+
+# --- Сградни отклонения СВО/СКО = 4 бр/ден (полево, 2026-08) ---
+
+def test_svo_count_duration():
+    task = {"name": "СВО", "quantity": 174, "unit": "бр"}
+    res = calculate_task_duration(task)
+    assert res.code == "CALCULATED"
+    assert res.days == 44  # ceil(174 / 4)
+    assert res.rate == 4
+
+
+def test_sko_count_duration():
+    task = {"name": "СКО смесена канализационна мрежа", "quantity": 180, "unit": "бр"}
+    res = calculate_task_duration(task)
+    assert res.code == "CALCULATED"
+    assert res.days == 45  # 180 / 4
+
+
+@pytest.mark.parametrize("unit", ["бр", "бр.", "брой", "броя", "бройки"])
+def test_count_unit_variants_all_recognized(unit):
+    """Реалните КСС ползват „брой" (не само „броя"/„бр") — трябва да минава."""
+    task = {"name": "СКО", "quantity": 180, "unit": unit}
+    res = calculate_task_duration(task)
+    assert res.code == "CALCULATED", f"unit={unit!r} не се разпозна като бройка"
+
+
+def test_unknown_count_still_has_no_rate():
+    """Водомерна шахта не е СРС/РШ/СКО/СВО → остава COUNT_NO_RATE (не се гади)."""
+    task = {"name": "Водомерна шахта", "quantity": 1, "unit": "бр"}
+    res = calculate_task_duration(task)
+    assert res.code == "COUNT_NO_RATE"
+    assert res.days is None
+
+
+# --- Площни настилки (кв.м) + линейни бордюри (v0.5, полево 2026-08) ---
+
+def test_asphalt_restoration_area():
+    task = {"name": "Пътна - възстановяване на пътна настилка (асфалтова настилка)",
+            "unit": "кв. м", "quantity": 500}
+    res = calculate_task_duration(task)
+    assert res.code == "CALCULATED"
+    assert res.days == 4  # ceil(500 / 150)
+    assert res.rate == 150
+
+
+def test_pavers_area_distinct_from_asphalt():
+    """Тротоарни плочи (унипаваж) → 80 м²/д, НЕ асфалтовата норма."""
+    task = {"name": "Доставка и полагане на тротоарни плочи (унипаваж)",
+            "unit": "кв. м", "quantity": 240}
+    res = calculate_task_duration(task)
+    assert res.code == "CALCULATED"
+    assert res.days == 3  # ceil(240 / 80)
+    assert res.rate == 80
+    assert res.rate_key == "pavers_unipavage"
+
+
+def test_road_kerb_linear():
+    task = {"name": "Доставка и полагане на средни бетонови бордюри С18 15/25/50 см",
+            "unit": "м", "quantity": 300}
+    res = calculate_task_duration(task)
+    assert res.code == "CALCULATED"
+    assert res.days == 15  # 300 / 20
+    assert res.rate == 20
+    assert res.rate_key == "kerb_road"
+
+
+def test_kerb_is_not_treated_as_pipe():
+    """Бордюр е линеен, но НЕ тръба — не бива да търси DN/материал."""
+    task = {"name": "Бетонови бордюри", "unit": "м", "quantity": 100}
+    res = calculate_task_duration(task)
+    assert res.rate_key == "kerb_road"  # хванат от линейния клон, не тръбния
+
+
+def test_area_without_norm_is_not_parametric():
+    """Непозната площна дейност (нито асфалт, нито плочи) → NOT_PARAMETRIC."""
+    task = {"name": "Затревяване на площи", "unit": "кв. м", "quantity": 200}
+    res = calculate_task_duration(task)
+    assert res.code == "NOT_PARAMETRIC"
+    assert res.days is None
 
 
 # ===================================================================
@@ -464,7 +612,7 @@ def test_calculate_terrain_opt_in_changes_result():
 # ===================================================================
 
 def test_golden_pernik_dn500_pe_720m():
-    """Перник: 720м DN500 PE ÷ 15 м/д = 48 раб. дни (диапазон 43–53)."""
+    """Среднево: 720м DN500 PE ÷ 15 м/д = 48 раб. дни (диапазон 43–53)."""
     result = calculate_task_duration(
         {"name": "Полагане DN500 PE — довеждащ водопровод", "length_m": 720, "diameter": 500}
     )
@@ -473,7 +621,7 @@ def test_golden_pernik_dn500_pe_720m():
 
 
 def test_golden_harmanli_dn300_ci_673m():
-    """Харманли: 673м DN300 CI ÷ 8 м/д (диапазон 75–93 раб. дни)."""
+    """Горноград: 673м DN300 CI ÷ 8 м/д (диапазон 75–93 раб. дни)."""
     result = calculate_task_duration(
         {"name": "Полагане DN300 CI — горски терен", "length_m": 673, "diameter": 300}
     )
@@ -510,7 +658,7 @@ def test_golden_ivanyane_branches_are_not_templated():
 
 
 def test_golden_vratsa_tier_distribution():
-    """Враца: 49% от участъците са Tier 6д (Act2+Act3 ≈ 1.0д)."""
+    """Долноград: 49% от участъците са Tier 6д (Act2+Act3 ≈ 1.0д)."""
     assert vratsa_tier_days(1.0) == 6
     assert vratsa_tier_days(2.0) == 7
     assert vratsa_tier_days(3.5) == 9
