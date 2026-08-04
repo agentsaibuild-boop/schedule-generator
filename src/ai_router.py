@@ -61,6 +61,11 @@ MODEL_CONTROLLER = "claude-opus-4-8"
 WORKER_MODEL_OVERRIDE = os.getenv("WORKER_MODEL", "").strip()
 _WORKER_MAX_TOKENS = int(os.getenv("WORKER_MAX_TOKENS", "16000"))
 
+# Над този таван на изхода Anthropic SDK иска STREAMING, иначе дълъг генериращ
+# отговор рискува HTTP timeout (препоръка от проучването за модели, 2026-08).
+# Стриймингът събира отговора на части и връща същия финален обект.
+_STREAM_MIN_TOKENS = int(os.getenv("STREAM_MIN_TOKENS", "8000"))
+
 # ---------------------------------------------------------------------------
 # Pricing per token (USD) — fast-moving; verify before relying.
 # ---------------------------------------------------------------------------
@@ -333,7 +338,8 @@ class AIRouter:
     # ------------------------------------------------------------------
 
     def chat(self, messages: list[dict], system_prompt: str,
-             max_tokens: int = _MAX_TOKENS_CHAT) -> dict:
+             max_tokens: int = _MAX_TOKENS_CHAT,
+             response_schema: dict | None = None) -> dict:
         """Send a chat message to the worker (DeepSeek). Falls back to Anthropic.
 
         Args:
@@ -354,7 +360,8 @@ class AIRouter:
             try:
                 return self._chat_worker_claude(
                     messages, system_prompt, model=WORKER_MODEL_OVERRIDE,
-                    max_tokens=max(max_tokens, _WORKER_MAX_TOKENS))
+                    max_tokens=max(max_tokens, _WORKER_MAX_TOKENS),
+                    response_schema=response_schema)
             except Exception as exc:
                 logger.warning("Claude работник (%s) се провали, fallback: %s",
                                WORKER_MODEL_OVERRIDE, exc)
@@ -362,7 +369,8 @@ class AIRouter:
         # Try DeepSeek first
         if self.deepseek_available:
             try:
-                return self._chat_deepseek(messages, system_prompt, max_tokens=max_tokens)
+                return self._chat_deepseek(messages, system_prompt, max_tokens=max_tokens,
+                                           response_schema=response_schema)
             except Exception as exc:
                 logger.warning("DeepSeek chat failed, trying fallback: %s", exc)
                 self.deepseek_available = False
@@ -388,18 +396,39 @@ class AIRouter:
         }
 
     def _chat_deepseek(self, messages: list[dict], system_prompt: str,
-                       max_tokens: int = _MAX_TOKENS_CHAT) -> dict:
-        """Send chat to DeepSeek via OpenAI-compatible API."""
+                       max_tokens: int = _MAX_TOKENS_CHAT,
+                       response_schema: dict | None = None) -> dict:
+        """Send chat to DeepSeek via OpenAI-compatible API.
+
+        `response_schema` (2026-08): BEST-EFFORT structured output — материалът е
+        enum.  Не всеки OpenAI-съвместим gateway поддържа `json_schema`; при
+        отказ повтаряме заявката БЕЗ него (никога не чупим генерацията).
+        """
         client = self._get_deepseek()
         full_messages = [{"role": "system", "content": system_prompt}] + messages
-
-        response = client.chat.completions.create(
-            model=MODEL_WORKER,
-            messages=full_messages,
-            max_tokens=max_tokens,
-            temperature=0.3,
-            timeout=_API_TIMEOUT_SECONDS,
+        base_kwargs = dict(
+            model=MODEL_WORKER, messages=full_messages,
+            max_tokens=max_tokens, temperature=0.3, timeout=_API_TIMEOUT_SECONDS,
         )
+        attempts: list[dict] = []
+        if response_schema is not None:
+            attempts.append({**base_kwargs, "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "schedule", "schema": response_schema,
+                                "strict": False}}})
+        attempts.append(base_kwargs)
+
+        response = None
+        for i, kw in enumerate(attempts):
+            try:
+                response = client.chat.completions.create(**kw)
+                break
+            except Exception as exc:
+                if i < len(attempts) - 1:
+                    logger.warning(
+                        "DeepSeek structured output отказан (%s) → без schema.", exc)
+                else:
+                    raise
 
         choice = response.choices[0]
         content = choice.message.content or ""
@@ -431,9 +460,21 @@ class AIRouter:
             "truncated": truncated,
         }
 
+    def _anthropic_worker_request(self, client: Any, kwargs: dict, max_tokens: int) -> Any:
+        """Изпълни заявката към Claude worker-а — стрийминг при голям изход.
+
+        При max_tokens ≥ _STREAM_MIN_TOKENS non-streaming рискува HTTP timeout
+        за дълъг генериращ отговор.  `messages.stream()` събира отговора на части
+        и `get_final_message()` връща същия финален Message обект.
+        """
+        if max_tokens >= _STREAM_MIN_TOKENS:
+            with client.messages.stream(**kwargs) as stream:
+                return stream.get_final_message()
+        return client.messages.create(**kwargs)
+
     def _chat_worker_claude(
         self, messages: list[dict], system_prompt: str, *, model: str,
-        max_tokens: int,
+        max_tokens: int, response_schema: dict | None = None,
     ) -> dict:
         """Claude като РАБОТНИК (проба 2026-08-04) — висок max_tokens, без отрязване.
 
@@ -442,14 +483,38 @@ class AIRouter:
         трябва (само бави и харчи токени), затова е ИЗКЛЮЧЕН, а текстът се вади от
         текстовия блок, не от `content[0]`.  По-дълъг timeout — генерацията е
         по-голяма от обикновен chat.
+
+        `response_schema` (2026-08): JSON schema със `material` като enum → моделът
+        не може да върне невалиден материал (напр. PP липсваше в позволените и
+        моделът пишеше PE).  BEST-EFFORT: ако SDK/моделът не приема structured
+        output → повтаряме заявката БЕЗ schema (никога не чупим генерацията).
         """
         client = self._get_anthropic()
-        response = client.messages.create(
+        base_kwargs = dict(
             model=model, max_tokens=max_tokens,
             thinking={"type": "disabled"},
             system=system_prompt, messages=messages,
             timeout=max(_API_TIMEOUT_SECONDS, 300),
         )
+        # Варианти по ред на предпочитание: първо със structured output, после без.
+        attempts: list[dict] = []
+        if response_schema is not None:
+            attempts.append({**base_kwargs, "output_config": {
+                "format": {"type": "json_schema", "schema": response_schema}}})
+        attempts.append(base_kwargs)
+
+        response = None
+        for i, kw in enumerate(attempts):
+            try:
+                response = self._anthropic_worker_request(client, kw, max_tokens)
+                break
+            except Exception as exc:
+                if i < len(attempts) - 1:
+                    logger.warning(
+                        "Claude worker structured output отказан (%s) → "
+                        "повтарям без schema.", exc)
+                else:
+                    raise
         content = next((getattr(b, "text", "") for b in (response.content or [])
                         if getattr(b, "type", None) == "text"), "")
         tokens_in = response.usage.input_tokens

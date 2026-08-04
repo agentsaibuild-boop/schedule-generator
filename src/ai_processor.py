@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from src.ai_disclosure import machine_readable_marker
 from src.ai_router import AIRouter
+from src.duration_calculator import SUPPORTED_MATERIALS
 from src.prompt_safety import build_untrusted_block
 from src.schedule_builder import ScheduleBuilder
 
@@ -25,6 +26,36 @@ if TYPE_CHECKING:
     from src.knowledge_manager import KnowledgeManager
 
 logger = logging.getLogger(__name__)
+
+
+def build_schedule_response_schema() -> dict:
+    """JSON schema за изхода на worker-а със `material` като enum (2026-08).
+
+    Ограничава САМО материала до позволените стойности (SUPPORTED_MATERIALS +
+    празно/null за „неясен материал").  Останалата форма е нарочно свободна
+    (`additionalProperties` по подразбиране разрешено) — не искаме да чупим
+    структурата, само да спрем невалидни материали (напр. моделът да измисли
+    „HDPE" или да сложи „PE" там, където КСС казва PP).
+
+    Референтната цялост на графа (фантомни ID) НЕ се гарантира тук — това
+    остава работа на детерминистичния гейт (правилно разделение)."""
+    materials: list = list(SUPPORTED_MATERIALS) + ["", None]
+    return {
+        "type": "object",
+        "properties": {
+            "tasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "material": {"enum": materials},
+                    },
+                },
+            },
+        },
+        "required": ["tasks"],
+    }
+
 
 # Module-level constants for _validate_task_locations (avoid recompiling on every call)
 _PLACE_TOKEN = re.compile(r"\b[А-ЯA-ZЁ][а-яa-zёА-ЯA-Z]{3,}\b")
@@ -509,10 +540,11 @@ class AIProcessor:
                 "ЗАДЪЛЖИТЕЛНИ полета за всяка тръбна дейност:\n"
                 "  length_m — дължина в метри (число, от КСС)\n"
                 "  dn — номинален диаметър (число, напр. 300)\n"
-                "  material — ЗАДЪЛЖИТЕЛНО: PE, CI, PVC, AC или GRP\n"
+                f"  material — ЗАДЪЛЖИТЕЛНО едно от: {', '.join(SUPPORTED_MATERIALS)}\n"
                 "  method — 'open' (открит изкоп) или 'HDD' (безизкопно/сондаж)\n"
                 "КРИТИЧНО за material: чугунът (CI) има съвсем различна норма от PE —\n"
                 "грешно посочен материал изкривява продължителността в пъти (урок #35).\n"
+                "КАНАЛИЗАЦИЯТА обикновено е PP (полипропилен), НЕ PE — виж КСС.\n"
                 "Ако материалът не се вижда в документите — напиши го в name и остави\n"
                 "material празно; системата ще пропусне изчислението, вместо да сгреши.\n"
                 "За дейности по бройки (СРС/РШ) подай quantity + unit='бр.'.\n"
@@ -617,7 +649,9 @@ class AIProcessor:
         # позиции не се събира.  Генерирането ползва пълния таван на работника
         # (8192, колкото и корекцията).  При много голям проект (>1000 задачи)
         # truncation детекторът пак ще подскаже разделяне на етапи.
-        gen_result = self.router.chat(messages, system_prompt, max_tokens=8192)
+        gen_result = self.router.chat(
+            messages, system_prompt, max_tokens=8192,
+            response_schema=build_schedule_response_schema())
 
         if gen_result.get("error"):
             return {

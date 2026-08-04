@@ -461,3 +461,31 @@ if __name__ == "__main__":
         capture_output=False
     )
     sys.exit(result.returncode)
+
+
+# ---------------------------------------------------------------------------
+# build_schedule_response_schema — материалът е enum, синхрон с детектора (2026-08)
+# ---------------------------------------------------------------------------
+
+def test_response_schema_material_enum_matches_detector():
+    """enum-ът на материала = SUPPORTED_MATERIALS (+ празно/null).
+
+    Регресия: промптът разрешаваше само PE/CI/PVC/AC/GRP (БЕЗ PP) → моделът
+    пишеше PE за PP канализация.  Единен източник гарантира, че enum и детектор
+    не се разминават.
+    """
+    from src.ai_processor import build_schedule_response_schema
+    from src.duration_calculator import SUPPORTED_MATERIALS
+
+    schema = build_schedule_response_schema()
+    enum = schema["properties"]["tasks"]["items"]["properties"]["material"]["enum"]
+    for m in SUPPORTED_MATERIALS:
+        assert m in enum, f"{m} липсва в material enum"
+    assert "PP" in enum, "PP ЗАДЪЛЖИТЕЛНО (канализация)"
+    assert None in enum and "" in enum, "неясен материал трябва да е позволен"
+
+
+def test_response_schema_requires_tasks():
+    from src.ai_processor import build_schedule_response_schema
+    schema = build_schedule_response_schema()
+    assert schema["required"] == ["tasks"]

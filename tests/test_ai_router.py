@@ -379,3 +379,97 @@ class TestTruncationDetection:
         r = self._router_with_finish_reason("length")
         result = r._chat_deepseek([{"role": "user", "content": "x"}], "system" * 40)
         assert result["content"] == '{"tasks": []}'
+
+
+# ---------------------------------------------------------------------------
+# Claude worker: streaming при голям изход + best-effort JSON schema (2026-08)
+# ---------------------------------------------------------------------------
+
+class _FakeUsage:
+    input_tokens = 10
+    output_tokens = 20
+
+
+class _FakeBlock:
+    type = "text"
+    text = '{"tasks": []}'
+
+
+class _FakeMessage:
+    content = [_FakeBlock()]
+    usage = _FakeUsage()
+    stop_reason = "end_turn"
+
+
+class _FakeStreamCtx:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def get_final_message(self):
+        return _FakeMessage()
+
+
+class _FakeMessages:
+    def __init__(self):
+        self.create_calls = []
+        self.stream_calls = []
+
+    def create(self, **kw):
+        self.create_calls.append(kw)
+        # Симулирай доставчик, който отхвърля structured output.
+        if "output_config" in kw:
+            raise TypeError("output_config не се поддържа")
+        return _FakeMessage()
+
+    def stream(self, **kw):
+        self.stream_calls.append(kw)
+        if "output_config" in kw:
+            raise TypeError("output_config не се поддържа")
+        return _FakeStreamCtx()
+
+
+class _FakeClient:
+    def __init__(self):
+        self.messages = _FakeMessages()
+
+
+def _worker_router(monkeypatch) -> tuple[AIRouter, _FakeClient]:
+    r = make_router()
+    client = _FakeClient()
+    monkeypatch.setattr(r, "_get_anthropic", lambda: client)
+    return r, client
+
+
+def test_worker_claude_streams_for_large_max_tokens(monkeypatch):
+    """max_tokens ≥ прага → стрийминг (иначе дълъг отговор рискува timeout)."""
+    r, client = _worker_router(monkeypatch)
+    out = r._chat_worker_claude([{"role": "user", "content": "hi"}], "sys",
+                                model="claude-sonnet-5", max_tokens=16000)
+    assert client.messages.stream_calls, "трябваше да ползва stream()"
+    assert not client.messages.create_calls, "не биваше да ползва create()"
+    assert out["content"] == '{"tasks": []}'
+
+
+def test_worker_claude_creates_for_small_max_tokens(monkeypatch):
+    """Малък изход → обикновен create (без стрийминг)."""
+    r, client = _worker_router(monkeypatch)
+    r._chat_worker_claude([{"role": "user", "content": "hi"}], "sys",
+                          model="claude-sonnet-5", max_tokens=4000)
+    assert client.messages.create_calls and not client.messages.stream_calls
+
+
+def test_worker_claude_falls_back_when_schema_rejected(monkeypatch):
+    """Structured output отказан → повтаря БЕЗ schema, не гърми генерацията."""
+    r, client = _worker_router(monkeypatch)
+    schema = {"type": "object", "properties": {"tasks": {"type": "array"}}}
+    out = r._chat_worker_claude([{"role": "user", "content": "hi"}], "sys",
+                                model="claude-sonnet-5", max_tokens=4000,
+                                response_schema=schema)
+    # Първи опит с output_config гръмна, втори (без) успя.
+    assert len(client.messages.create_calls) == 2
+    assert "output_config" in client.messages.create_calls[0]
+    assert "output_config" not in client.messages.create_calls[1]
+    assert out["content"] == '{"tasks": []}'

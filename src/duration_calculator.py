@@ -124,6 +124,12 @@ _MATERIAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("GRP", re.compile(r"\bGRP\b|стъклопласт", re.IGNORECASE)),
 )
 
+# Единен източник на истина за разпознаваните материали.  Ползва се и от
+# промпта в ai_processor (enum) и от JSON schema-та — за да НЕ се разминават
+# (жив тест 2026-08: промптът разрешаваше само PE/CI/PVC/AC/GRP, БЕЗ PP →
+# моделът пишеше „PE" за PP канализация, защото PP не му беше позволен).
+SUPPORTED_MATERIALS: tuple[str, ...] = tuple(m for m, _ in _MATERIAL_PATTERNS)
+
 _HDD_RE = re.compile(
     r"безизкоп|HDD|сондаж|сондир|хоризонтал\w*\s+сонд|pipe\s*burst|микротунел",
     re.IGNORECASE,
