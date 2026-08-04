@@ -77,30 +77,54 @@ def test_ss_via_recompute_pipeline():
 
 
 def test_ss_with_positive_lag_is_preserved():
-    """SS+1d (урок #15): изкоп ден 1, полагане ден 2."""
+    """SS+1d (урок #15): изкоп ден 1, полагане ден 2.
+
+    Одит #3: лагът е ДЕКЛАРИРАН (`lag_days=1`), не изведен от датите."""
     sched = [
         _task("A", 1, 20),
         {"id": "B", "name": "B", "start_day": 2, "duration": 19, "end_day": 20,
-         "dependencies": [_link("A", "SS")]},
+         "dependencies": [_link("A", "SS", 1)]},
     ]
     by = _by_id(_b().reschedule(sched))
-    assert by["B"]["start_day"] == 2     # офсетът 1 се пази спрямо A.start
+    assert by["B"]["start_day"] == 2     # A.start(1) + деклариран lag 1
 
 
 # ===================================================================
-# FS — досегашното поведение оцелява
+# FS — умишлената празнина е ДЕКЛАРИРАН lag, не разлика в дати
 # ===================================================================
 
-def test_fs_gap_is_preserved():
-    """Настилки FS+30 — празнината не се губи (урок #36)."""
+def test_fs_declared_lag_is_preserved():
+    """Настилки FS+30 — празнината е ДЕКЛАРИРАН lag_days=30 (урок #36).
+
+    Одит #3 + проба 2026-07-24: преди празнината се пазеше от разликата в
+    AI-датите; сега трябва да е формален lag, за да не се бърка произволна AI
+    празнина с инженерно решение.  Промптът вече иска настилки като SS/FS+30.
+    """
     sched = [
         {"id": "В01", "name": "Полагане", "start_day": 1, "duration": 10,
          "end_day": 10, "dependencies": []},
         {"id": "Н01", "name": "Асфалтиране", "start_day": 41, "duration": 8,
-         "end_day": 48, "dependencies": ["В01"]},
+         "end_day": 48, "dependencies": [_link("В01", "FS", 30)]},
     ]
     by = _by_id(_b().reschedule(sched))
     assert by["Н01"]["start_day"] - by["В01"]["end_day"] - 1 == 30
+
+
+def test_undeclared_ai_gap_collapses_to_declared_lag():
+    """Проба 2026-07-24: AI дата-празнина БЕЗ деклариран lag вече НЕ оцелява.
+
+    Точният реален дефект: наследник започва в деня на края на предшественика
+    (off-by-one), изведен офсет -1 → невалиден график.  Сега при FS+0
+    наследникът е точно ден след предшественика, независимо от AI-датата.
+    """
+    sched = [
+        {"id": "T14", "name": "Полагане", "start_day": 331, "duration": 136,
+         "end_day": 466, "dependencies": []},
+        {"id": "T15", "name": "Засипване", "start_day": 466, "duration": 135,
+         "end_day": 600, "dependencies": ["T14"]},   # AI off-by-one: start==pred.end
+    ]
+    by = _by_id(_b().reschedule(sched))
+    assert by["T15"]["start_day"] == by["T14"]["end_day"] + 1   # FS+0 → +1, валидно
 
 
 def test_fs_successor_shifts_when_predecessor_lengthens():
@@ -180,11 +204,13 @@ def test_mixed_types_in_one_schedule():
     assert by["C"]["start_day"] == by["B"]["end_day"] + 1  # FS gap 0
 
 
-def test_string_dependency_defaults_to_fs():
+def test_string_dependency_defaults_to_fs_zero_lag():
+    """Одит #3: низова зависимост = FS с ДЕКЛАРИРАН lag 0 → наследникът е
+    точно ден след предшественика.  Произволната AI дата-празнина (тук 4 дни)
+    вече НЕ се пази — това беше източникът на скрития lag."""
     sched = [_task("A", 1, 10), _task("B", 15, 5, ["A"])]
     by = _by_id(_b().reschedule(sched))
-    # FS офсет: 15-10-1=4, пази се
-    assert by["B"]["start_day"] - by["A"]["end_day"] - 1 == 4
+    assert by["B"]["start_day"] == by["A"]["end_day"] + 1   # FS+0, не +4
 
 
 def test_reschedule_output_is_valid():

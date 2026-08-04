@@ -40,6 +40,32 @@ def _pipe(tid: str, name: str, length: int, dn: int, **extra) -> dict:
     return task
 
 
+def test_dates_cascade_even_when_no_duration_changed():
+    """Проба 2026-08-04 (реален ВиК проект): график, чиито дейности са ИЗЦЯЛО
+    непараметрични (изкоп/извозване — няма норма → нищо не се сменя), пак трябва
+    да получи КАСКАДИРАНИ дати по зависимостите.
+
+    Бъгът: reschedule се пускаше само `if changes` → при 0 сменени продължителности
+    датите оставаха както ги е дал AI-ят (извозване почва ден 2, а изкопът-
+    предшественик свършва ден 148) → 16 грешки в gate-а на реален проект.
+
+    FAILURE означава: датовите нарушения от AI оцеляват, когато нищо не е
+    параметрично — детерминистичният слой не налага реда на зависимостите."""
+    schedule = [
+        {"id": "K1", "name": "Изкоп (без норма)", "start_day": 1, "end_day": 148,
+         "duration": 148, "dependencies": []},
+        {"id": "K2", "name": "Извозване", "start_day": 2, "end_day": 3,
+         "duration": 2, "dependencies": ["K1"]},           # AI: почва ПРЕДИ края на K1
+        {"id": "K3", "name": "Засипване", "start_day": 4, "end_day": 5,
+         "duration": 2, "dependencies": ["K2"]},
+    ]
+    result = _builder().recompute_durations(schedule)
+    by_id = {t["id"]: t for t in result["schedule"]}
+    assert result["summary"]["recomputed"] == 0        # нищо не е параметрично
+    assert by_id["K2"]["start_day"] == 149             # каскадирано СЛЕД K1 (148)
+    assert by_id["K3"]["start_day"] == 151             # каскадирано СЛЕД K2 (150)
+
+
 # ===================================================================
 # recompute_durations — замяна
 # ===================================================================
@@ -156,33 +182,40 @@ def test_recompute_shifts_dependent_task():
 
 
 def test_recompute_preserves_intentional_lag():
-    """Урок #36: настилки SS+30 — празнината не се изтрива при преизчисление."""
+    """Урок #36: настилки FS+30 — празнината е ДЕКЛАРИРАН lag_days=30.
+
+    Одит #3: празнината вече идва от формалния lag, не от разликата в AI-датите.
+    """
     schedule = [
         _pipe("В01", "Полагане DN500 PE", 720, 500, duration=10, end_day=10),
-        {"id": "Н01", "name": "Асфалтиране", "duration": 8,
-         "start_day": 41, "end_day": 48, "dependencies": ["В01"]},
+        {"id": "Н01", "name": "Асфалтиране", "duration": 8, "start_day": 41,
+         "end_day": 48,
+         "dependencies": [{"predecessor_id": "В01", "type": "FS", "lag_days": 30}]},
     ]
     result = _builder().recompute_durations(schedule)
     by_id = {t["id"]: t for t in result["schedule"]}
 
-    # Оригиналната празнина: 41 - 10 - 1 = 30 дни. Запазва се след промяната.
+    # В01 става 48 дни (720/15); Н01 = В01.end + 1 + деклариран lag 30.
     assert by_id["Н01"]["start_day"] - by_id["В01"]["end_day"] - 1 == 30
-    assert by_id["Н01"]["start_day"] == 79
 
 
 def test_recompute_preserves_negative_lag_overlap():
-    """Урок #15: SS+1d припокриване (изкоп паралелно с полагане) се запазва."""
+    """Урок #15: SS припокриване — изразено като ДЕКЛАРИРАН отрицателен lag.
+
+    Одит #3: припокриването е формално (SS с lag), не произволна AI дата-
+    разлика.  SS+0 означава засипване тръгва заедно с полагането.
+    """
     schedule = [
         _pipe("В01", "Полагане DN500 PE", 720, 500, duration=10, end_day=10),
-        {"id": "В02", "name": "Засипване", "duration": 10,
-         "start_day": 2, "end_day": 11, "dependencies": ["В01"]},
+        {"id": "В02", "name": "Засипване", "duration": 10, "start_day": 2,
+         "end_day": 11,
+         "dependencies": [{"predecessor_id": "В01", "type": "SS", "lag_days": 0}]},
     ]
     result = _builder().recompute_durations(schedule)
     by_id = {t["id"]: t for t in result["schedule"]}
 
-    # Оригинална празнина: 2 - 10 - 1 = -9 (припокриване)
-    assert by_id["В02"]["start_day"] - by_id["В01"]["end_day"] - 1 == -9
-    assert by_id["В02"]["start_day"] == 40
+    # SS+0 → В02 започва заедно с В01.
+    assert by_id["В02"]["start_day"] == by_id["В01"]["start_day"]
 
 
 def test_recompute_without_reschedule_leaves_dates_alone():

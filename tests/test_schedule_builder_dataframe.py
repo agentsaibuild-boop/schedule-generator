@@ -120,7 +120,9 @@ class TestValues:
     def test_length_column(self):
         sb = _builder()
         df = sb.to_dataframe([_task(length_m=673)], START_DATE)
-        assert df.iloc[0]["L(м)"] == 673
+        # Проба 2026-07-24: L(м) е низова колона (заедно с „—" за липса), за да
+        # не гърми pyarrow при смесени типове.
+        assert df.iloc[0]["L(м)"] == "673"
 
 
 # ---------------------------------------------------------------------------

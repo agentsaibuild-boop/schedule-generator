@@ -239,3 +239,45 @@ def test_team_overlap_is_a_warning_not_an_error():
         _t("B", 5, 10, team="ЕВ1"),
     ])
     assert result["valid"] is True
+
+
+# ===================================================================
+# Одит v5, точка 9 — повреден тип/лаг е ТВЪРДА ГРЕШКА, не тиха коерция
+# ===================================================================
+
+def test_invalid_dependency_type_is_a_hard_error():
+    """Непознат тип (напр. 'BAD') не бива да става тихо FS."""
+    result = _v([
+        _t("A", 1, 5),
+        _t("B", 6, 5, deps=[{"predecessor_id": "A", "type": "BAD", "lag_days": 0}]),
+    ])
+    assert result["valid"] is False
+    assert any("невалиден тип" in e for e in result["errors"])
+
+
+def test_non_numeric_lag_is_a_hard_error():
+    result = _v([
+        _t("A", 1, 5),
+        _t("B", 6, 5, deps=[{"predecessor_id": "A", "type": "FS", "lag_days": "3"}]),
+    ])
+    assert result["valid"] is False
+    assert any("нечислов лаг" in e for e in result["errors"])
+
+
+def test_valid_types_do_not_trigger_the_hard_error():
+    for t in ("FS", "SS", "FF", "SF"):
+        result = _v([
+            _t("A", 1, 5),
+            _t("B", 6, 5, deps=[{"predecessor_id": "A", "type": t, "lag_days": 0}]),
+        ])
+        assert not any("невалиден тип" in e for e in result["errors"]), t
+
+
+def test_task_level_bad_dependency_type_is_caught():
+    """Старият формат носи dependency_type на самата задача."""
+    result = _v([
+        _t("A", 1, 5),
+        _t("B", 6, 5, deps=["A"], dependency_type="WRONG"),
+    ])
+    assert result["valid"] is False
+    assert any("dependency_type" in e for e in result["errors"])

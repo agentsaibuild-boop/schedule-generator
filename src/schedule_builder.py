@@ -257,10 +257,29 @@ class ScheduleBuilder:
                 "reason": result.reason,
             })
 
-        if changes and reschedule:
+        # Каскадата на датите (start/end по графа на зависимостите) е ИНВАРИАНТ на
+        # коректността — не зависи от това дали продължителност е сменена.  Проба
+        # 2026-08-04 (реален ВиК проект): при график, чиито дейности са изцяло
+        # NOT_PARAMETRIC (изкоп/извозване/настилки — няма норма → `changes` празно),
+        # каскадата се пропускаше и грешните AI-дати оцеляваха (напр. извозване
+        # почва ден 2, а изкопът-предшественик свършва ден 148 → 16 грешки в gate-а).
+        # Сега каскадата се пуска ВИНАГИ при reschedule=True (идемпотентна: вече
+        # консистентни дати остават същите; задачи без предшественик пазят AI-датата).
+        if reschedule:
             resched = self.reschedule(updated)
             updated = resched["schedule"]
             warnings.extend(resched["warnings"])
+
+        # Гаранция за `end_day` (проба на реален проект 2026-07-31): reschedule попълва
+        # датите само когато има променени продължителности.  Непараметрична
+        # задача (изкоп/извозване/настилки — няма норма, нищо не се променя)
+        # оставаше с end_day=None → чупи експорта (XML/PDF искат край).  Тук
+        # всяка задача без край го получава от start_day + duration.
+        for task in updated:
+            if task.get("end_day") is None:
+                sd = self._as_int(task.get("start_day"), 1)
+                dur = self._as_int(task.get("duration"), 0)
+                task["end_day"] = sd if dur <= 0 else sd + dur - 1
 
         new_total = self._total_duration(updated)
 
@@ -342,16 +361,21 @@ class ScheduleBuilder:
             else:
                 orig_end[tid] = start + max(self._as_int(task.get("duration"), 0), 1) - 1
 
-        # --- Офсет по ребро, ПОДХОДЯЩ ЗА ТИПА на връзката ---
+        # --- Офсет по ребро = ДЕКЛАРИРАНИЯТ lag, не разликата между старите дати ---
         #
-        # Одит 2026-07-24: досега пазехме само `succ.start - pred.end - 1` —
-        # това е FS офсет.  Валидаторът, XML експортът и import_xml разбираха
-        # SS/FF/SF, а rescheduler-ът превръщаше всичко във FS: SS връзка се
-        # местеше грешно при промяна на продължителност.
+        # Одит #3 + проба 2026-07-24 (реален проект): досега офсетът
+        # се извеждаше от AI-датите (`succ.start - pred.end - 1`).  Така всяка
+        # AI грешка в датите се превръщаше в СКРИТ lag: реалният проект даде
+        # T15 (Засипване) да започва в деня, в който T14 (Полагане) свършва →
+        # изведен офсет -1 → графикът невалиден (FS иска +1).
         #
-        # Сега за всеки тип се пази СВОЯТ офсет, изведен от оригиналните дати,
-        # за да оцелее умишлената празнина (настилки FS+30, урок #36) И да се
-        # спазва семантиката на SS/FF/SF.
+        # Сега офсетът е ФОРМАЛНОТО `lag_days` от връзката.  Умишлените празнини
+        # (настилки) трябва да са ДЕКЛАРИРАН lag (промптът вече иска SS+30, урок
+        # #36), а не разлика в дати.  Произволна AI празнина вече не оцелява.
+        #
+        # NB: началото на задачите БЕЗ предшественик още идва от AI-датата
+        # (`orig_start`) — заключването на самите дати е отделна отворена
+        # находка (#2), не се пипа тук.
         edges: dict[tuple[str, str], tuple[str, int]] = {}
         for task in updated:
             tid = task.get("id", "")
@@ -359,15 +383,7 @@ class ScheduleBuilder:
                 dep_id = link.predecessor_id
                 if dep_id not in orig_end:
                     continue
-                if link.type == "SS":
-                    offset = orig_start[tid] - orig_start[dep_id]
-                elif link.type == "FF":
-                    offset = orig_end[tid] - orig_end[dep_id]
-                elif link.type == "SF":
-                    offset = orig_end[tid] - orig_start[dep_id]
-                else:  # FS
-                    offset = orig_start[tid] - orig_end[dep_id] - 1
-                edges[(dep_id, tid)] = (link.type, offset)
+                edges[(dep_id, tid)] = (link.type, link.lag_days)
 
         # --- Топологичен ред (Kahn) ---
         order = self._topological_order(updated, task_by_id)
@@ -387,23 +403,23 @@ class ScheduleBuilder:
             duration = self._as_int(task.get("duration"), 0)
             span = max(duration, 1) - 1  # end = start + span
 
-            # Всяка връзка налага най-ранно начало според ТИПА си.
+            # Всяка връзка налага най-ранно начало според ТИПА си + ДЕКЛАРИРАНИЯ lag.
             candidates: list[int] = []
             for dep_id in dependency_ids(task):
                 if dep_id not in new_end:
                     continue
-                link_type, offset = edges.get((dep_id, tid), ("FS", 0))
+                link_type, lag = edges.get((dep_id, tid), ("FS", 0))
                 if link_type == "SS":
-                    # succ.start = pred.start + offset
-                    candidates.append(new_start[dep_id] + offset)
+                    # succ.start = pred.start + lag
+                    candidates.append(new_start[dep_id] + lag)
                 elif link_type == "FF":
-                    # succ.end = pred.end + offset → start = end - span
-                    candidates.append(new_end[dep_id] + offset - span)
+                    # succ.end = pred.end + lag → start = end - span
+                    candidates.append(new_end[dep_id] + lag - span)
                 elif link_type == "SF":
-                    # succ.end = pred.start + offset → start = end - span
-                    candidates.append(new_start[dep_id] + offset - span)
+                    # succ.end = pred.start + lag → start = end - span
+                    candidates.append(new_start[dep_id] + lag - span)
                 else:  # FS
-                    candidates.append(new_end[dep_id] + 1 + offset)
+                    candidates.append(new_end[dep_id] + 1 + lag)
 
             start = max(candidates) if candidates else orig_start[tid]
             start = max(start, 1)
@@ -638,6 +654,40 @@ class ScheduleBuilder:
                 "зависимости не може да се изпълни, затова графикът НЕ е "
                 "потвърден. Разделете го на етапи."
             )
+
+        # --- Повредени тип/лаг на зависимост → ТВЪРДА ГРЕШКА ---
+        #
+        # Одит 2026-07-24 v5, точка 9: `dependency_links` свежда непознат тип
+        # (напр. "BAD") тихо до FS и нечислов лаг до 0.  Това е удобно за
+        # робастен експорт, но за ВАЛИДАТОРА е мълчаливо превръщане на
+        # повредени данни в различно инженерно решение.  Тук се хваща изрично:
+        # повреденият вход прави графика невалиден, а не друг график.
+        for task in schedule:
+            tid = task.get("id", "")
+            for dep in task.get("dependencies") or []:
+                if not isinstance(dep, dict):
+                    continue
+                raw_type = dep.get("type") or dep.get("dependency_type")
+                if raw_type is not None and str(raw_type).upper() not in _VALID_LINK_TYPES:
+                    errors.append(
+                        f"Задача ({tid}): невалиден тип зависимост "
+                        f"'{raw_type}' — допустими са FS, SS, FF, SF."
+                    )
+                raw_lag = dep.get("lag_days", dep.get("lag"))
+                if raw_lag is not None and (
+                    isinstance(raw_lag, bool)
+                    or not isinstance(raw_lag, (int, float))
+                ):
+                    errors.append(
+                        f"Задача ({tid}): нечислов лаг '{raw_lag}' в зависимост."
+                    )
+            # Нивото на задачата също носи dependency_type (стар формат).
+            raw_task_type = task.get("dependency_type")
+            if raw_task_type is not None and str(raw_task_type).upper() not in _VALID_LINK_TYPES:
+                errors.append(
+                    f"Задача ({tid}): невалиден dependency_type "
+                    f"'{raw_task_type}' — допустими са FS, SS, FF, SF."
+                )
 
         # --- Dependency violations, ПО ТИП на връзката ---
         #
@@ -1255,12 +1305,18 @@ class ScheduleBuilder:
             duration = task.get("duration", 0)
             start_day = task.get("start_day", 1)
             end_day = task.get("end_day", start_day + max(duration, 1) - 1)
+            # Проба 2026-07-24: DN смесва int (500) и низ („Ф90; РЕ") в една
+            # колона → Streamlit/pyarrow гърми при показване.  DN легитимно е
+            # текст (съдържа диаметър+материал), затова се нормализира до низ;
+            # L(м) остава числово или None, за да е чиста числова колона.
+            _dn = task.get("diameter")
+            _len = task.get("length_m")
             rows.append({
                 "№": i + 1,
                 "Дейност": task.get("name", "Без име"),
                 "Тип": get_type_label(task.get("type", "")),
-                "DN": task.get("diameter", "—"),
-                "L(м)": task.get("length_m", "—"),
+                "DN": "—" if _dn in (None, "") else str(_dn),
+                "L(м)": f"{_len:g}" if isinstance(_len, (int, float)) else "—",
                 "Екип": task.get("team", "—"),
                 "Начало": day_to_date(start_day, start_date),
                 "Край": day_to_date(end_day, start_date),

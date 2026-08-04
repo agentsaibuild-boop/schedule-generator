@@ -280,8 +280,8 @@ class TestHandleSelectRecent:
 
     def _projects(self):
         return [
-            {"id": "p1", "name": "Плевен", "path": "/a", "exists": True},
-            {"id": "p2", "name": "Враца", "path": "/b", "exists": True},
+            {"id": "p1", "name": "Тестоград", "path": "/a", "exists": True},
+            {"id": "p2", "name": "Долноград", "path": "/b", "exists": True},
             {"id": "p3", "name": "Стара Загора", "path": "/c", "exists": False},
         ]
 
@@ -302,7 +302,7 @@ class TestHandleSelectRecent:
     def test_valid_number_response_contains_project_name(self):
         h = _handler()
         result = h._handle_select_recent(1, self._projects())
-        assert "Плевен" in result["response"]
+        assert "Тестоград" in result["response"]
 
     def test_valid_number_sets_load_project_path(self):
         h = _handler()
