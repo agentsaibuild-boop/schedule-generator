@@ -1,20 +1,89 @@
 #!/bin/bash
-# Pre-commit hook: Run unit tests before allowing commit
-# E2E tests are slow and environment-dependent — run manually with: pytest tests/e2e/ -v -m e2e
+# Pre-commit hook: security/PII scan + unit tests before allowing commit.
+# E2E tests are slow and environment-dependent — run manually:
+#   pytest tests/e2e/ -v -m e2e
 # Install with: ./install-hooks.bat (Windows) or cp hooks/pre-commit .git/hooks/pre-commit
+#
+# ВАЖНО (одит v20): този файл е с LF line endings (виж .gitattributes) — CRLF го
+# чупи в Git Bash ($'\r': command not found).
+#
+# За integration тестове: PRECOMMIT_SKIP_TESTS=1 пуска САМО скана (без pytest),
+# за да се тества реалният shell hook без рекурсия.
 
 set -e
 
 echo "============================================"
-echo "  Pre-commit: Running unit tests..."
+echo "  Pre-commit: security scan + unit tests"
 echo "============================================"
 
-# Change to repo root
 cd "$(git rev-parse --show-toplevel)"
+
+# --- Secret / PII / client-data scan ---
+echo ""
+echo "[1/2] Scanning staged changes for secrets / client data..."
+
+# NUL-safe списък със staged файлове (одит v22): имена с интервали/табове/нови
+# редове чупеха `for f in $STAGED`.
+STAGED=()
+while IFS= read -r -d '' f; do
+  [ -n "$f" ] && STAGED+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACM -z)
+SCAN_FAIL=0
+
+# 1) Забранени файлове изобщо не бива да се комитват (по ИМЕ)
+for f in "${STAGED[@]}"; do
+  case "$f" in
+    .env|*/.env|config/projects_history.json|config/project_summary.json|converted/*|*/converted/*)
+      echo "  ✗ ЗАБРАНЕН файл в commit: $f"; SCAN_FAIL=1 ;;
+  esac
+done
+
+# 2) Ключове / машинни пътища / клиентски denylist — в ЕДИН bypass-proof път
+#    (одит v23).  `security_scan.py --staged` чете STAGED blob-овете ДИРЕКТНО ОТ
+#    GIT INDEX (`git show :path`), НЕ работното дърво — затова staged-но-после-
+#    изтрит файл ПАК се сканира.  Grешка при четене на staged blob = rc 3
+#    (operational, fail-closed).  Denylist-ът е опционален; ключове/пътища се
+#    сканират и без него.
+PYBIN=""
+for cand in ./.venv/Scripts/python.exe python python3; do
+  command -v "$cand" >/dev/null 2>&1 && { PYBIN="$cand"; break; }
+done
+if [ -z "$PYBIN" ]; then
+  echo "  ⚠ Няма Python — сканът за тайни/имена е ПРОПУСНАТ → fail-closed."; SCAN_FAIL=1
+else
+  DENYLIST="$(git rev-parse --git-dir)/hooks-secrets"
+  DL="$DENYLIST"
+  CLEANUP=""
+  if [ ! -f "$DENYLIST" ]; then DL="$(mktemp)"; CLEANUP="$DL"; fi   # празен denylist
+  set +e
+  OUT="$("$PYBIN" tools/security_scan.py --staged "$DL" 2>&1)"
+  RC=$?
+  set -e
+  [ -n "$CLEANUP" ] && rm -f "$CLEANUP"
+  if [ "$RC" -ne 0 ]; then
+    [ -n "$OUT" ] && echo "$OUT"
+    [ "$RC" -eq 3 ] && echo "  ✗ ОПЕРАЦИОННА грешка в скана (fail-closed) — commit спрян."
+    SCAN_FAIL=1
+  fi
+fi
+
+if [ "$SCAN_FAIL" -ne 0 ]; then
+  echo ""
+  echo "SECRET/PII SCAN FAILED. Commit aborted."
+  echo "Извади файла/данните или ги обезличи, после комитни отново."
+  exit 1
+fi
+echo "  ✓ Няма намерени тайни/клиентски данни в staged промените."
+
+# За integration тест на реалния shell hook — без pytest рекурсия.
+if [ -n "$PRECOMMIT_SKIP_TESTS" ]; then
+  echo "  (PRECOMMIT_SKIP_TESTS — тестовете пропуснати; сканът мина)"
+  exit 0
+fi
 
 # --- Run unit/integration tests ---
 echo ""
-echo "[1/1] Running all unit tests (excluding E2E)..."
+echo "[2/2] Running all unit tests (excluding E2E)..."
 uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e -v --tb=short --no-header -q
 if [ $? -ne 0 ]; then
     echo ""

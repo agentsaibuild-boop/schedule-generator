@@ -1,0 +1,6 @@
+# Одит v20: hooks/pre-commit беше с CRLF → в Git Bash под Windows гърмеше
+# ($'\r': command not found, syntax error near `do\r').  Shell hook-овете и
+# скриптовете ЗАДЪЛЖИТЕЛНО с LF, независимо от core.autocrlf на машината.
+hooks/* text eol=lf
+*.sh text eol=lf
+*.bash text eol=lf

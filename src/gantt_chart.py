@@ -670,7 +670,11 @@ def get_schedule_stats(schedule_data: list[dict]) -> dict[str, Any]:
 def generate_demo_schedule() -> list[dict]:
     """Generate a realistic engineering project demo schedule (~35 tasks).
 
-    Uses КСС-style naming with real street names, DN diameters, and
+    СИНТЕТИЧНИ ДЕМО ДАННИ (одит v19): всички имена на улици/обекти са ИЗМИСЛЕНИ
+    плейсхолдъри (ул. Първа/Втора/Трета) — НЕ идват от реален проект.  DN,
+    О.Т. и последователността са в български тръжен стил само за визуализация.
+
+    Uses КСС-style naming with placeholder street names, DN diameters, and
     О.Т. (осови точки) references matching Bulgarian tender conventions.
 
     Covers: Design → Mobilization → Protocol obr.2 → Water (3 branches) →
@@ -749,7 +753,7 @@ def generate_demo_schedule() -> list[dict]:
     # =====================================================================
     tasks.append({
         "id": "В01",
-        "name": "Кл.1 Водопровод PE-HD Ф225 ул. Ал. Стамболийски (О.Т.45\u2013О.Т.62)",
+        "name": "Кл.1 Водопровод PE-HD Ф225 ул. Първа (О.Т.45\u2013О.Т.62)",
         "type": "water_pipe",
         "phase": "construction",
         "start_day": 271,
@@ -779,7 +783,7 @@ def generate_demo_schedule() -> list[dict]:
 
     tasks.append({
         "id": "В02",
-        "name": "Кл.2 Водопровод PE-HD Ф110 ул. Хр. Ботев (О.Т.62\u2013О.Т.78)",
+        "name": "Кл.2 Водопровод PE-HD Ф110 ул. Втора (О.Т.62\u2013О.Т.78)",
         "type": "water_pipe",
         "phase": "construction",
         "start_day": 271,
@@ -805,7 +809,7 @@ def generate_demo_schedule() -> list[dict]:
 
     tasks.append({
         "id": "В03",
-        "name": "Кл.3 Водопровод PE-HD Ф90 ул. В. Левски (О.Т.78\u2013О.Т.95)",
+        "name": "Кл.3 Водопровод PE-HD Ф90 ул. Трета (О.Т.78\u2013О.Т.95)",
         "type": "water_pipe",
         "phase": "construction",
         "start_day": 271,
@@ -834,7 +838,7 @@ def generate_demo_schedule() -> list[dict]:
     # =====================================================================
     tasks.append({
         "id": "К01",
-        "name": "Главен колектор I DN400 PVC ул. Ал. Стамболийски (РШ1\u2013РШ15)",
+        "name": "Главен колектор I DN400 PVC ул. Първа (РШ1\u2013РШ15)",
         "type": "sewer",
         "phase": "construction",
         "start_day": 271,
@@ -858,7 +862,7 @@ def generate_demo_schedule() -> list[dict]:
 
     tasks.append({
         "id": "К02",
-        "name": "Вторичен колектор DN315 PVC ул. Хр. Ботев (РШ15\u2013РШ22)",
+        "name": "Вторичен колектор DN315 PVC ул. Втора (РШ15\u2013РШ22)",
         "type": "sewer",
         "phase": "construction",
         "start_day": 561,
@@ -902,7 +906,7 @@ def generate_demo_schedule() -> list[dict]:
     # =====================================================================
     tasks.append({
         "id": "Р01",
-        "name": "Възстановяване настилки ул. Ал. Стамболийски",
+        "name": "Възстановяване настилки ул. Първа",
         "type": "road",
         "phase": "construction",
         "start_day": 375,
@@ -916,7 +920,7 @@ def generate_demo_schedule() -> list[dict]:
 
     tasks.append({
         "id": "Р02",
-        "name": "Възстановяване настилки ул. Хр. Ботев",
+        "name": "Възстановяване настилки ул. Втора",
         "type": "road",
         "phase": "construction",
         "start_day": 650,
@@ -930,7 +934,7 @@ def generate_demo_schedule() -> list[dict]:
 
     tasks.append({
         "id": "Р03",
-        "name": "Възстановяване настилки ул. В. Левски",
+        "name": "Възстановяване настилки ул. Трета",
         "type": "road",
         "phase": "construction",
         "start_day": 681,
@@ -947,7 +951,7 @@ def generate_demo_schedule() -> list[dict]:
     # =====================================================================
     tasks.append({
         "id": "Е01",
-        "name": "Преместване ЕЛ/ТТ кабели (ул. Ал. Стамболийски)",
+        "name": "Преместване ЕЛ/ТТ кабели (ул. Първа)",
         "type": "electrical",
         "phase": "construction",
         "start_day": 380,

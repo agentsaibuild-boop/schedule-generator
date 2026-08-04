@@ -39,7 +39,10 @@ config/cumulative_usage.json
 # Test artifacts
 tests/e2e/screenshots/
 
-# Note: config/projects_history.json is NOT ignored — it's needed for persistence
+# Конвертирани документи на КЛИЕНТСКИ проекти (одит v11 #9) — съдържат
+# извлечените количества/текст от тръжните документи.  НЕ в git.
+converted/
+
 # Note: These files ARE tracked (needed for installer):
 #   install.bat, start.bat, update.bat
 #   .env.example, .env.company.example
@@ -53,5 +56,8 @@ API's.env.txt
 # Virtual env (this session used .venv, not venv)
 .venv/
 
-# Local project history — contains machine paths / client data
+# Данни, специфични за машината/клиента — машинни пътища, имена на реални
+# проекти, история на чата.  Одит v11 #9: тези ДВА файла остават tracked в git
+# история — извади ги с `git rm --cached <файл>` (иска изрично разрешение).
 config/projects_history.json
+config/project_summary.json
