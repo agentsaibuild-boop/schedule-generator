@@ -231,6 +231,17 @@ def test_app_blocks_both_export_buttons():
     assert source.count("disabled=_blocked") >= 2
 
 
+def test_app_binds_export_artifacts_to_hash():
+    """Одит v7, точка 6: генериран PDF/XML носи hash и не остава за сваляне
+    след смяна на графика; JSON download също минава през gate-а."""
+    source = (Path(__file__).parent.parent / "app.py").read_text(encoding="utf-8")
+    assert "_fresh_artifact" in source
+    # артефактите се пазят като {bytes, hash}, не голи байтове
+    assert '"hash": _current_hash' in source
+    # JSON download вече е зад gate-а
+    assert source.count("disabled=_blocked") >= 3
+
+
 # ===================================================================
 # Детерминизмът се възстановява след AI correction
 # ===================================================================
@@ -246,8 +257,12 @@ def test_ai_correction_cannot_keep_a_bogus_duration():
         "status": "approved",
     }
     processor = AIProcessor(router=None, knowledge_manager=None)
+    # before_json е графикът СЛЕД детерминистичните продължителности —
+    # входовете (length_m/dn/material) вече присъстват, както в pipeline-а.
     updated, report = processor._restore_determinism_after_ai(
-        corrected, '{"tasks": [{"id": "В01"}]}'
+        corrected,
+        '{"tasks": [{"id": "В01", "name": "Полагане DN500 PE", '
+        '"length_m": 720, "dn": 500, "material": "PE"}]}',
     )
     task = updated["schedule"]["tasks"][0]
 

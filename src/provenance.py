@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -106,7 +108,8 @@ def _number(value: Any) -> float | None:
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        v = float(value)
+        return v if math.isfinite(v) else None
     text = str(value).strip().replace(" ", "").replace(" ", "")
     if not text:
         return None
@@ -116,25 +119,54 @@ def _number(value: Any) -> float | None:
             else text.replace(",", "")
     else:
         text = text.replace(",", ".")
+    cleaned = re.sub(r"[^\d.\-]", "", text)
+    if not cleaned or cleaned in ("-", ".", "-.", ".-"):
+        return None
     try:
-        return float(re.sub(r"[^\d.\-]", "", text) or "nan")
+        v = float(cleaned)
     except ValueError:
         return None
+    return v if math.isfinite(v) else None
 
 
 # Заглавия на колони, които носят описание / количество / мярка.
-_DESC_KEYS = ("наименование", "описание", "дейност", "позиция", "description", "item")
-_QTY_KEYS = ("количество", "к-во", "кол-во", "quantity", "qty")
+_DESC_KEYS = ("наименование", "описание", "дейност", "позиция", "description", "item",
+              "мрежа", "клон", "вид дейност", "работи")
+# „дължин" — при тръбните КСС количеството е в колона „Дължина /m/", не
+# „Количество" (проба 2026-07-24, реален проект).
+_QTY_KEYS = ("количество", "к-во", "кол-во", "дължин", "quantity", "qty")
 _UNIT_KEYS = ("мярка", "ед. мярка", "ед.мярка", "мерна", "unit", "uom")
 
 
-def _pick(row: dict, keys: tuple[str, ...]) -> tuple[str, Any]:
-    """Върни (име на колона, стойност) за първата колона, чието заглавие пасва."""
-    for column, value in row.items():
-        lowered = str(column).lower()
-        if any(key in lowered for key in keys):
-            return str(column), value
-    return "", None
+def _looks_like_description(text: str) -> bool:
+    """Описанието е ТЕКСТ (≥2 букви), не пореден номер/код/число.
+
+    Реален КСС „4. Пътна" (проба 2026-08-03): колона „Канализационна мрежа"
+    пасва на _DESC_KEYS (заради „мрежа"), но държи номера „1", докато реалното
+    описание е под разместен хедър „Ед. мярка".  Число за описание → негодно.
+    """
+    return bool(re.search(r"[^\W\d_].*[^\W\d_]", str(text or ""), re.UNICODE))
+
+
+def _pick(row: dict, keys: tuple[str, ...], prefer_numeric: bool = False) -> tuple[str, Any]:
+    """Върни (име на колона, стойност) за колона, чието заглавие пасва.
+
+    Одит v12 #5: предпочита се първата НЕПРАЗНА стойност (празна „Количество"
+    не бива да засенчва попълнена „Дължина /m/").
+    Одит v13: за КОЛИЧЕСТВО (`prefer_numeric=True`) се предпочита първата
+    ЧИСЛОВА стойност — иначе текст като „вж. проект" в „Количество" засенчваше
+    реалните 538 в „Дължина".
+    """
+    matches = [(str(c), v) for c, v in row.items()
+               if any(k in str(c).lower() for k in keys)]
+    if prefer_numeric:
+        for col, val in matches:
+            if _number(val) is not None:
+                return col, val
+    for col, val in matches:
+        if val is not None and str(val).strip():
+            return col, val
+    return matches[0] if matches else ("", None)
 
 
 def build_quantity_index(base_path: str | Path) -> list[QuantityRow]:
@@ -172,19 +204,34 @@ def build_quantity_index(base_path: str | Path) -> list[QuantityRow]:
                 if not isinstance(row, dict):
                     continue
                 desc_col, description = _pick(row, _DESC_KEYS)
-                qty_col, quantity = _pick(row, _QTY_KEYS)
+                qty_col, quantity = _pick(row, _QTY_KEYS, prefer_numeric=True)
                 _, unit = _pick(row, _UNIT_KEYS)
 
+                # Fallback за описанието: ако избраната колона е празна ИЛИ държи
+                # само число/код (напр. пореден номер „1" под разместен хедър —
+                # реален КСС „4. Пътна", проба 2026-08-03), вземи най-ДЪЛГАТА
+                # БУКВЕНА клетка от реда.  Числата са количества/цени, не описания.
                 description = str(description or "").strip()
+                if not _looks_like_description(description):
+                    best = description
+                    for col, val in row.items():
+                        s = str(val or "").strip()
+                        if len(s) > len(best) and _looks_like_description(s):
+                            desc_col, best = str(col), s
+                    description = best
                 if not description:
                     continue
 
+                # Реалният Excel ред (одит v11 #2): конверторът вече го записва
+                # (`__excel_row__`).  Fallback към offset+2 само за стар формат.
+                excel_row = row.get("__excel_row__")
+                if not isinstance(excel_row, int):
+                    excel_row = offset + 2
                 index.append(QuantityRow(
                     description=description,
                     quantity=_number(quantity),
                     unit=str(unit or "").strip(),
-                    # +2: ред 1 е заглавията, а Excel брои от 1.
-                    source=SourceRef(document, sheet_name, offset + 2, qty_col or desc_col),
+                    source=SourceRef(document, sheet_name, excel_row, qty_col or desc_col),
                     raw=row,
                 ))
 
@@ -238,11 +285,52 @@ CITE_UNKNOWN = "unknown_ref"
 CITE_UNCITED = "uncited"
 
 
+# Канонични мерни единици — за да не се брои extraction-артефакт (описание или
+# число в колоната за мярка) за „разминаване" (проба на реален проект 2026-07-31).
+_REAL_UNITS = frozenset({"м", "м2", "м3", "бр", "кг", "т"})
+
+_UNIT_ALIASES = {
+    "квм": "м2", "м²": "м2", "m2": "м2",
+    "кубм": "м3", "м³": "м3", "m3": "м3",
+    "лм": "м", "линеенметър": "м", "m": "м",
+    "брой": "бр", "броя": "бр", "бройки": "бр", "pcs": "бр", "бр": "бр",
+    "kg": "кг", "t": "т", "тон": "т", "тона": "т",
+}
+
+
+# Rate/съставни единици: символ „/" ИЛИ текстов свързвач между две единици.
+_RATE_RE = re.compile(r"/|\bна\b|\bза\b|\bper\b|\bна\s*\d", re.IGNORECASE)
+
+
+def _is_composite_unit(raw: str) -> bool:
+    """Дали суровата мярка е съставна/размерностна (m3/m', „m3 на m", „kg per m").
+
+    Одит v15 #7: досега само символът „/" се разпознаваше; текстовите форми
+    („m3 на m", „м3 за л.м") минаваха за проста единица.
+    """
+    s = str(raw or "").strip().lower()
+    if not s:
+        return False
+    if "/" in s:
+        return True
+    # rate-свързвач с единица от двете страни (напр. „m3 на m", „м3 за л.м")
+    return bool(re.search(r"(м|m|кг|kg|т|t|бр)\S*\s*(на|за|per)\s*\S*(м|m|л)", s))
+
+
 def _norm_unit(unit: str) -> str:
-    """Нормализирай мярка за сравнение: 'м2' == 'M2' == 'кв.м'."""
-    u = str(unit or "").strip().lower().replace(" ", "").replace(".", "")
-    return {"кв.м": "м2", "кв.м.": "м2", "куб.м": "м3", "квм": "м2",
-            "кубм": "м3", "m2": "м2", "m3": "м3", "m": "м", "бр": "бр"}.get(u, u)
+    """Нормализирай мярка за сравнение: 'м2'=='M2'=='кв.м', 'брой'=='бр',
+    латиница m → кирилица м.
+
+    Одит v11 #5: съставни/размерностни единици (напр. `m3/m'` — обем на линеен
+    метър) НЕ се колапсват до обемна база — това би могло да обяви `10 m3` и
+    `10 m3/m'` за еднакви (различни физически размерности → фалшив verified).
+    Композитната единица остава СВОЙ токен; понеже не е в `_REAL_UNITS`,
+    `_cross_check` не я ползва да обвинява, но и не я приравнява на м3.
+    """
+    u = (str(unit or "").strip().lower()
+         .replace(" ", "").replace(".", "").replace("'", "").replace("`", ""))
+    u = u.replace("m", "м")          # латиница → кирилица (m2/m3/m → м2/м3/м)
+    return _UNIT_ALIASES.get(u, u)
 
 
 def _cross_check(task: dict, row: QuantityRow) -> str:
@@ -257,9 +345,22 @@ def _cross_check(task: dict, row: QuantityRow) -> str:
     """
     from src.duration_calculator import detect_material
 
+    # Мярката обвинява само когато И ДВЕТЕ страни са разпознати РЕАЛНИ единици.
+    # Ако колоната за мярка в КСС съдържа описание или число (различен layout на
+    # листа — проба на реален проект), не е мярка и не бива да прави фалшиво разминаване;
+    # числото пак трябва да съвпада, за да е verified.
     task_unit = _norm_unit(task.get("unit", ""))
     row_unit = _norm_unit(row.unit)
-    if task_unit and row_unit and task_unit != row_unit:
+    # Съставна/размерностна единица (m3/m', „m3 на m", „м3 за л.м", „kg per m")
+    # НЕ се приравнява тихо на базовата (одит v12 #6, v14 симетрично, v15 текст).
+    # Разпознава се И символ „/", И текстови rate-форми, в двете посоки.
+    t_comp = _is_composite_unit(task.get("unit", ""))
+    r_comp = _is_composite_unit(row.unit)
+    if (t_comp or r_comp) and task_unit != row_unit:
+        return (f"съставна/размерностна мярка (задача '{task.get('unit','')}' vs "
+                f"ред '{row.unit}') — нужен е преглед, не се приема за доказана")
+    if (task_unit in _REAL_UNITS and row_unit in _REAL_UNITS
+            and task_unit != row_unit):
         return f"мярката не съвпада: задача '{task_unit}' vs ред '{row_unit}'"
 
     task_mat = detect_material(task)
@@ -267,7 +368,138 @@ def _cross_check(task: dict, row: QuantityRow) -> str:
     if task_mat and row_mat and task_mat != row_mat:
         return f"материалът не съвпада: задача '{task_mat}' vs ред '{row_mat}'"
 
+    # Настилков материал (одит v14): detect_material лови само тръбни материали,
+    # затова „Асфалтова настилка 420м²" минаваше за „Бетонова настилка 420м²".
+    # Тук се сравнява настилковият материал, когато и двете страни го имат.
+    task_pav = _pavement_material(task.get("name", ""))
+    row_pav = _pavement_material(row.description)
+    if task_pav and row_pav and task_pav != row_pav:
+        return f"настилков материал не съвпада: '{task_pav}' vs '{row_pav}'"
+
     return ""
+
+
+# Настилкови материали — за да не мине „асфалт 420м²" за „бетон 420м²".
+_PAVEMENT_PATTERNS = (
+    ("асфалт", re.compile(r"асфалт", re.IGNORECASE)),
+    ("бетон", re.compile(r"бетон", re.IGNORECASE)),
+    ("паваж", re.compile(r"пав(аж|е)|унипаваж", re.IGNORECASE)),
+    ("тротоарни плочи", re.compile(r"тротоарн|плоч", re.IGNORECASE)),
+)
+
+
+def _pavement_material(text: str) -> str | None:
+    low = str(text or "").lower()
+    for name, pattern in _PAVEMENT_PATTERNS:
+        if pattern.search(low):
+            return name
+    return None
+
+
+# КАНОНИЧЕН КЛАС НА ДЕЙНОСТ (одит v15/v16): вместо да разчитаме на display-текст
+# и blacklist, всяка задача се свежда до устойчив клас дейност.  Това е основата
+# за: (1) кои дейности са производствени; (2) откриване на дубликат по КЛАС, не
+# по име (минимална промяна на името вече не заобикаля).
+# Одит v16 P0: РОЛЯТА надделява над съдържанието — „Приемане на изкопа" е
+# приемане (не изкоп), „Документация за изкопни работи" е документация.  Затова
+# НЕ-производствените класове се проверяват ПЪРВИ.  „Безизкопно полагане" се
+# хваща отделно (негация) преди изкоп.
+_ACTIVITY_CLASSES = (
+    # Роля/административни ПЪРВО
+    ("milestone",    ("край:", "финал", "milestone", "приключване на")),
+    ("acceptance",   ("приеман", "приемателн", "предаван", "приемо", "56-дневн")),
+    ("inspection",   ("инспекц", "оглед", "надзор", "проверк на", "контрол на")),
+    ("documentation",("документац", "доклад", "отчет", "изготвян на проект",
+                      "съгласуван", "разрешителн")),
+    ("mobilization", ("мобилизац", "демобилизац", "подготовк на площадк",
+                      "подготвителн", "координаци", "обучени", "временн")),
+    # Производствени.  ВАЖНО (проба 2026-08-03): pavement е ПРЕДИ excavation/laying,
+    # защото pavement-СЪЩЕСТВИТЕЛНОТО (бордюр/тротоар/плоч/настилк) е по-специфично
+    # от общия ГЛАГОЛ („полагане на бордюри" е настилка, не тръбополагане; а
+    # „възстановяване на настилка извън изкоп" е настилка, не изкоп).  „бетонов" е
+    # МАХНАТ — бетонова ТРЪБА не е настилка (настилк/паваж/плоч покриват реалните).
+    ("pavement",     ("настилк", "асфалт", "паваж", "тротоар", "бордюр", "плоч")),
+    ("excavation",   ("изкоп", "разкоп", "разкъртв", "траншея")),
+    ("demolition",   ("развал", "разрушав", "премахван на настилк")),
+    ("laying",       ("полаган", "полага", "монтаж на тръб", "изграждан на",
+                      "полагане dn", "тръбопровод")),
+    ("backfill",     ("засип", "уплътн", "насип", "подложк", "пясъчн", "трошен камък")),
+    ("testing",      ("изпитв", "хидравл", "проба на")),
+    ("disinfection", ("дезинфек", "промивк", "хлориран")),
+    # NB: „срс/сво/ско" (сградни отклонения) НЕ са тук — те са 3-буквени кодове
+    # и се матчват като ЦЯЛА ДУМА след цикъла (иначе „ско" лъже в „геодезичеСКО").
+    ("manhole",      ("шахт", "ревизион", "съоръжен",
+                      "спирател", "хидрант", "арматур")),
+    ("transport",    ("извозв", "транспорт", "депо", "натовар")),
+)
+
+# Класове, които представляват реална ФИЗИЧЕСКА работа (доказват BOQ количество).
+_PRODUCTION_CLASSES = frozenset({
+    "excavation", "demolition", "laying", "backfill", "pavement",
+    "testing", "disinfection", "manhole", "transport",
+})
+# Класове/типове, които НЕ доказват количество (агрегат/точка/администрация).
+_NON_PRODUCTION_CLASSES = frozenset({
+    "mobilization", "acceptance", "inspection", "documentation", "milestone",
+})
+
+_NON_PRODUCTION_FLAGS = ("milestone", "is_milestone", "is_summary", "summary",
+                         "_has_children", "has_children")
+_NON_PRODUCTION_TYPES = ("milestone", "summary", "group", "phase", "wbs",
+                         "approval", "inspection", "administrative", "admin",
+                         "documentation", "acceptance", "reporting")
+
+
+# Допустими класове (enum) — за да не мине измислен клас като „laying_a".
+_VALID_ACTIVITY_CLASSES = _PRODUCTION_CLASSES | _NON_PRODUCTION_CLASSES
+
+
+def activity_class(task_or_text: Any) -> str | None:
+    """Каноничен клас на дейност — ДЕТЕРМИНИСТИЧЕН от името.  None = неразпознат.
+
+    TRUST BOUNDARY (одит v16 P0): AI-подаденото поле `activity_class` НЕ се чете
+    и НЕ се вярва.  Иначе моделът може да си сложи „laying_a"/„laying_b" и да
+    заобиколи откриването на дубликат, или да маркира приемателна задача като
+    „laying" и да я самозавери.  Класът се извежда само от името, срещу enum.
+    """
+    text = (str(task_or_text.get("name", "")) if isinstance(task_or_text, dict)
+            else str(task_or_text or ""))
+    low = text.lower()
+    # Негация/контекст: „безизкопно/HDD/сондаж" е ПОЛАГАНЕ, не изкоп — макар да
+    # съдържа „изкоп" (одит v16 P0: приоритетният substring matcher бъркаше).
+    if ("безизкоп" in low or "сондаж" in low or "хдд" in low
+            or re.search(r"\bhdd\b", low)):
+        return "laying"
+    for cls, keywords in _ACTIVITY_CLASSES:
+        if any(k in low for k in keywords):
+            return cls
+    # 3-буквени кодове за сградни отклонения (СРС/СВО/СКО) — матчват се като ЦЯЛА
+    # ДУМА и с НАЙ-НИСЪК приоритет (одит v18): голият подниз „ско"/„сво" лъжливо
+    # съвпадаше в „геодезичеСКО"/„оСВОбождаване" → фалшив клас-покривач manhole.
+    if re.search(r"\b(срс|сво|ско|рш)\b", low):
+        return "manhole"
+    return None
+
+
+def _is_production_task(task: dict) -> bool:
+    """Дали задачата е реална ПРОИЗВОДСТВЕНА дейност (може да доказва BOQ).
+
+    Одит v14/v15 P0: досега blacklist само по milestone/summary флагове.  Сега:
+    (1) явни не-производствени флагове/типове → False (вкл. approval/inspection/
+    acceptance, които преди минаваха по подразбиране); (2) каноничен клас — ако
+    е разпознат НЕ-производствен клас (приемане/оглед/милстоун) → False.
+    Неразпознат клас остава производствен, за да не се блокира прекалено (реален
+    ВиК график има много имена), но НАЗВАНИТЕ администативни се хващат.
+    """
+    for flag in _NON_PRODUCTION_FLAGS:
+        if task.get(flag):
+            return False
+    if str(task.get("type", "")).lower() in _NON_PRODUCTION_TYPES:
+        return False
+    cls = activity_class(task)
+    if cls in _NON_PRODUCTION_CLASSES:
+        return False
+    return True
 
 
 def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
@@ -291,10 +523,19 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
     by_ref = {row.ref: row for row in index}
     counts = {CITE_VERIFIED: 0, CITE_MISMATCH: 0, CITE_UNKNOWN: 0, CITE_UNCITED: 0}
     problems: list[dict] = []
+    verified_refs: list[str] = []      # одит v12: ДОКАЗАНО покрити редове
+    _seen_verified: set = set()        # одит v14: за хващане на дублирани задачи
     human = 0
 
     for task in schedule:
         if not isinstance(task, dict):
+            continue
+        # Само ПРОИЗВОДСТВЕНА задача доказва покритие на количество (одит v13/v14).
+        # Милстоун/summary/родителска дейност е времева точка или агрегат, не
+        # изпълнение на 100 м тръба — дори да носи количество и source_ref, не
+        # прави реда „доказано покрит".  Проверяват се ВСИЧКИ представяния на
+        # summary, вкл. `is_summary` (което enrichment промптът реално ползва).
+        if not _is_production_task(task):
             continue
         quantity = _number(task.get("length_m") or task.get("quantity"))
         if quantity is None:
@@ -333,9 +574,27 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
                     check = CitationCheck(CITE_MISMATCH, ref, quantity, actual,
                                           mismatch_note)
                 else:
-                    check = CitationCheck(CITE_VERIFIED, ref, quantity, actual)
+                    # ДУБЛИКАТ (одит v14/v15 P0): ключът е (ref, КЛАС на дейност),
+                    # не display-име и не точно количество.  Така минимална
+                    # промяна на името („Полагане DN110" vs „Полагане на DN110")
+                    # или количество в рамките на толеранса вече НЕ заобикалят
+                    # проверката.  Различните ДЕЙНОСТИ на един ред (изкоп vs
+                    # полагане — различен клас) остават легитимни.  Неразпознат
+                    # клас пада към нормализираното име, за да има все пак защита.
+                    cls = activity_class(task) or str(task.get("name", "")).strip().lower()
+                    dup_key = (ref, cls)
+                    if dup_key in _seen_verified:
+                        check = CitationCheck(
+                            CITE_MISMATCH, ref, quantity, actual,
+                            f"дублирана дейност (клас '{cls}') — редът вече е зает "
+                            "от същия вид дейност")
+                    else:
+                        _seen_verified.add(dup_key)
+                        check = CitationCheck(CITE_VERIFIED, ref, quantity, actual)
 
         counts[check.status] += 1
+        if check.status == CITE_VERIFIED and check.ref:
+            verified_refs.append(check.ref)
         task["quantity_provenance"] = {
             "status": (STATUS_EXTRACTED if check.status == CITE_VERIFIED
                        else STATUS_AI_REPORTED),
@@ -371,8 +630,131 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
         "unknown_ref": counts[CITE_UNKNOWN],
         "uncited": counts[CITE_UNCITED],
         "human": human,
+        "verified_refs": verified_refs,
         "problems": problems,
     }
+
+
+# ======================================================================
+# ДОМЕЙН МОДЕЛ: BOQ позиция ↔ дейност-покривач ↔ производни дейности
+# (одит v16 — истинското решение вместо евристики).
+#
+# Всяка BOQ позиция се ПОКРИВА от точно ЕДНА производствена дейност от
+# съответния клас (напр. тръбен ред 538м → полагане).  Другите дейности на
+# същата геометрия (изкоп, засипване, изпитване) са ПРОИЗВОДНИ — легитимни, но
+# не „покриват" количеството.  Така:
+#   - изкоп/полагане/засипване на един ред НЕ е дублиране (различни роли);
+#   - две ПОЛАГАНИЯ на един ред Е дублиране (двама покривачи);
+#   - Насип, цитиращ ИЗКОП-ред, е производен → не покрива → ако няма изкоп, редът
+#     остава непокрит.
+# ======================================================================
+
+# Какъв клас дейност ПОКРИВА даден BOQ ред — по ОПИСАНИЕ, НЕ по гола мярка.
+# Одит v18 P0: fallback по мярка заверяваше грешни позиции (пътни знаци 5бр ↔
+# ревизионни шахти 5бр; бетон 100м³ ↔ изкоп 100м³; кабел 100м ↔ водопровод 100м).
+# Затова непознато описание → None (двусмислено) → човешки преглед, не гадаене.
+def _coverer_class(row: QuantityRow) -> str | None:
+    cls = activity_class(row.description)
+    if cls in _PRODUCTION_CLASSES:
+        return cls
+    desc = str(row.description or "").lower()
+    if ("тръб" in desc or "водопровод" in desc or "канализац" in desc
+            or "мрежа" in desc or re.search(r"\bdn\b|\bф\s*\d", desc)):
+        return "laying"
+    if ("настилк" in desc or "асфалт" in desc or "паваж" in desc
+            or "тротоар" in desc or "бордюр" in desc):
+        return "pavement"
+    if ("шахт" in desc or "ревизион" in desc or "арматур" in desc
+            or "хидрант" in desc or "спирател" in desc
+            or re.search(r"\b(срс|сво|ско|рш)\b", desc)):   # кодове = цяла дума
+        return "manhole"
+    return None                  # неразпознато описание → ДВУСМИСЛЕНО (не по мярка)
+
+
+def analyze_boq_coverage(schedule: list[dict], index: list[QuantityRow]) -> dict:
+    """Кои BOQ позиции са ДОКАЗАНО покрити от правилната производствена дейност.
+
+    За всяка позиция се търси дейност, която: (1) е производствена; (2) цитира
+    реда; (3) количеството/мярката/материалът съвпадат; (4) класът ѝ съвпада с
+    класа-покривач на реда.  Ако такава има точно една → покрит.  Две → дублиране.
+    Дейност от друг клас, цитираща реда, е ПРОИЗВОДНА (не покрива, не е нарушение).
+
+    Returns:
+        {covered, uncovered, over_covered, derived, required} — множества refs.
+    """
+    by_ref = {row.ref: row for row in index}
+    required = {r.ref for r in index if r.quantity is not None}
+    coverers: dict[str, list[str]] = defaultdict(list)
+    ambiguous: set = set()          # ред с неопределим клас, но има производна задача
+    derived: list[dict] = []
+
+    for task in schedule:
+        if not isinstance(task, dict) or not _is_production_task(task):
+            continue
+        ref = str(task.get("source_ref") or "").strip()
+        row = by_ref.get(ref)
+        if row is None or row.quantity is None:
+            continue
+        qty = _number(task.get("length_m") or task.get("quantity"))
+        if qty is None:
+            continue
+        # Количеството и мярката/материалът трябва да пасват на реда.
+        if abs(row.quantity - qty) / max(abs(row.quantity), 1e-9) > _QUANTITY_TOLERANCE:
+            continue
+        if _cross_check(task, row):
+            continue
+        want = _coverer_class(row)
+        got = activity_class(task)
+        # Покривач ИЗИСКВА РАЗПОЗНАТ производствен клас (одит v16 fail-closed) И
+        # класът на реда да е определим и да СЪВПАДА (одит v18: не гадаем).
+        if want is None:
+            if got in _PRODUCTION_CLASSES:
+                ambiguous.add(ref)          # редът иска човешки преглед
+        elif got == want and got in _PRODUCTION_CLASSES:
+            coverers[ref].append(str(task.get("id")))
+        else:
+            derived.append({"id": task.get("id"), "ref": ref,
+                            "task_class": got, "coverer_class": want})
+
+    covered = {ref for ref, ts in coverers.items() if len(ts) >= 1}
+    over_covered = {ref: ts for ref, ts in coverers.items() if len(ts) >= 2}
+    ambiguous -= covered
+    uncovered = sorted(required - covered - ambiguous)
+    return {
+        "required": sorted(required),
+        "covered": sorted(covered),
+        "uncovered": uncovered,
+        "ambiguous": sorted(ambiguous),
+        "over_covered": over_covered,
+        "derived": derived,
+    }
+
+
+# Provenance статусите са SERVER-OWNED (одит v12, trust boundary): AI НЕ бива да
+# може да ги задава.  Инак може да си сложи „human_override" и да заобиколи
+# проверката срещу КСС, или „verified"/„extracted" за фалшиво доказателство.
+_SERVER_OWNED_PROVENANCE = ("quantity_provenance", "duration_provenance", "provenance",
+                            "activity_class", "activity_role")
+
+
+def strip_ai_provenance(tasks: list[dict]) -> int:
+    """Изтрий всички provenance полета, дошли от AI (МУТИРА задачите).
+
+    Тези статуси се създават САМО от сървърни операции (`verify_citations`,
+    `mark_human_overrides`, `recompute_durations`).  Всичко, което AI е сложил в
+    свободния JSON, се маха ПРЕДИ проверката, за да няма самозаверяване.
+
+    Returns: брой изтрити полета.
+    """
+    removed = 0
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        for field in _SERVER_OWNED_PROVENANCE:
+            if field in task:
+                del task[field]
+                removed += 1
+    return removed
 
 
 class Match(NamedTuple):
@@ -450,6 +832,86 @@ def requested_task_ids(message: str, known_ids: set[str]) -> set[str]:
     return hits
 
 
+# Общи думи, които не идентифицират конкретна задача по име.
+_TARGET_STOPWORDS = frozenset({
+    "работи", "работа", "дейност", "дейности", "полагане", "изграждане",
+    "строителство", "монтаж", "участък", "участъци", "етап", "обект",
+    "задача", "задачи", "график", "проект",
+})
+
+
+def _content_stems(text: str) -> set[str]:
+    """Съдържателни основи (≥5 знака) от текст — за грубо съвпадение по име.
+
+    Български: „водопровода"/„водопровод"/„водопроводът" → обща основа чрез
+    първите 6 знака.  Общите думи (полагане, работи...) се изхвърлят, за да не
+    съвпадне всяка задача с всяко изречение.
+    """
+    words = re.findall(r"[A-Za-zА-Яа-я0-9]{5,}", (text or "").lower())
+    return {w[:6] for w in words if w not in _TARGET_STOPWORDS}
+
+
+def requested_targets(message: str, tasks: list[dict]) -> set[str]:
+    """Кои задачи човекът е посочил — по ID ИЛИ по ИМЕ.
+
+    Одит v9, точка 1: `requested_task_ids` хващаше само буквални ID-та, затова
+    естествена заявка („промени водопровода на 450") не намираше цел и целият
+    lock се изключваше (fail-open).  Тук се добавя грубо съвпадение по основа
+    на съдържателна дума от името на задачата.
+
+    Съзнателно е КОНСЕРВАТИВНО: ако нищо не съвпадне, връща празно — а
+    извикващият третира „няма цел" като fail-closed (заключва всичко), не като
+    „всичко разрешено".
+    """
+    known_ids = {str(t.get("id")) for t in tasks
+                 if isinstance(t, dict) and t.get("id") is not None}
+    hits = set(requested_task_ids(message, known_ids))
+
+    msg_stems = _content_stems(message)
+    if msg_stems:
+        for t in tasks:
+            if not isinstance(t, dict) or t.get("id") is None:
+                continue
+            name_stems = _content_stems(str(t.get("name") or ""))
+            if name_stems & msg_stems:
+                hits.add(str(t.get("id")))
+    return hits
+
+
+# Кои заключени полета споменава заявката — за field-level освобождаване.
+_FIELD_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "team": ("екип", "бригад", "team"),
+    "crew_id": ("екип", "бригад", "crew"),
+    "length_m": ("дължин", "дълж", "метра", "метри", "линейни", "length"),
+    "quantity": ("количеств", "бройк", "брой", "quantity"),
+    "dn": ("диаметър", "диам", " dn", "dn ", "ф "),
+    "material": ("материал", "pe", "pvc", "чугун", "полиетилен"),
+    "method": ("метод", "hdd", "безизкопн", "открит изкоп"),
+    "alignment_id": ("ос ", "трасе", "alignment"),
+    "start_chainage": ("пикетаж", "пикет", "chainage"),
+    "end_chainage": ("пикетаж", "пикет", "chainage"),
+    "name": ("име", "наименование", "преименувай", "name"),
+    "dependencies": ("зависимост", "предшественик", "връзка", "depend", "след ", "преди "),
+}
+
+
+def requested_fields(message: str) -> set[str]:
+    """Кои заключени полета/зависимости заявката изрично споменава.
+
+    `length_m` и `quantity` са свързани: в тръбна КСС „количество" често е
+    дължината в метри.  Ако заявката спомене едното, се освобождава и другото —
+    иначе поисканата промяна на дължината би се върнала (одит v9).
+    """
+    low = f" {(message or '').lower()} "
+    fields: set[str] = set()
+    for field, keys in _FIELD_KEYWORDS.items():
+        if any(k in low for k in keys):
+            fields.add(field)
+    if fields & {"length_m", "quantity"}:
+        fields |= {"length_m", "quantity"}
+    return fields
+
+
 def mark_human_overrides(
     before: list[dict], after: list[dict], message: str = "",
 ) -> int:
@@ -480,8 +942,10 @@ def mark_human_overrides(
         str(t.get("id")): _quantity_of(t)
         for t in before if isinstance(t, dict) and t.get("id")
     }
-    known_ids = set(before_qty)
-    requested = requested_task_ids(message, known_ids)
+    # Одит v9, точка 1: целта се разпознава по ID И по ИМЕ, и е FAIL-CLOSED —
+    # ако НИЩО не е посочено, никоя промяна не се приписва на човека (остава
+    # ai_reported), за да не легитимира strict-gate-ът AI подмяна като „ръчна".
+    requested = requested_targets(message, before)
 
     marked = 0
     for task in after:
@@ -496,9 +960,10 @@ def mark_human_overrides(
         if old_qty is None or abs((old_qty or 0) - new_qty) <= 1e-9:
             continue  # непроменена задача
 
-        # Ако човекът е посочил конкретни задачи, промяна по ДРУГА задача не е
-        # негова — не е поискана.  Маркира се като AI намеса.
-        if requested and tid not in requested:
+        # Само ИЗРИЧНО посочена задача е човешка промяна.  Всичко друго (вкл.
+        # когато нищо не е разпознато) е AI намеса — не бива да получава
+        # човешки имунитет срещу проверката на количествата.
+        if tid not in requested:
             task["quantity_provenance"] = {
                 "status": STATUS_AI_REPORTED,
                 "citation": None,

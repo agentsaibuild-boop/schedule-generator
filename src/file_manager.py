@@ -1010,19 +1010,64 @@ class FileManager:
                     return merged_vals[(row, col)]
                 return ws.cell(row, col).value
 
-            # Detect header row (first row with at least 2 non-empty cells)
-            header_row_idx = 1
-            for r in range(1, min(ws.max_row or 1, 20) + 1):
-                vals = [_cell_value(r, c) for c in range(1, (ws.max_column or 1) + 1)]
-                non_empty = sum(1 for v in vals if v is not None and str(v).strip())
-                if non_empty >= 2:
-                    header_row_idx = r
-                    break
+            # Detect header row — SEMANTIC scoring (одит v11 #4).
+            #
+            # Български КСС често имат слят заглавен ред („ВиК инфраструктура…")
+            # ИЛИ ред „Обект | Реконструкция" най-отгоре.  Правилото „първи ред с
+            # ≥2 различни стойности" ги избираше погрешно за хедър, а истинският
+            # ред (№ | Наименование | Мярка | Количество) ставаше данни.
+            #
+            # Затова: всеки кандидат-ред се ОЦЕНЯВА по колко ИЗВЕСТНИ имена на
+            # колони съдържа; печели редът с най-много.  Само ако никой ред няма
+            # известни имена — fallback към „≥2 различни стойности".
+            header_keywords = (
+                "наименование", "описание", "дейност", "позиция", "мрежа",
+                "мярка", "количество", "дължина", "к-во", "кол-во", "№", "код",
+                "диаметър", "цена", "unit", "quantity", "description", "item",
+            )
 
-            headers = [
-                str(_cell_value(header_row_idx, c) or f"Col{c}").strip()
-                for c in range(1, (ws.max_column or 1) + 1)
-            ]
+            def _header_score(r: int) -> int:
+                score = 0
+                for c in range(1, (ws.max_column or 1) + 1):
+                    v = _cell_value(r, c)
+                    low = str(v or "").strip().lower()
+                    if low and any(k in low for k in header_keywords):
+                        score += 1
+                return score
+
+            scan_to = min(ws.max_row or 1, 25) + 1
+            scored = [(_header_score(r), -r, r) for r in range(1, scan_to)]
+            best_score, _, best_r = max(scored) if scored else (0, 0, 1)
+            if best_score >= 2:
+                header_row_idx = best_r
+            else:
+                # Fallback: първи ред с ≥2 РАЗЛИЧНИ стойности (слят заглавен
+                # ред има 1 различна стойност и се прескача).
+                header_row_idx = 1
+                for r in range(1, scan_to):
+                    distinct = {
+                        str(_cell_value(r, c)).strip()
+                        for c in range(1, (ws.max_column or 1) + 1)
+                        if _cell_value(r, c) is not None and str(_cell_value(r, c)).strip()
+                    }
+                    if len(distinct) >= 2:
+                        header_row_idx = r
+                        break
+
+            # УНИКАЛНИ имена на колони (одит v12 #4): при двуредови/слети
+            # headers две колони често имат едно и също име („Количество" за
+            # „Дължина" и за „Брой").  В dict еднаквите ключове се презаписват →
+            # губи се стойност.  Затова дубликатите получават суфикс.
+            headers = []
+            _seen: dict[str, int] = {}
+            for c in range(1, (ws.max_column or 1) + 1):
+                h = str(_cell_value(header_row_idx, c) or f"Col{c}").strip()
+                if h in _seen:
+                    _seen[h] += 1
+                    h = f"{h} ({_seen[h]})"
+                else:
+                    _seen[h] = 1
+                headers.append(h)
 
             rows: list[dict] = []
             for r in range(header_row_idx + 1, (ws.max_row or 0) + 1):
@@ -1034,6 +1079,10 @@ class FileManager:
                         all_empty = False
                     row_data[h] = _serialize_value(val)
                 if not all_empty:
+                    # Реалният Excel ред (одит v11 #2): празните редове се
+                    # пропускат, затова индексът в списъка НЕ съвпада с реда във
+                    # файла.  provenance-цитатът трябва да сочи истинския ред.
+                    row_data["__excel_row__"] = r
                     rows.append(row_data)
 
             total_rows += len(rows)

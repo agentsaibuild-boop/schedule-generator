@@ -1394,6 +1394,18 @@ if schedule:
         _validated_hash = _validation.get("schedule_hash")
         _stale = bool(_validated_hash) and _validated_hash != _current_hash
 
+        def _fresh_artifact(stored, current_hash):
+            """Върни байтовете само ако артефактът е за ТЕКУЩАТА ревизия.
+
+            Одит v7, точка 6: генериран PDF/XML за ревизия A оставаше за
+            сваляне след промяна към ревизия B.  Сега артефактът пази hash-а
+            си; при разминаване се смята за застоял и не се предлага.
+            Поддържа и стария формат (голи bytes) — третира се като застоял.
+            """
+            if isinstance(stored, dict) and stored.get("hash") == current_hash:
+                return stored.get("bytes")
+            return None
+
         # Одит 2026-07-24 (точки 3, 4): export gate чете РЕШЕНИЕТО от
         # pipeline-а (политика strict/provisional/lenient), не само валидност.
         if _stale:
@@ -1443,20 +1455,24 @@ if schedule:
                             show_critical_path=show_critical,
                         )
                         if pdf_bytes:
-                            st.session_state["pdf_ready"] = pdf_bytes
+                            # Одит v7, точка 6: артефактът се обвързва с hash-а
+                            # на графика, за да не остане за сваляне след промяна.
+                            st.session_state["pdf_ready"] = {
+                                "bytes": pdf_bytes, "hash": _current_hash}
                         else:
                             st.error("PDF генерирането не успя.")
                     except Exception as e:
                         st.error(f"Грешка при PDF: {e}")
-            if st.session_state.get("pdf_ready"):
+            _pdf = _fresh_artifact(st.session_state.get("pdf_ready"), _current_hash)
+            if _pdf is not None and not _blocked:
                 st.download_button(
                     label="⬇️ Свали PDF",
-                    data=st.session_state["pdf_ready"],
+                    data=_pdf,
                     file_name=f"график_{project_name}.pdf",
                     mime="application/pdf",
                     use_container_width=True,
                 )
-                st.caption(f"✅ {len(st.session_state['pdf_ready']):,} bytes")
+                st.caption(f"✅ {len(_pdf):,} bytes")
 
         with exp_c2:
             st.markdown("**📋 XML (MS Project)**")
@@ -1469,20 +1485,22 @@ if schedule:
                             schedule, project_name, start_date=export_start_date,
                         )
                         if xml_bytes:
-                            st.session_state["xml_ready"] = xml_bytes
+                            st.session_state["xml_ready"] = {
+                                "bytes": xml_bytes, "hash": _current_hash}
                         else:
                             st.error("XML генерирането не успя.")
                     except Exception as e:
                         st.error(f"Грешка при XML: {e}")
-            if st.session_state.get("xml_ready"):
+            _xml = _fresh_artifact(st.session_state.get("xml_ready"), _current_hash)
+            if _xml is not None and not _blocked:
                 st.download_button(
                     label="⬇️ Свали XML",
-                    data=st.session_state["xml_ready"],
+                    data=_xml,
                     file_name=f"график_{project_name}.xml",
                     mime="application/xml",
                     use_container_width=True,
                 )
-                st.caption(f"✅ {len(st.session_state['xml_ready']):,} bytes")
+                st.caption(f"✅ {len(_xml):,} bytes")
 
         with exp_c3:
             st.markdown("**🔧 JSON (суров)**")
@@ -1500,12 +1518,15 @@ if schedule:
                 },
                 ensure_ascii=False, indent=2, default=str,
             )
+            # JSON се строи от ТЕКУЩИЯ график (винаги свеж), но пак минава през
+            # export gate-а — одит v7, точка 6: досега беше активен винаги.
             st.download_button(
                 label="⬇️ Свали JSON",
                 data=json_data.encode("utf-8"),
                 file_name=f"график_{project_name}.json",
                 mime="application/json",
                 use_container_width=True,
+                disabled=_blocked,
             )
         st.divider()
         st.caption(

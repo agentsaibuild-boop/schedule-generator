@@ -33,10 +33,20 @@ def _dur(unresolved: int = 0) -> dict:
     return {"summary": {"unresolved": unresolved}}
 
 
-def _decide(status, validation, policy, unresolved=0, monkeypatch=None):
+# Чист citation report по подразбиране — количествата са ДОКАЗАНИ.  Тестовете,
+# които не са за произхода, ползват това, за да изолират аспекта си (одит v8:
+# без него strict блокира заради fail-closed „непроверени количества").
+_CLEAN_CITE = {"checked": True, "mismatch": 0, "unknown_ref": 0,
+               "uncited": 0, "verified": 0}
+
+
+def _decide(status, validation, policy, unresolved=0, monkeypatch=None,
+            citation=None):
     if monkeypatch is not None:
         monkeypatch.setenv("EXPORT_POLICY", policy)
-    return AIProcessor._export_decision(status, validation, {}, _dur(unresolved))
+    return AIProcessor._export_decision(
+        status, validation, {}, _dur(unresolved),
+        _CLEAN_CITE if citation is None else citation)
 
 
 # ===================================================================
@@ -101,16 +111,115 @@ def test_provisional_clean_exports_without_warnings(monkeypatch):
 
 
 # ===================================================================
-# lenient — старото поведение
+# lenient — по-меко, но статусът пак е allowlist
 # ===================================================================
 
-def test_lenient_exports_needs_human_review(monkeypatch):
+def test_lenient_does_not_export_needs_human_review(monkeypatch):
+    """Одит v6, точка 1: статусът е allowlist при ВСЯКА политика.
+    needs_human_review е валиден, но чака човек — не се експортира дори
+    при lenient (само `approved` минава)."""
     result = _decide("needs_human_review", VALID, "lenient", monkeypatch=monkeypatch)
-    assert result["exportable"] is True
+    assert result["exportable"] is False
 
 
 def test_lenient_exports_unresolved(monkeypatch):
     result = _decide("approved", VALID, "lenient", unresolved=5, monkeypatch=monkeypatch)
+    assert result["exportable"] is True
+
+
+# ===================================================================
+# Одит v6, точка 1 — статусът е ALLOWLIST (само approved експортира)
+# ===================================================================
+
+@pytest.mark.parametrize("policy", ["strict", "provisional", "lenient"])
+@pytest.mark.parametrize("status", ["error", "stopped", "parse_error", "какъвто"])
+def test_failed_status_never_exports_even_if_valid(status, policy, monkeypatch):
+    """Сринат/спрян контрольор → графикът НЕ е готов за възложител,
+    колкото и структурно валиден да е."""
+    result = _decide(status, VALID, policy, monkeypatch=monkeypatch)
+    assert result["exportable"] is False
+    assert result["blockers"]
+
+
+@pytest.mark.parametrize("policy", ["strict", "provisional", "lenient"])
+def test_only_approved_is_exportable(policy, monkeypatch):
+    assert _decide("approved", VALID, policy, monkeypatch=monkeypatch)["exportable"] is True
+
+
+def test_error_status_blocker_names_the_status(monkeypatch):
+    result = _decide("error", VALID, "provisional", monkeypatch=monkeypatch)
+    assert any("error" in b for b in result["blockers"])
+
+
+# ===================================================================
+# Одит v7, точка 4 — произходът на КОЛИЧЕСТВАТА влиза в strict gate
+# ===================================================================
+
+def _cite(mismatch=0, unknown_ref=0, uncited=0, verified=0, checked=True):
+    return {"mismatch": mismatch, "unknown_ref": unknown_ref,
+            "uncited": uncited, "verified": verified, "checked": checked}
+
+
+def test_strict_blocks_quantity_mismatch(monkeypatch):
+    monkeypatch.setenv("EXPORT_POLICY", "strict")
+    result = AIProcessor._export_decision(
+        "approved", VALID, {}, _dur(0), _cite(mismatch=1))
+    assert result["exportable"] is False
+    assert any("mismatch" in b or "разминава" in b for b in result["blockers"])
+
+
+def test_strict_blocks_invented_citation(monkeypatch):
+    monkeypatch.setenv("EXPORT_POLICY", "strict")
+    result = AIProcessor._export_decision(
+        "approved", VALID, {}, _dur(0), _cite(unknown_ref=2))
+    assert result["exportable"] is False
+
+
+def test_strict_blocks_uncited_quantities(monkeypatch):
+    """Одит v8, точка 5: strict = ДОКАЗАНИ количества, значи и uncited блокира."""
+    monkeypatch.setenv("EXPORT_POLICY", "strict")
+    result = AIProcessor._export_decision(
+        "approved", VALID, {}, _dur(0), _cite(uncited=2))
+    assert result["exportable"] is False
+    assert any("цитат" in b for b in result["blockers"])
+
+
+def test_strict_blocks_when_boq_index_missing(monkeypatch):
+    """Одит v8, точка 4: липсващ КСС индекс → fail-closed при strict."""
+    monkeypatch.setenv("EXPORT_POLICY", "strict")
+    result = AIProcessor._export_decision(
+        "approved", VALID, {}, _dur(0), {"checked": False, "reason": "no_boq_index"})
+    assert result["exportable"] is False
+    assert any("не е проверен" in b for b in result["blockers"])
+
+
+def test_strict_blocks_on_provenance_exception(monkeypatch):
+    """Одит v8, точка 6: грешка в provenance → fail-closed при strict."""
+    monkeypatch.setenv("EXPORT_POLICY", "strict")
+    result = AIProcessor._export_decision(
+        "approved", VALID, {}, _dur(0), {"checked": False, "reason": "exception"})
+    assert result["exportable"] is False
+
+
+def test_strict_allows_clean_citations(monkeypatch):
+    monkeypatch.setenv("EXPORT_POLICY", "strict")
+    result = AIProcessor._export_decision(
+        "approved", VALID, {}, _dur(0), _cite(verified=5))
+    assert result["exportable"] is True
+
+
+def test_provisional_exports_despite_unproven_quantities(monkeypatch):
+    """provisional остава по-меко: недоказани количества са предупреждение."""
+    monkeypatch.setenv("EXPORT_POLICY", "provisional")
+    result = AIProcessor._export_decision(
+        "approved", VALID, {}, _dur(0), {"checked": False, "reason": "no_boq_index"})
+    assert result["exportable"] is True
+    assert result["blockers"]           # но пак се докладва
+
+
+def test_citation_report_is_optional_backward_compatible():
+    """Старият 4-аргументен подпис не бива да гърми (provisional default)."""
+    result = AIProcessor._export_decision("approved", VALID, {}, _dur(0))
     assert result["exportable"] is True
 
 
@@ -152,3 +261,23 @@ def test_chat_handler_propagates_export():
     source = (Path(__file__).parent.parent / "src" / "chat_handler.py").read_text(
         encoding="utf-8")
     assert '"export"' in source
+
+
+def test_strict_blocks_uncovered_boq_rows(monkeypatch):
+    """Одит v13 #1: общ coverage — непокрит КСС ред блокира strict дори
+    извън staging (напр. еднолистов проект с пропуснат ред)."""
+    monkeypatch.setenv("EXPORT_POLICY", "strict")
+    cite = {"checked": True, "mismatch": 0, "unknown_ref": 0, "uncited": 0,
+            "verified": 1, "uncovered": ["КСС.xlsx!A!3"]}
+    result = AIProcessor._export_decision("approved", VALID, {}, _dur(0), cite)
+    assert result["exportable"] is False
+    assert any("не са ДОКАЗАНО покрити" in b for b in result["blockers"])
+
+
+def test_provisional_reports_uncovered_but_still_exports(monkeypatch):
+    monkeypatch.setenv("EXPORT_POLICY", "provisional")
+    cite = {"checked": True, "mismatch": 0, "unknown_ref": 0, "uncited": 0,
+            "verified": 1, "uncovered": ["КСС.xlsx!A!3"]}
+    result = AIProcessor._export_decision("approved", VALID, {}, _dur(0), cite)
+    assert result["exportable"] is True
+    assert result["blockers"]

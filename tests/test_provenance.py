@@ -444,7 +444,8 @@ class TestHumanOverride:
     def test_changed_quantity_is_marked_human(self):
         before = [{"id": "T5", "name": "Полагане", "length_m": 420}]
         after = [{"id": "T5", "name": "Полагане", "length_m": 450}]
-        marked = mark_human_overrides(before, after)
+        # Одит v9: човешки override само при ИЗРИЧНО посочена задача.
+        marked = mark_human_overrides(before, after, "промени T5 на 450")
         assert marked == 1
         assert after[0]["quantity_provenance"]["status"] == STATUS_HUMAN
 
@@ -459,7 +460,7 @@ class TestHumanOverride:
     def test_source_says_manual(self):
         before = [{"id": "T5", "length_m": 420}]
         after = [{"id": "T5", "length_m": 450}]
-        mark_human_overrides(before, after)
+        mark_human_overrides(before, after, "промени T5")
         assert "ръчно" in after[0]["quantity_provenance"]["source"]
 
     def test_new_task_without_prior_is_not_marked(self):
@@ -470,7 +471,7 @@ class TestHumanOverride:
     def test_quantity_field_change_is_detected(self):
         before = [{"id": "Ш1", "name": "СРС", "quantity": 6}]
         after = [{"id": "Ш1", "name": "СРС", "quantity": 8}]
-        assert mark_human_overrides(before, after) == 1
+        assert mark_human_overrides(before, after, "промени Ш1 на 8") == 1
 
     def test_tasks_without_quantity_are_ignored(self):
         before = [{"id": "M", "name": "ФИНАЛ", "milestone": True}]
@@ -480,7 +481,7 @@ class TestHumanOverride:
     def test_multiple_changes_all_marked(self):
         before = [{"id": "A", "length_m": 100}, {"id": "B", "length_m": 200}]
         after = [{"id": "A", "length_m": 150}, {"id": "B", "length_m": 250}]
-        assert mark_human_overrides(before, after) == 2
+        assert mark_human_overrides(before, after, "промени A и B") == 2
 
     def test_human_value_is_not_verified_against_documents(self, index):
         """Ръчната стойност ЗАМЕНЯ документа — не се сверява срещу него."""
@@ -554,6 +555,39 @@ class TestCrossCheck:
         assert _norm_unit("кв.м") == _norm_unit("м2")
         assert _norm_unit("куб.м") == _norm_unit("м3")
 
+    def test_unit_normalization_real_project_cases(self):
+        """Проба на реален проект 2026-07-31: изписвания, които бяха фалшиви
+        разминавания — числото съвпадаше, само мярката се пишеше различно."""
+        from src.provenance import _norm_unit
+        assert _norm_unit("бр") == _norm_unit("брой") == _norm_unit("бр.")
+        assert _norm_unit("м") == _norm_unit("m")           # латиница ↔ кирилица
+        assert _norm_unit("м2") == _norm_unit("M2")
+
+    def test_composite_unit_needs_review_not_verified(self):
+        """Одит v11 #5 + v12 #6: `m3/m'` НЕ се приравнява на `м3` и НЕ се приема
+        за доказано — различни физически размерности → нужен преглед."""
+        from src.provenance import _norm_unit, _cross_check, QuantityRow, SourceRef
+        assert _norm_unit("м3") != _norm_unit("m3/m'")      # НЕ се колапсва
+        row = QuantityRow("Бетонов кожух", 74.5, "m3/m'", SourceRef("f", "s", 1), {})
+        note = _cross_check({"unit": "м3", "name": "Кожух"}, row)
+        assert note and "преглед" in note                    # НЕ verified
+
+    def test_number_in_unit_column_is_not_a_mismatch(self):
+        """Различен layout на лист → в колоната за мярка има число/описание.
+        Това НЕ е мярка → не бива да прави фалшиво разминаване (числото пасва)."""
+        from src.provenance import _cross_check, QuantityRow, SourceRef
+        row = QuantityRow("УО единичен", 100.0, "100", SourceRef("f", "s", 1), {})
+        assert _cross_check({"unit": "бр", "name": "Монтаж УО"}, row) == ""
+        row2 = QuantityRow("Асфалт", 10824.0, "пътна-възстановяване...",
+                           SourceRef("f", "s", 2), {})
+        assert _cross_check({"unit": "м2", "name": "Асфалт"}, row2) == ""
+
+    def test_real_unit_mismatch_still_caught(self):
+        """Две РЕАЛНИ, но различни единици (м2 vs м) си остават разминаване."""
+        from src.provenance import _cross_check, QuantityRow, SourceRef
+        row = QuantityRow("PE тръба", 420.0, "м", SourceRef("f", "s", 1), {})
+        assert "мярка" in _cross_check({"unit": "м2", "name": "Асфалт"}, row)
+
 
 class TestAttribution:
     """AI промени на непоискани задачи не се бележат като човешки.
@@ -574,12 +608,16 @@ class TestAttribution:
         mark_human_overrides(before, after, "промени A на 150")
         assert "без изрична заявка" in after[1]["quantity_provenance"]["note"]
 
-    def test_global_message_marks_all_as_human(self):
-        """„намали всички с 10%" — няма конкретна задача, всичко е поискано."""
+    def test_global_message_does_not_grant_human_immunity(self):
+        """Одит v9, точка 1: заявка без разпозната КОНКРЕТНА задача е
+        FAIL-CLOSED — не приписва AI промените на човека, иначе strict-gate-ът
+        би пропуснал количествата без проверка срещу КСС."""
         before = [{"id": "A", "length_m": 100}, {"id": "B", "length_m": 200}]
         after = [{"id": "A", "length_m": 90}, {"id": "B", "length_m": 180}]
         n = mark_human_overrides(before, after, "намали всички количества с 10%")
-        assert n == 2
+        assert n == 0
+        assert after[0]["quantity_provenance"]["status"] == STATUS_AI_REPORTED
+        assert after[1]["quantity_provenance"]["status"] == STATUS_AI_REPORTED
 
     def test_requested_ids_finds_known_tasks(self):
         assert requested_task_ids("промени T5 на 450", {"T5", "T6"}) == {"T5"}
@@ -596,3 +634,334 @@ def test_message_passed_from_chat_handler():
     source = (Path(__file__).parent.parent / "src" / "chat_handler.py").read_text(
         encoding="utf-8")
     assert "mark_human_overrides(before_tasks, modified_tasks, message)" in source
+
+
+class TestV13CoverageBypasses:
+    """Одит v13: доказателственият coverage все още имаше обходи."""
+
+    def _row(self, ref_row, qty, unit="м", desc="Тръба PE"):
+        from src.provenance import QuantityRow, SourceRef
+        return QuantityRow(desc, qty, unit, SourceRef("КСС.xlsx", "A", ref_row), {})
+
+    def test_milestone_with_quantity_is_not_verified(self):
+        """Milestone с количество НЕ доказва покритие (одит v13 P0)."""
+        from src.provenance import verify_citations
+        idx = [self._row(2, 100.0)]
+        tasks = [{"id": "M1", "name": "Milestone", "milestone": True,
+                  "duration": 0, "length_m": 100, "unit": "м",
+                  "source_ref": "КСС.xlsx!A!2"}]
+        rep = verify_citations(tasks, idx)
+        assert rep["verified"] == 0
+        assert "КСС.xlsx!A!2" not in rep["verified_refs"]
+
+    def test_non_numeric_quantity_is_none_not_nan(self):
+        """'вж. проект'/'abc' → None, не NaN (одит v13)."""
+        from src.provenance import _number
+        assert _number("вж. проект") is None
+        assert _number("abc") is None
+        assert _number(float("nan")) is None
+        assert _number(float("inf")) is None
+        assert _number("538") == 538.0
+
+    def test_nan_quantity_task_is_not_verified(self):
+        """Задача с нечислово количество не бива да мине за verified."""
+        from src.provenance import verify_citations
+        idx = [self._row(2, 100.0)]
+        tasks = [{"id": "T1", "name": "Тръба", "length_m": "abc", "unit": "м",
+                  "source_ref": "КСС.xlsx!A!2"}]
+        rep = verify_citations(tasks, idx)
+        assert rep["verified"] == 0
+
+    def test_pick_prefers_numeric_over_text(self):
+        """'Количество'='вж. проект' не бива да засенчва 'Дължина'=538."""
+        from src.provenance import _pick, _QTY_KEYS
+        row = {"Наименование": "Тръба", "Количество": "вж. проект",
+               "Дължина /m/": 538}
+        col, val = _pick(row, _QTY_KEYS, prefer_numeric=True)
+        assert val == 538
+
+    def test_verify_returns_verified_refs(self):
+        """verified_refs съдържа само доказаните редове."""
+        from src.provenance import verify_citations
+        idx = [self._row(2, 100.0), self._row(3, 200.0)]
+        tasks = [{"id": "T1", "name": "Тръба", "length_m": 100, "unit": "м",
+                  "source_ref": "КСС.xlsx!A!2"}]   # покрива само ред 2
+        rep = verify_citations(tasks, idx)
+        assert rep["verified_refs"] == ["КСС.xlsx!A!2"]
+
+
+class TestV14CoverageBypasses:
+    """Одит v14: „verified coverage" още имаше обходи."""
+
+    def _row(self, r, qty, unit="м", desc="Тръба PE DN110"):
+        from src.provenance import QuantityRow, SourceRef
+        return QuantityRow(desc, qty, unit, SourceRef("КСС.xlsx", "A", r), {})
+
+    def test_is_summary_task_does_not_cover(self):
+        """Одит v14 P0: `is_summary` (което enrichment реално ползва) не покрива."""
+        from src.provenance import verify_citations
+        idx = [self._row(2, 100.0)]
+        tasks = [{"id": "S1", "name": "Полагане DN110 PE", "is_summary": True,
+                  "length_m": 100, "unit": "м", "source_ref": "КСС.xlsx!A!2"}]
+        rep = verify_citations(tasks, idx)
+        assert rep["verified"] == 0
+        assert rep["verified_refs"] == []
+
+    def test_has_children_task_does_not_cover(self):
+        from src.provenance import verify_citations
+        idx = [self._row(2, 100.0)]
+        tasks = [{"id": "G1", "name": "Полагане DN110 PE", "_has_children": True,
+                  "length_m": 100, "unit": "м", "source_ref": "КСС.xlsx!A!2"}]
+        assert verify_citations(tasks, idx)["verified"] == 0
+
+    def test_composite_unit_symmetric(self):
+        """Одит v14 P0: task=m3/m vs row=m3 също не е verified (не само обратното)."""
+        from src.provenance import _cross_check, QuantityRow, SourceRef
+        row = QuantityRow("Кожух", 100.0, "m3", SourceRef("f", "s", 1), {})
+        note = _cross_check({"unit": "m3/m'", "name": "Кожух"}, row)
+        assert note and "преглед" in note
+
+    def test_duplicate_task_does_not_double_cover(self):
+        """Одит v14 P0: две ИДЕНТИЧНИ задачи на един ред → втората е дубликат."""
+        from src.provenance import verify_citations
+        idx = [self._row(2, 100.0)]
+        tasks = [
+            {"id": "T1", "name": "Полагане DN110 PE", "length_m": 100, "unit": "м",
+             "source_ref": "КСС.xlsx!A!2"},
+            {"id": "T2", "name": "Полагане DN110 PE", "length_m": 100, "unit": "м",
+             "source_ref": "КСС.xlsx!A!2"},   # точно копие
+        ]
+        rep = verify_citations(tasks, idx)
+        assert rep["verified"] == 1          # само първата
+        assert rep["mismatch"] == 1          # втората е дубликат
+
+    def test_different_activities_on_same_row_are_both_ok(self):
+        """Легитимно: изкоп и полагане на едни и същи 538м (различни имена)."""
+        from src.provenance import verify_citations
+        idx = [self._row(2, 538.0)]
+        tasks = [
+            {"id": "T1", "name": "Изкоп тр. DN110 PE", "length_m": 538, "unit": "м",
+             "source_ref": "КСС.xlsx!A!2"},
+            {"id": "T2", "name": "Полагане DN110 PE", "length_m": 538, "unit": "м",
+             "source_ref": "КСС.xlsx!A!2"},
+        ]
+        rep = verify_citations(tasks, idx)
+        assert rep["verified"] == 2          # различни дейности — и двете ок
+
+
+def test_pavement_material_mismatch_is_caught():
+    """Одит v14: 'Асфалтова настилка 420м²' не е 'Бетонова настилка 420м²'."""
+    from src.provenance import _cross_check, QuantityRow, SourceRef
+    row = QuantityRow("Бетонова настилка", 420.0, "м2", SourceRef("f", "s", 1), {})
+    note = _cross_check({"unit": "м2", "name": "Асфалтова настилка"}, row)
+    assert note and "настилков материал" in note
+
+
+def test_same_pavement_material_is_not_flagged():
+    from src.provenance import _cross_check, QuantityRow, SourceRef
+    row = QuantityRow("Асфалтова настилка", 420.0, "м2", SourceRef("f", "s", 1), {})
+    assert _cross_check({"unit": "м2", "name": "Възстановяване асфалт"}, row) == ""
+
+
+class TestV15ActivityClass:
+    """Одит v15: каноничен activity_class вместо display-name евристики."""
+
+    def _idx(self, qty=100.0, desc="Тръба PE DN110"):
+        from src.provenance import QuantityRow, SourceRef
+        return [QuantityRow(desc, qty, "м", SourceRef("КСС.xlsx", "A", 2), {})]
+
+    def _t(self, name, qty=100.0):
+        return {"id": name[:3], "name": name, "length_m": qty, "unit": "м",
+                "source_ref": "КСС.xlsx!A!2"}
+
+    def test_activity_class_canonicalizes(self):
+        from src.provenance import activity_class
+        assert activity_class({"name": "Изкоп тр. DN110"}) == "excavation"
+        assert activity_class({"name": "Полагане DN110 PE"}) == "laying"
+        assert activity_class({"name": "Засипване и уплътняване"}) == "backfill"
+        assert activity_class({"name": "Приемане на обекта"}) == "acceptance"
+
+    def test_pavement_noun_beats_generic_verb(self):
+        """Проба 2026-08-03 (реален КСС „4. Пътна"): pavement-СЪЩЕСТВИТЕЛНОТО е
+        по-специфично от общия ГЛАГОЛ.
+
+        „полагане на бордюри/плочи" е НАСТИЛКА, не тръбополагане; „възстановяване
+        на настилка извън траншеен изкоп" е настилка, не изкоп.  Но „полагане на
+        тръби" (без pavement-съществително) си остава laying.
+
+        FAILURE означава: laying-задача би покрила ФАЛШИВО настилков ред."""
+        from src.provenance import activity_class as ac
+        assert ac("Доставка и полагане на средни бетонови бордюри") == "pavement"
+        assert ac("Доставка и полагане на тротоарни плочи (унипаваж)") == "pavement"
+        assert ac("Възстановяване на пътна настилка извън траншеен изкоп") == "pavement"
+        # без pavement-съществително → глаголът решава (тръбите остават laying)
+        assert ac("Полагане на PEHD тръби DN110") == "laying"
+        assert ac("Полагане на бетонови тръби DN400") == "laying"
+        # „бетонов" вече НЕ значи настилка (бетонова тръба ≠ настилка)
+        assert ac("Бетонови тръби DN400") != "pavement"
+
+    def test_duplicate_survives_name_variation(self):
+        """Одит v15 P0: '+ една дума' в името вече не заобикаля дубликата."""
+        from src.provenance import verify_citations
+        tasks = [self._t("Полагане DN110 PE"), self._t("Полагане на DN110 PE")]
+        rep = verify_citations(tasks, self._idx())
+        assert rep["verified"] == 1 and rep["mismatch"] == 1
+
+    def test_duplicate_survives_tolerance_quantity(self):
+        """Одит v15 P0: количество в рамките на 2% толеранс не заобикаля."""
+        from src.provenance import verify_citations
+        tasks = [self._t("Полагане DN110 PE", 100.0),
+                 self._t("Полагане DN110 PE", 101.9)]
+        rep = verify_citations(tasks, self._idx())
+        assert rep["verified"] == 1 and rep["mismatch"] == 1
+
+    def test_administrative_task_does_not_cover(self):
+        """Одит v15 P0: приемателна/административна дейност не доказва BOQ."""
+        from src.provenance import verify_citations, _is_production_task
+        adm = {"id": "A1", "name": "Приемане на изпълнените 100 m",
+               "type": "approval", "length_m": 100, "unit": "м",
+               "source_ref": "КСС.xlsx!A!2"}
+        assert _is_production_task(adm) is False
+        assert verify_citations([adm], self._idx())["verified"] == 0
+
+    def test_different_activities_share_row_legitimately(self):
+        """Изкоп/полагане/засипване на един ред → различни класове → всички ок."""
+        from src.provenance import verify_citations
+        tasks = [self._t("Изкоп тр. DN110"), self._t("Полагане DN110 PE"),
+                 self._t("Засипване и уплътняване")]
+        assert verify_citations(tasks, self._idx())["verified"] == 3
+
+    def test_text_composite_unit_is_flagged(self):
+        """Одит v15 #7: 'm3 на m' (без символ /) също иска преглед."""
+        from src.provenance import _is_composite_unit, _cross_check, QuantityRow, SourceRef
+        assert _is_composite_unit("m3 на m")
+        assert _is_composite_unit("м3 за л.м")
+        assert not _is_composite_unit("м3")
+        row = QuantityRow("Кожух", 10.0, "m3", SourceRef("f", "s", 1), {})
+        assert _cross_check({"unit": "m3 на m", "name": "Кожух"}, row)
+
+
+class TestV16DomainCoverage:
+    """Одит v16: BOQ позиция ↔ дейност-покривач ↔ производни дейности."""
+
+    def _pipe(self, r=2, q=100.0):
+        from src.provenance import QuantityRow, SourceRef
+        return QuantityRow("Реконструкция на водопровод DN110", q, "м",
+                           SourceRef("КСС.xlsx", "A", r), {})
+
+    def _exc(self, r=3, q=100.0):
+        from src.provenance import QuantityRow, SourceRef
+        return QuantityRow("Изкоп на траншея за тръби", q, "м3",
+                           SourceRef("КСС.xlsx", "A", r), {})
+
+    def _t(self, name, q=100.0, unit="м", ref="КСС.xlsx!A!2"):
+        return {"id": name[:8], "name": name, "length_m": q, "unit": unit,
+                "source_ref": ref}
+
+    def test_pipe_row_covered_by_laying_others_derived(self):
+        from src.provenance import analyze_boq_coverage
+        tasks = [self._t("Изкоп тр. DN110"), self._t("Полагане DN110 PE"),
+                 self._t("Засипване и уплътняване")]
+        cov = analyze_boq_coverage(tasks, [self._pipe()])
+        assert cov["covered"] == ["КСС.xlsx!A!2"]
+        assert cov["uncovered"] == []
+        assert not cov["over_covered"]
+        assert len(cov["derived"]) == 2      # изкоп + засип са производни
+
+    def test_two_layings_is_over_covered(self):
+        from src.provenance import analyze_boq_coverage
+        tasks = [self._t("Полагане DN110 PE"), self._t("Полагане на тръба DN110")]
+        cov = analyze_boq_coverage(tasks, [self._pipe()])
+        assert "КСС.xlsx!A!2" in cov["over_covered"]
+
+    def test_backfill_does_not_cover_excavation_row(self):
+        """Насип цитира ИЗКОП-ред → производен → редът остава непокрит."""
+        from src.provenance import analyze_boq_coverage
+        tasks = [self._t("Насипване с трошен камък", 100.0, "м3", "КСС.xlsx!A!3")]
+        cov = analyze_boq_coverage(tasks, [self._exc()])
+        assert cov["uncovered"] == ["КСС.xlsx!A!3"]
+        assert cov["covered"] == []
+
+    def test_excavation_covers_excavation_row(self):
+        from src.provenance import analyze_boq_coverage
+        tasks = [self._t("Изкоп тр. DN110", 100.0, "м3", "КСС.xlsx!A!3")]
+        cov = analyze_boq_coverage(tasks, [self._exc()])
+        assert cov["covered"] == ["КСС.xlsx!A!3"]
+
+    def test_administrative_is_not_a_coverer(self):
+        from src.provenance import analyze_boq_coverage
+        tasks = [{"id": "A1", "name": "Приемане на изпълнените", "type": "approval",
+                  "length_m": 100, "unit": "м", "source_ref": "КСС.xlsx!A!2"}]
+        cov = analyze_boq_coverage(tasks, [self._pipe()])
+        assert cov["uncovered"] == ["КСС.xlsx!A!2"]
+
+
+class TestV16ActivityClassTrust:
+    """Одит v16 P0: activity_class е server-derived, не AI-controlled."""
+
+    def _idx(self):
+        from src.provenance import QuantityRow, SourceRef
+        return [QuantityRow("Реконструкция водопровод DN110", 100.0, "м",
+                            SourceRef("КСС.xlsx", "A", 2), {})]
+
+    def test_ai_supplied_class_is_ignored(self):
+        """AI слага laying_a/laying_b, за да избегне дубликат → игнорира се."""
+        from src.provenance import activity_class, analyze_boq_coverage
+        t1 = {"id": "T1", "name": "Полагане DN110 PE", "activity_class": "laying_a",
+              "length_m": 100, "unit": "м", "source_ref": "КСС.xlsx!A!2"}
+        t2 = {"id": "T2", "name": "Полагане DN110 PE", "activity_class": "laying_b",
+              "length_m": 100, "unit": "м", "source_ref": "КСС.xlsx!A!2"}
+        assert activity_class(t1) == activity_class(t2) == "laying"
+        cov = analyze_boq_coverage([t1, t2], self._idx())
+        assert "КСС.xlsx!A!2" in cov["over_covered"]        # дубликат хванат
+
+    def test_ai_cannot_self_certify_administrative_as_production(self):
+        """Приемателна задача + activity_class=laying → пак не е производство."""
+        from src.provenance import activity_class, _is_production_task
+        t = {"name": "Приемане на изпълнените работи", "activity_class": "laying",
+             "length_m": 100, "unit": "м", "source_ref": "КСС.xlsx!A!2"}
+        assert activity_class(t) == "acceptance"
+        assert _is_production_task(t) is False
+
+    def test_class_is_stripped_by_strip_ai_provenance(self):
+        from src.provenance import strip_ai_provenance
+        tasks = [{"id": "T1", "activity_class": "laying", "activity_role": "x"}]
+        strip_ai_provenance(tasks)
+        assert "activity_class" not in tasks[0]
+        assert "activity_role" not in tasks[0]
+
+    def test_negation_trenchless_is_laying_not_excavation(self):
+        from src.provenance import activity_class
+        assert activity_class("Безизкопно полагане DN110 чрез HDD") == "laying"
+
+    def test_role_wins_over_content(self):
+        from src.provenance import activity_class
+        assert activity_class("Приемане на изкопа") == "acceptance"
+        assert activity_class("Документация за изкопни работи") == "documentation"
+
+    def test_three_letter_codes_match_whole_word_not_substring(self):
+        """Одит v18: „срс/сво/ско" (сградни отклонения) са 3-буквени кодове.
+
+        Голият подниз „ско"/„сво" лъжливо съвпадаше вътре в обичайни думи
+        (геодезичеСКО, оСВОбождаване) → фалшив клас-покривач `manhole`, а оттам
+        фалшиво покритие.  Сега се матчват само като ЦЯЛА ДУМА.
+
+        FAILURE означава: substring-евристиката пак бърка код с част от дума."""
+        from src.provenance import activity_class
+        # ЦЯЛА дума → истински код за сградно отклонение → manhole
+        assert activity_class("СВО — сградно водопроводно отклонение") == "manhole"
+        assert activity_class("Изпълнение на СКО") == "manhole"
+        assert activity_class("Направа на СРС") == "manhole"
+        # подниз в обичайна дума → НЕ е manhole
+        assert activity_class("Геодезическо заснемане и трасиране") != "manhole"
+        assert activity_class("Освобождаване на строителна площадка") != "manhole"
+        # fill-гласна: „спирателен" (не „спирателн") пак се хваща
+        assert activity_class("Монтаж на спирателен кран DN100") == "manhole"
+
+    def test_unknown_activity_does_not_cover(self):
+        """Fail-closed: неразпозната/административна дейност не покрива ред."""
+        from src.provenance import analyze_boq_coverage
+        t = {"id": "C", "name": "Координация с възложителя", "length_m": 100,
+             "unit": "м", "source_ref": "КСС.xlsx!A!2"}
+        cov = analyze_boq_coverage([t], self._idx())
+        assert cov["covered"] == [] and cov["uncovered"] == ["КСС.xlsx!A!2"]
