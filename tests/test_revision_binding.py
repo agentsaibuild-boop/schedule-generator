@@ -74,14 +74,28 @@ def test_dependency_type_change_changes_hash():
            _h([_t("A"), _t("B", dependencies=d_ss)])
 
 
+def test_legacy_task_level_dep_type_change_changes_hash():
+    """Одит v6, точка 4: стар формат (низови deps + task-level type/lag).
+    Смяна FS+0 → SS+5 на task-ниво трябва да отмени валидацията."""
+    fs = _t("B", dependencies=["A"], dependency_type="FS", lag_days=0)
+    ss = _t("B", dependencies=["A"], dependency_type="SS", lag_days=5)
+    assert _h([_t("A"), fs]) != _h([_t("A"), ss])
+
+
 def test_chainage_change_changes_hash():
     assert _h([_t("A", start_chainage=0, end_chainage=300)]) != \
            _h([_t("A", start_chainage=0, end_chainage=500)])
 
 
+def test_name_change_changes_hash():
+    """Одит v5, точка 7: name влияе на класификацията на продължителност,
+    затова смяната му ОТМЕНЯ старата валидация — вече е в hash-а."""
+    assert _h([_t("A", name="Полагане")]) != _h([_t("A", name="Съвсем друго име")])
+
+
 def test_cosmetic_change_keeps_hash():
-    """Преименуване не отменя валидацията — не влияе на валидността."""
-    assert _h([_t("A", name="Полагане")]) == _h([_t("A", name="Съвсем друго име")])
+    """Само доказано козметичните полета (бележки) не влияят на hash-а."""
+    assert _h([_t("A", notes_msp="бележка")]) == _h([_t("A", notes_msp="друга")])
 
 
 def test_notes_do_not_affect_hash():

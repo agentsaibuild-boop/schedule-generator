@@ -545,3 +545,90 @@ if __name__ == "__main__":
             print(f"  ERROR {t.__name__}: {exc}")
             traceback.print_exc()
     print(f"\n{passed}/{len(tests)} passed")
+
+
+# ---------------------------------------------------------------------------
+# Excel header detection + реален Excel ред (одит v11 #2, #4)
+# ---------------------------------------------------------------------------
+
+def _make_xlsx(rows: list[list], sheet: str = "КСС") -> str:
+    import openpyxl, tempfile, os
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = sheet
+    for r in rows:
+        ws.append(r)
+    p = os.path.join(tempfile.mkdtemp(), "kss.xlsx"); wb.save(p)
+    return p
+
+
+def test_semantic_header_skips_title_row():
+    """Одит v11 #4: ред „Обект | Реконструкция" НЕ е хедър; истинският е
+    „№ | Наименование | Мярка | Количество"."""
+    p = _make_xlsx([
+        ["Обект", "ВиК реконструкция", None, None],
+        ["№", "Наименование", "Ед. мярка", "Количество"],
+        [1, "Тръба PE DN110", "м", 1758],
+    ])
+    sh = FileManager()._convert_excel(p)["data"]["sheets"][0]
+    assert "Количество" in sh["headers"]
+    assert "Наименование" in sh["headers"]
+    assert sh["rows"][0]["Наименование"] == "Тръба PE DN110"
+
+
+def test_real_excel_row_is_recorded():
+    """Одит v11 #2: празни редове се пропускат → индексът в списъка ≠ Excel
+    ред.  Записваме истинския Excel ред за коректен provenance-цитат."""
+    p = _make_xlsx([
+        ["№", "Наименование", "Ед. мярка", "Количество"],  # ред 1
+        [None, None, None, None],                            # ред 2 — празен
+        [1, "Тръба", "м", 100],                              # ред 3
+    ])
+    sh = FileManager()._convert_excel(p)["data"]["sheets"][0]
+    assert sh["rows"][0]["__excel_row__"] == 3    # не 2
+
+
+def test_provenance_uses_real_excel_row():
+    """build_quantity_index сочи истинския ред, не offset+2."""
+    import tempfile, os, json
+    from src.provenance import build_quantity_index
+    p = _make_xlsx([
+        ["№", "Наименование", "Ед. мярка", "Дължина"],
+        [None, None, None, None],
+        [1, "Тръба PE", "м", 538],
+    ])
+    base = os.path.dirname(p)
+    fm = FileManager(base_path=base)
+    r = fm.convert_single_file(p)
+    idx = build_quantity_index(base)
+    real = [row for row in idx if row.quantity == 538]
+    assert real, "позицията не е индексирана"
+    assert real[0].source.row == 3    # истинският Excel ред
+
+
+def test_duplicate_header_names_are_kept_unique():
+    """Одит v12 #4: две колони „Количество" не бива да се презаписват в dict —
+    втората получава суфикс, за да оцелее стойността."""
+    p = _make_xlsx([
+        ["№", "Наименование", "Количество", "Количество"],  # дубликат
+        [1, "Тръба", 100, 5],
+    ])
+    sh = FileManager()._convert_excel(p)["data"]["sheets"][0]
+    row = sh["rows"][0]
+    # и двете стойности присъстват (100 и 5), не само последната
+    vals = [v for k, v in row.items() if k != "__excel_row__"]
+    assert 100 in vals and 5 in vals
+
+
+def test_pick_prefers_non_empty_quantity_column():
+    """Одит v12 #5: празна „Количество" не бива да засенчва попълнена
+    „Дължина /m/" → редът да не се губи от индекса."""
+    import os
+    from src.provenance import build_quantity_index
+    p = _make_xlsx([
+        ["Наименование", "Количество", "Дължина /m/"],
+        ["Тръба PE DN110", None, 538],   # Количество празно, Дължина попълнено
+    ])
+    base = os.path.dirname(p)
+    FileManager(base_path=base).convert_single_file(p)
+    idx = build_quantity_index(base)
+    matched = [r for r in idx if r.quantity == 538]
+    assert matched, "тръбният ред се загуби заради празна Количество колона"

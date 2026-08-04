@@ -420,6 +420,16 @@ class TestDisabledByDefault:
         assert result.get("error") == "disabled"
         assert result["changes"] == []
 
+    def test_rollback_refuses_when_disabled(self, evo):
+        """Одит v5: нискониво git операциите налагат политиката САМИ."""
+        assert evo.rollback("HEAD")["success"] is False
+
+    def test_commit_changes_refuses_when_disabled(self, evo):
+        assert evo.commit_changes("нещо")["success"] is False
+
+    def test_test_changes_refuses_when_disabled(self, evo):
+        assert evo.test_changes()["passed"] is False
+
     def test_confirm_change_refuses_leftover_pending(self):
         """Останал pending обект от преди изключването не бива да мине."""
         from unittest.mock import MagicMock

@@ -60,7 +60,7 @@
 ### Подобрено
 - PDF конвертиране: PyMuPDF/fitz вместо PyPDF2 — значително по-добро извличане на текст
 - 3-степенна стратегия за PDF: GOOD (fitz директно) → PARTIAL (DeepSeek reformat) → SCANNED (DeepSeek OCR)
-- Тест с Герман (31 PDF): 27 GOOD, 1 PARTIAL, 3 SCANNED — 0 API извиквания за 90% от файловете
+- Тест с Примерово (31 PDF): 27 GOOD, 1 PARTIAL, 3 SCANNED — 0 API извиквания за 90% от файловете
 
 ### Добавено
 - `AIProcessor.reformat_text()` — преформатиране на частичен текст чрез DeepSeek (евтино, text-only)

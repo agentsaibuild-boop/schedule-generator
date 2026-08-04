@@ -776,6 +776,12 @@ class SelfEvolution:
         Returns:
             Dict with passed bool, tests_run, tests_passed, errors.
         """
+        # Одит v5: нискониво операциите налагат политиката САМИ, не разчитат
+        # UI да ги е извикал коректно (defense-in-depth).
+        if not is_enabled():
+            return {"passed": False, "tests_run": 0, "tests_passed": 0,
+                    "errors": ["self-evolution е изключен (ENABLE_SELF_EVOLUTION)"]}
+
         tests_run = 0
         tests_passed = 0
         errors: list[str] = []
@@ -844,6 +850,9 @@ class SelfEvolution:
         Returns:
             Dict with success bool and restored_to hash.
         """
+        if not is_enabled():
+            return {"success": False, "restored_to": "",
+                    "error": "self-evolution е изключен (ENABLE_SELF_EVOLUTION)"}
         try:
             result = subprocess.run(
                 ["git", "reset", "--hard", commit_hash],
@@ -907,6 +916,9 @@ class SelfEvolution:
         Returns:
             Dict with success, commit_hash.
         """
+        if not is_enabled():
+            return {"success": False, "commit_hash": "",
+                    "error": "self-evolution е изключен (ENABLE_SELF_EVOLUTION)"}
         message = f"feat: {description}"
         try:
             subprocess.run(

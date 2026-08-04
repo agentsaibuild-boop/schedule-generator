@@ -48,7 +48,7 @@
 "(Ще бъде допълнена с правила от lessons_learned.md и skills)"
 ```
 Засегнати файлове:
-- `distribution_network.md` — основният тип проект (Плевен)
+- `distribution_network.md` — основният тип проект (Тестоград)
 - `engineering_projects.md` — ИНЖЕНЕРИНГ
 - `single_section.md` — единичен участък
 - `supply_pipeline.md` — довеждащ водопровод

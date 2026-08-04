@@ -123,7 +123,7 @@ def test_same_time_different_place_is_fine():
 def test_different_alignments_never_collide():
     schedule = [
         _seg("A", 0, 300, 1, 10, alignment_id="ул. Витоша"),
-        _seg("B", 0, 300, 1, 10, alignment_id="ул. Раковски"),
+        _seg("B", 0, 300, 1, 10, alignment_id="ул. Четвърта"),
     ]
     assert find_crew_collisions(schedule) == []
 
@@ -247,10 +247,10 @@ def test_validation_reports_spatial_coverage():
 def test_report_lists_alignments():
     schedule = [
         _seg("A", 0, 300, 1, 10, alignment_id="ул. Витоша"),
-        _seg("B", 0, 300, 1, 10, alignment_id="ул. Раковски"),
+        _seg("B", 0, 300, 1, 10, alignment_id="ул. Четвърта"),
     ]
     report = spatial_report(schedule)
-    assert report["alignments"] == ["ул. Витоша", "ул. Раковски"]
+    assert report["alignments"] == ["ул. Витоша", "ул. Четвърта"]
 
 
 # ===================================================================

@@ -17,6 +17,51 @@ APP_URL = f"http://localhost:{APP_PORT}"
 HEALTH_URL = f"{APP_URL}/_stcore/health"
 
 
+def _e2e_prerequisites_missing() -> str | None:
+    """Върни причина, ако E2E не може да се пусне; иначе None.
+
+    Одит 2026-07-24 v5: чист `pytest` даваше 10 ГРЕШКИ, защото E2E искат
+    реален .env и инсталиран Playwright браузър, а одиторът няма нито едно
+    от двете (.env никога не се доставя).  Грешка при setup чете като счупен
+    пакет.  Тук предпоставките се проверяват предварително и тестовете се
+    ПРОПУСКАТ с ясна причина — unit пакетът остава зелен сам по себе си.
+    """
+    if not (APP_DIR / ".env").exists():
+        return "няма .env с реални API ключове (E2E предпоставка)"
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            path = p.chromium.executable_path
+        if not path or not Path(path).exists():
+            return "Playwright chromium не е инсталиран (`playwright install chromium`)"
+    except Exception as exc:  # pragma: no cover - зависи от средата
+        return f"Playwright не е готов: {exc}"
+    return None
+
+
+_E2E_DIR = Path(__file__).resolve().parent
+
+
+def pytest_collection_modifyitems(config, items):
+    """Пропусни САМО E2E тестовете, когато предпоставките им липсват.
+
+    Hook-ът в този conftest получава цялата сесия, затова изрично се
+    ограничаваме до items под tests/e2e/ — иначе би пропуснал и unit пакета.
+    """
+    reason = _e2e_prerequisites_missing()
+    if not reason:
+        return
+    skip = pytest.mark.skip(reason=f"E2E пропуснат: {reason}")
+    for item in items:
+        try:
+            in_e2e = _E2E_DIR in Path(str(item.fspath)).resolve().parents \
+                or Path(str(item.fspath)).resolve() == _E2E_DIR
+        except Exception:
+            in_e2e = "e2e" in str(item.fspath).replace("\\", "/")
+        if in_e2e:
+            item.add_marker(skip)
+
+
 @pytest.fixture(scope="function")
 def browser_context_args(browser_context_args):
     return {
