@@ -851,7 +851,8 @@ class ScheduleBuilder:
                 if overlap_count >= 1:
                     warnings.append(
                         f"Екип '{team}' е назначен на {overlap_count + 1} задачи "
-                        f"едновременно (вкл. {id1} и {', '.join(overlap_ids[:3])})."
+                        f"едновременно (вкл. {id1} и "
+                        f"{', '.join(str(i) for i in overlap_ids[:3])})."
                     )
                     break  # one warning per team is enough
 

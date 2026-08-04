@@ -293,3 +293,16 @@ def test_message_never_says_zero_metre_overlap():
     result = ScheduleBuilder().validate_schedule(schedule)
     body = " ".join(result["errors"] + result["warnings"])
     assert "0м" not in body or "по-малко от" in body
+
+
+def test_team_overlap_warning_survives_integer_task_ids():
+    """Регресия (реален DeepSeek тест, 2026-08): екип-застъпването гърмеше с
+    TypeError, когато ID-тата са int (join на int като низ).  Валидацията НЕ
+    бива да се чупи заради типа на ID-то."""
+    schedule = [
+        {"id": 1, "name": "A", "team": "ЕВ1", "start_day": 0, "duration": 10},
+        {"id": 2, "name": "B", "team": "ЕВ1", "start_day": 2, "duration": 10},
+        {"id": 3, "name": "C", "team": "ЕВ1", "start_day": 4, "duration": 10},
+    ]
+    result = ScheduleBuilder().validate_schedule(schedule)  # не бива да хвърля
+    assert any("едновременно" in w for w in result["warnings"])
