@@ -19,7 +19,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.ai_router import AIRouter, PRICING, _MIN_SYSTEM_PROMPT_LEN
+from src.ai_router import (
+    AIRouter,
+    PRICING,
+    MODEL_WORKER,
+    MODEL_CONTROLLER,
+    _MIN_SYSTEM_PROMPT_LEN,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -36,54 +42,54 @@ def make_router() -> AIRouter:
 # ---------------------------------------------------------------------------
 
 def test_calculate_cost_deepseek_zero_tokens():
-    cost = AIRouter._calculate_cost("deepseek-chat", 0, 0)
+    cost = AIRouter._calculate_cost(MODEL_WORKER, 0, 0)
     assert cost == 0.0
 
 
 def test_calculate_cost_deepseek_input_only():
-    rate = PRICING["deepseek-chat"]["input"]
-    cost = AIRouter._calculate_cost("deepseek-chat", 1_000, 0)
+    rate = PRICING[MODEL_WORKER]["input"]
+    cost = AIRouter._calculate_cost(MODEL_WORKER, 1_000, 0)
     assert abs(cost - rate * 1_000) < 1e-12
 
 
 def test_calculate_cost_deepseek_output_only():
-    rate = PRICING["deepseek-chat"]["output"]
-    cost = AIRouter._calculate_cost("deepseek-chat", 0, 1_000)
+    rate = PRICING[MODEL_WORKER]["output"]
+    cost = AIRouter._calculate_cost(MODEL_WORKER, 0, 1_000)
     assert abs(cost - rate * 1_000) < 1e-12
 
 
 def test_calculate_cost_deepseek_both():
-    r = PRICING["deepseek-chat"]
+    r = PRICING[MODEL_WORKER]
     expected = 100 * r["input"] + 200 * r["output"]
-    assert abs(AIRouter._calculate_cost("deepseek-chat", 100, 200) - expected) < 1e-12
+    assert abs(AIRouter._calculate_cost(MODEL_WORKER, 100, 200) - expected) < 1e-12
 
 
 def test_calculate_cost_anthropic():
-    r = PRICING["claude-sonnet-4-6"]
+    r = PRICING[MODEL_CONTROLLER]
     expected = 50 * r["input"] + 30 * r["output"]
-    assert abs(AIRouter._calculate_cost("claude-sonnet-4-6", 50, 30) - expected) < 1e-12
+    assert abs(AIRouter._calculate_cost(MODEL_CONTROLLER, 50, 30) - expected) < 1e-12
 
 
 def test_calculate_cost_unknown_model_falls_back_to_deepseek():
     """Unknown models fall back to deepseek-chat pricing (not KeyError)."""
-    r = PRICING["deepseek-chat"]
+    r = PRICING[MODEL_WORKER]
     expected = 10 * r["input"] + 5 * r["output"]
     cost = AIRouter._calculate_cost("unknown-model-xyz", 10, 5)
     assert abs(cost - expected) < 1e-12
 
 
 def test_calculate_cost_returns_float():
-    cost = AIRouter._calculate_cost("deepseek-chat", 1000, 500)
+    cost = AIRouter._calculate_cost(MODEL_WORKER, 1000, 500)
     assert isinstance(cost, float)
 
 
 def test_anthropic_output_rate_more_expensive_than_input():
-    r = PRICING["claude-sonnet-4-6"]
+    r = PRICING[MODEL_CONTROLLER]
     assert r["output"] > r["input"]
 
 
 def test_deepseek_cheaper_than_anthropic_per_output_token():
-    assert PRICING["deepseek-chat"]["output"] < PRICING["claude-sonnet-4-6"]["output"]
+    assert PRICING[MODEL_WORKER]["output"] < PRICING[MODEL_CONTROLLER]["output"]
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +160,7 @@ def test_log_usage_empty_initially():
 
 def test_log_usage_single_deepseek_call():
     router = make_router()
-    router._log_usage("deepseek-chat", 100, 50, "chat")
+    router._log_usage(MODEL_WORKER, 100, 50, "chat")
     stats = router.get_usage_stats()
     assert stats["deepseek"]["calls"] == 1
     assert stats["deepseek"]["tokens_in"] == 100
@@ -165,7 +171,7 @@ def test_log_usage_single_deepseek_call():
 
 def test_log_usage_single_anthropic_call():
     router = make_router()
-    router._log_usage("claude-sonnet-4-6", 200, 100, "verify")
+    router._log_usage(MODEL_CONTROLLER, 200, 100, "verify")
     stats = router.get_usage_stats()
     assert stats["anthropic"]["calls"] == 1
     assert stats["anthropic"]["tokens_in"] == 200
@@ -174,8 +180,8 @@ def test_log_usage_single_anthropic_call():
 
 def test_log_usage_multiple_calls_aggregate():
     router = make_router()
-    router._log_usage("deepseek-chat", 100, 50, "chat")
-    router._log_usage("deepseek-chat", 200, 80, "generate")
+    router._log_usage(MODEL_WORKER, 100, 50, "chat")
+    router._log_usage(MODEL_WORKER, 200, 80, "generate")
     stats = router.get_usage_stats()
     assert stats["deepseek"]["calls"] == 2
     assert stats["deepseek"]["tokens_in"] == 300
@@ -184,8 +190,8 @@ def test_log_usage_multiple_calls_aggregate():
 
 def test_log_usage_mixed_models():
     router = make_router()
-    router._log_usage("deepseek-chat", 100, 50, "chat")
-    router._log_usage("claude-sonnet-4-6", 200, 100, "verify")
+    router._log_usage(MODEL_WORKER, 100, 50, "chat")
+    router._log_usage(MODEL_CONTROLLER, 200, 100, "verify")
     stats = router.get_usage_stats()
     assert stats["deepseek"]["calls"] == 1
     assert stats["anthropic"]["calls"] == 1
@@ -194,12 +200,12 @@ def test_log_usage_mixed_models():
 
 def test_log_usage_cost_accumulates_correctly():
     router = make_router()
-    r_ds = PRICING["deepseek-chat"]
+    r_ds = PRICING[MODEL_WORKER]
     expected_ds = 100 * r_ds["input"] + 50 * r_ds["output"]
-    r_an = PRICING["claude-sonnet-4-6"]
+    r_an = PRICING[MODEL_CONTROLLER]
     expected_an = 200 * r_an["input"] + 100 * r_an["output"]
-    router._log_usage("deepseek-chat", 100, 50, "chat")
-    router._log_usage("claude-sonnet-4-6", 200, 100, "verify")
+    router._log_usage(MODEL_WORKER, 100, 50, "chat")
+    router._log_usage(MODEL_CONTROLLER, 200, 100, "verify")
     stats = router.get_usage_stats()
     assert abs(stats["total_cost_usd"] - (expected_ds + expected_an)) < 1e-10
 
@@ -276,7 +282,7 @@ def test_get_cumulative_stats_initial_zeros():
 def test_save_and_load_cumulative(tmp_path):
     router = make_router()
     router.set_cumulative_path(str(tmp_path))
-    router._log_usage("deepseek-chat", 1000, 500, "chat")
+    router._log_usage(MODEL_WORKER, 1000, 500, "chat")
     # After log_usage, cumulative should be saved to disk
     saved_file = tmp_path / "cumulative_usage.json"
     assert saved_file.exists()
@@ -314,9 +320,62 @@ def test_save_cumulative_no_path_is_noop():
 def test_cumulative_persists_across_router_instances(tmp_path):
     r1 = make_router()
     r1.set_cumulative_path(str(tmp_path))
-    r1._log_usage("claude-sonnet-4-6", 500, 200, "verify")
+    r1._log_usage(MODEL_CONTROLLER, 500, 200, "verify")
     cost1 = r1.get_cumulative_stats()["anthropic"]
     # New router instance reads the same file
     r2 = make_router()
     r2.set_cumulative_path(str(tmp_path))
     assert r2.get_cumulative_stats()["anthropic"] == pytest.approx(cost1)
+
+
+# ---------------------------------------------------------------------------
+# Truncation detection (Етап 4 находка, 2026-07-22)
+# ---------------------------------------------------------------------------
+
+class TestTruncationDetection:
+    """Отрязан отговор трябва да се съобщава, не да минава тихо.
+
+    FAILURE означава: reasoning worker модел, чието разсъждение изяжда
+    бюджета от токени, ще връща счупен JSON, а логът ще показва само
+    „невалиден JSON" — без да се разбере, че причината е таванът.
+    """
+
+    @staticmethod
+    def _router_with_finish_reason(reason: str):
+        from unittest.mock import MagicMock
+        from src.ai_router import AIRouter
+
+        r = AIRouter()
+        client = MagicMock()
+        client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(
+                message=MagicMock(content='{"tasks": []}'),
+                finish_reason=reason,
+            )],
+            usage=MagicMock(prompt_tokens=100, completion_tokens=4096),
+        )
+        r._deepseek_client = client
+        return r
+
+    def test_length_finish_reason_flags_truncation(self):
+        r = self._router_with_finish_reason("length")
+        result = r._chat_deepseek([{"role": "user", "content": "x"}], "system" * 40)
+        assert result["truncated"] is True
+
+    def test_normal_finish_reason_is_not_truncated(self):
+        r = self._router_with_finish_reason("stop")
+        result = r._chat_deepseek([{"role": "user", "content": "x"}], "system" * 40)
+        assert result["truncated"] is False
+
+    def test_truncation_is_logged(self, caplog):
+        import logging
+        r = self._router_with_finish_reason("length")
+        with caplog.at_level(logging.WARNING):
+            r._chat_deepseek([{"role": "user", "content": "x"}], "system" * 40)
+        assert any("ОТРЯЗАН" in rec.message for rec in caplog.records)
+
+    def test_content_still_returned_when_truncated(self):
+        """Отрязаното съдържание не се изхвърля — извикващият решава."""
+        r = self._router_with_finish_reason("length")
+        result = r._chat_deepseek([{"role": "user", "content": "x"}], "system" * 40)
+        assert result["content"] == '{"tasks": []}'

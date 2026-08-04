@@ -13,6 +13,11 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
+from src.ai_router import MODEL_CONTROLLER
+from src.prompt_safety import format_injection_warnings
+from src.self_evolution import DISABLED_MESSAGE as EVOLUTION_DISABLED_MESSAGE
+from src.self_evolution import is_enabled as evolution_enabled
+
 if TYPE_CHECKING:
     from src.ai_processor import AIProcessor
     from src.file_manager import FileManager
@@ -175,6 +180,11 @@ class ChatHandler:
         ):
             return self._handle_select_recent(int(stripped), recent_projects)
 
+        # Забележка: admin кодът НЕ минава оттук.  При `pending_changes`
+        # функцията връща по-горе (`_handle_confirm_change`) и до този ред не
+        # се стига, тоест `self.history` никога не вижда кода.  Маската за
+        # UI слоя е в app.py.  (Тук имаше проверка, която беше мъртъв код —
+        # посочено при одит 2026-07-23.)
         self.history.append({"role": "user", "content": user_message})
 
         # --- AI-powered intent detection ---
@@ -423,6 +433,345 @@ class ChatHandler:
 
         return project_type
 
+    def _required_files(self) -> list[str]:
+        """Имената на задължителните документи (КСС) — за приоритет в промпта.
+
+        При грешка връща празен списък: приоритизирането е оптимизация, не
+        бива да чупи генерирането.
+        """
+        if not self.files:
+            return []
+        try:
+            classification = self.files.classify_files(ai_processor=self.ai)
+            return list(classification.get("required") or [])
+        except Exception as exc:
+            logger.debug("Не мога да определя приоритетни документи: %s", exc)
+            return []
+
+    def _boq_index(self) -> list:
+        """Индексът с количествени редове — за цитиране в промпта.
+
+        При грешка връща празен списък: цитирането е подобрение, не бива да
+        чупи генерирането.
+        """
+        if not self.files or not self.files.base_path:
+            return []
+        try:
+            from src.provenance import build_quantity_index
+            return build_quantity_index(self.files.base_path)
+        except Exception as exc:
+            logger.debug("Не мога да индексирам количествата: %s", exc)
+            return []
+
+    def _verify_quantities(self, gen_result: dict) -> dict:
+        """Свери количествата в графика срещу редовете в КСС (BACKLOG т.3).
+
+        Отговаря на въпроса „откъде е това число".  Каквото не може да се
+        свери, се маркира като несверено — по-полезно от фалшива увереност.
+        """
+        if not self.files or not self.files.base_path:
+            return {}
+        try:
+            from src.ai_processor import AIProcessor
+            from src.provenance import (
+                annotate_schedule, build_quantity_index, verify_citations,
+            )
+
+            tasks = AIProcessor._tasks_from(gen_result.get("schedule"))
+            if not tasks:
+                return {}
+            index = build_quantity_index(self.files.base_path)
+            if not index:
+                return {"no_index": True}
+
+            # Етап 2: ако моделът е цитирал редове, проверяваме ЦИТАТИТЕ.
+            # Ако не е — падаме към сверяване по сходство (етап 1).
+            if any(task.get("source_ref") for task in tasks):
+                return verify_citations(tasks, index)
+            return annotate_schedule(tasks, index)
+        except Exception as exc:
+            logger.warning("Сверяването на количествата се провали: %s", exc)
+            return {}
+
+    @staticmethod
+    def _format_quantity_provenance(report: dict) -> list[str]:
+        """Покажи колко от количествата са сверени срещу документ."""
+        if not report:
+            return []
+        if report.get("no_index"):
+            return [
+                "\n📄 **Произход на количествата: непроверен** — няма таблични "
+                "документи (Excel/CSV) за сверяване. От свободен текст не може "
+                "да се посочи ред и клетка."
+            ]
+
+        total = report.get("total", 0)
+        if not total:
+            return []
+
+        verified = report.get("verified", 0)
+        human = report.get("human", 0)
+        lines = [
+            f"\n📄 **Количества, сверени срещу КСС:** {verified} от {total}"
+        ]
+        if human:
+            lines.append(f"  ({human} ръчно въведени от човек — не се сверяват)")
+
+        # Етап 2: моделът цитира ред, кодът проверява цитата.  Разликата
+        # между „няма цитат" и „цитатът не съвпада" е съществена —
+        # несъвпадащият изглежда като доказателство, а не е.
+        if "problems" in report:
+            mismatch = report.get("mismatch", 0)
+            unknown = report.get("unknown_ref", 0)
+            uncited = report.get("uncited", 0)
+
+            if mismatch:
+                lines.append(
+                    f"\n🛑 **{mismatch} цитата НЕ съвпадат с посочения ред** — "
+                    "числото изглежда подкрепено с документ, но не е:"
+                )
+                for item in [p for p in report["problems"]
+                             if p["status"] == "mismatch"][:5]:
+                    lines.append(
+                        f"  - {item['id']} {str(item['name'])[:34]}: "
+                        f"графикът казва {item['quantity']}, "
+                        f"ред {item['ref']} казва {item['actual']}"
+                    )
+            if unknown:
+                lines.append(
+                    f"\n⚠️ **{unknown} цитата сочат несъществуващ ред** "
+                    "(измислен източник):"
+                )
+                for item in [p for p in report["problems"]
+                             if p["status"] == "unknown_ref"][:3]:
+                    lines.append(f"  - {item['id']}: '{item['ref']}'")
+            if uncited:
+                lines.append(
+                    f"\n📌 {uncited} количества без посочен източник — идват от "
+                    "AI, не от документ."
+                )
+            return lines
+
+        unverified = report.get("details") or []
+        if unverified:
+            lines.append(
+                f"  {len(unverified)} НЕ съвпадат с нито един ред в документите:"
+            )
+            for item in unverified[:5]:
+                closest = item.get("closest")
+                hint = f" (най-близко: {closest[:40]})" if closest else ""
+                lines.append(
+                    f"  - {item.get('id')} {str(item.get('name'))[:36]} "
+                    f"= {item.get('quantity')}{hint}"
+                )
+            if len(unverified) > 5:
+                lines.append(f"  ... и още {len(unverified) - 5}")
+            lines.append("  Тези числа идват от AI, не от документ. Проверете ги.")
+        return lines
+
+    @staticmethod
+    def _format_truncation_warning(analysis: dict) -> list[str]:
+        """Кажи ясно, ако документи НЕ са стигнали до AI-я.
+
+        BACKLOG т.2: отрязването беше тихо — добавяше се само
+        „[... съдържанието е съкратено ...]", без да се знае кое е отпаднало.
+        """
+        truncation = analysis.get("truncation") or {}
+        if not truncation.get("truncated"):
+            return []
+
+        dropped = truncation.get("dropped_documents") or []
+        lines = [
+            f"\n⚠️ **Не всички документи стигнаха до анализа** "
+            f"({truncation.get('chars', 0):,} от {truncation.get('total_chars', 0):,} знака):"
+        ]
+        for name in dropped[:6]:
+            lines.append(f"  - {name}")
+        if len(dropped) > 6:
+            lines.append(f"  ... и още {len(dropped) - 6}")
+        lines.append(
+            "  Задължителните документи (КСС) влизат първи. Ако нещо важно е "
+            "отпаднало, извадете ненужните файлове от папката."
+        )
+        return lines
+
+    @staticmethod
+    def _format_validation_report(gen_result: dict) -> list[str]:
+        """Покажи резултата от детерминистичната валидация на графика.
+
+        Тиха валидация е равносилна на липсваща: ако графикът има кръгова
+        зависимост или задача, започваща преди края на предшественика си,
+        потребителят трябва да го види ПРЕДИ да го изпрати на възложителя.
+        """
+        validation = gen_result.get("validation") or {}
+        if not validation:
+            return []
+
+        if not validation.get("checked"):
+            return [
+                "\n⚠️ **Детерминистичната проверка не можа да се изпълни** — "
+                "не бяха намерени задачи в графика."
+            ]
+
+        errors = validation.get("errors", [])
+        warnings = validation.get("warnings", [])
+
+        spatial = validation.get("spatial") or {}
+        covered = spatial.get("covered", 0)
+        total = spatial.get("total", 0)
+
+        # Пространственото покритие се казва ВИНАГИ — иначе не се разбира дали
+        # проверката за сблъсък на бригади изобщо е имала данни да работи.
+        if covered:
+            alignments = spatial.get("alignments") or []
+            spatial_note = (
+                f"\n📍 **Пространствена проверка:** {covered} от {total} задачи "
+                f"с пикетаж"
+                + (f" по {len(alignments)} оси" if alignments else "")
+            )
+        else:
+            spatial_note = (
+                f"\n📍 **Пространствена проверка: пропусната** — нито една задача "
+                "няма пикетаж. Сблъсък на бригади и дължина на открит изкоп "
+                "НЕ са проверени."
+            )
+
+        if not errors and not warnings:
+            return [
+                f"\n✅ **Детерминистична проверка: чиста** "
+                f"({validation.get('task_count', 0)} задачи — зависимости, "
+                f"дати, продължителности, екипи)",
+                spatial_note,
+            ]
+
+        lines: list[str] = []
+        if errors:
+            lines.append(
+                f"\n🛑 **Графикът НЕ минава детерминистичната проверка — "
+                f"{len(errors)} грешки:**"
+            )
+            for err in errors[:6]:
+                lines.append(f"  - {err}")
+            if len(errors) > 6:
+                lines.append(f"  ... и още {len(errors) - 6}")
+            lines.append(
+                "  **Не изпращайте този график на възложителя, преди да се "
+                "отстранят.** Грешките са в логиката (зависимости, дати), "
+                "не в оформлението."
+            )
+
+        if warnings:
+            lines.append(f"\n⚠️ **{len(warnings)} предупреждения:**")
+            for warn in warnings[:4]:
+                lines.append(f"  - {warn}")
+            if len(warnings) > 4:
+                lines.append(f"  ... и още {len(warnings) - 4}")
+
+        lines.append(spatial_note)
+        return lines
+
+    @staticmethod
+    def _format_duration_report(gen_result: dict) -> list[str]:
+        """Направи видимо какво е преизчислил детерминистичният калкулатор.
+
+        Без този отчет замяната на продължителностите е тиха — потребителят
+        вижда различни числа от тези, които AI-ят е обявил, без обяснение.
+
+        Args:
+            gen_result: Резултатът от AIProcessor.generate_schedule.
+
+        Returns:
+            Списък редове за чат отговора (празен, ако стъпката е пропусната).
+        """
+        report = gen_result.get("duration_report") or {}
+        if not report.get("applied"):
+            return []
+
+        summary = report.get("summary", {})
+        recomputed = summary.get("recomputed", 0)
+        skipped = summary.get("skipped", 0)
+        unresolved = summary.get("unresolved", 0)
+        old_total = summary.get("old_total_duration", 0)
+        new_total = summary.get("new_total_duration", 0)
+
+        # Одит v6, точка 6: досега `if not recomputed: return []` излизаше
+        # ПРЕДИ блока за недоказани продължителности.  Затова при финалния
+        # отчет (нищо преизчислено, но 2 недоказани) човекът не виждаше
+        # нищо.  Сега празно се връща само ако няма НИТО преизчислени, НИТО
+        # недоказани.
+        if not recomputed and not unresolved:
+            return []
+
+        lines: list[str] = []
+        if recomputed:
+            lines.append(
+                f"\n📐 **Продължителности, преизчислени от productivities.json:** "
+                f"{recomputed} задачи (пропуснати {skipped} — няма норма)"
+            )
+            if old_total != new_total:
+                lines.append(
+                    f"  Обща продължителност: {old_total}д → **{new_total}д** "
+                    f"(AI-ят беше сметнал {old_total}д)"
+                )
+            for change in report.get("changes", [])[:8]:
+                lines.append(
+                    f"  - {change['id']} {change['name'][:40]}: "
+                    f"{change['old']}д → {change['new']}д ({change['reason']})"
+                )
+            extra = len(report.get("changes", [])) - 8
+            if extra > 0:
+                lines.append(f"  ... и още {extra}")
+            for warning in report.get("warnings", []):
+                lines.append(f"  ⚠️ {warning}")
+
+        lines.extend(ChatHandler._format_unresolved_durations(report))
+        return lines
+
+    # Човешки текст за машинните кодове от duration_calculator.
+    _CODE_LABELS = {
+        "MISSING_MATERIAL": "материалът не е указан (PE/CI/PVC)",
+        "MISSING_DN": "липсва диаметър DN",
+        "MISSING_LENGTH": "липсва дължина в метри",
+        "NO_PRODUCTIVITY_RULE": "няма норма за този DN и материал",
+        "COUNT_NO_RATE": "бройки без известна норма",
+        "NOT_PARAMETRIC": "не е тръбна дейност (изкоп, извозване, настилки)",
+    }
+
+    @staticmethod
+    def _format_unresolved_durations(report: dict) -> list[str]:
+        """Кажи ясно кои продължителности НЕ са доказани.
+
+        Одит 2026-07-23: изчислената и предположената стойност бяха в едно
+        поле и потребителят нямаше как да разбере кои числа в графика му са
+        сметнати по норма и кои са предположение на езиков модел.
+        """
+        summary = report.get("summary", {})
+        unresolved = summary.get("unresolved", 0)
+        if not unresolved:
+            return []
+
+        by_code = summary.get("by_code", {})
+        lines = [
+            f"\n📌 **{unresolved} задачи с НЕДОКАЗАНА продължителност** "
+            "— стойността идва от AI, не от нормите:"
+        ]
+        for code, count in sorted(by_code.items(), key=lambda kv: -kv[1]):
+            if code == "NOT_PARAMETRIC":
+                continue  # изкоп/настилки нямат норми — очаквано, не е дефект
+            label = ChatHandler._CODE_LABELS.get(code, code)
+            lines.append(f"  - {count}× {label}")
+
+        not_parametric = by_code.get("NOT_PARAMETRIC", 0)
+        if not_parametric:
+            lines.append(
+                f"  ({not_parametric} дейности без норма в конфига — "
+                "изкоп, извозване, настилки — това е очаквано)"
+            )
+        lines.append(
+            "  Провери тези стойности спрямо КСС, преди да ползваш графика."
+        )
+        return lines
+
     def _handle_generate_schedule(
         self,
         message: str,
@@ -508,7 +857,9 @@ class ChatHandler:
 
         # Step 1: Analyze documents
         self._progress(0.10, "Анализ на документите...")
-        all_text = self.files.get_all_text() if self.files else ""
+        # BACKLOG т.2: задължителните документи (КСС) излизат ПЪРВИ, за да не
+        # отпаднат при отрязване само защото са по-назад по азбучен ред.
+        all_text = self.files.get_all_text(priority=self._required_files()) if self.files else ""
         analysis = self.ai.analyze_documents(converted_files, all_text=all_text)
 
         if analysis.get("status") == "error":
@@ -624,12 +975,31 @@ class ChatHandler:
             _cycle_idx[0] += 1
             self._progress(pct, msg)
 
-        gen_result = self.ai.generate_schedule(
-            analysis, project_type, _progress,
-            all_text=all_text,
-            extra_locations=situation_locations or None,
-            sequence_constraints=project_context.get("sequence_constraints") if project_context else None,
-        )
+        # STAGING (проба 2026-07-31): голям проект (КСС с няколко части —
+        # водопровод/канализация/пътна) не се събира в едно AI извикване дори
+        # на 8192 токена → отрязан JSON.  Ако количествата обхващат ≥2 листа,
+        # генерираме по части и сливаме.  Иначе — обикновеният път.
+        _boq = self._boq_index()
+        # Броим (документ, лист) — одит v13 #6: два файла с лист „КСС" не бива
+        # да се считат за една част (иначе staging не се задейства и голям
+        # проект пак се отрязва).
+        _sheets = {(getattr(getattr(r, "source", None), "document", ""),
+                    getattr(getattr(r, "source", None), "sheet", ""))
+                   for r in _boq if getattr(r, "quantity", None) is not None}
+        if len([s for s in _sheets if s[1]]) >= 2:
+            _progress(f"Голям проект ({len(_sheets)} части) — генерирам по части (staging)...")
+            gen_result = self.ai.generate_schedule_staged(
+                analysis, project_type, _progress,
+                all_text=all_text, boq_index=_boq,
+            )
+        else:
+            gen_result = self.ai.generate_schedule(
+                analysis, project_type, _progress,
+                all_text=all_text,
+                extra_locations=situation_locations or None,
+                sequence_constraints=project_context.get("sequence_constraints") if project_context else None,
+                boq_index=_boq,
+            )
 
         # Build response
         status = gen_result.get("status", "error")
@@ -653,7 +1023,16 @@ class ChatHandler:
         for msg in progress_messages:
             response_parts.append(f"- {msg}")
 
-        if status == "approved":
+        if status == "invalid":
+            # GATE (одит 2026-07-23): кодът отхвърли графика.  Никакво
+            # „одобрен" — AI статусът вече не е авторитетен.
+            response_parts.append(
+                "\n🛑 **Графикът е ОТХВЪРЛЕН от проверката.** "
+                f"(AI го беше отбелязал като '{gen_result.get('ai_status', '?')}', "
+                f"${cost:.4f})\n"
+                "Не се записва като текущ график и не може да се експортира."
+            )
+        elif status == "approved":
             response_parts.append(
                 f"\n**График одобрен!** ({cycles} {'цикъл' if cycles == 1 else 'цикъла'} проверка, ${cost:.4f})"
             )
@@ -691,12 +1070,33 @@ class ChatHandler:
                 "\nМоля, проверете тези имена спрямо оригиналната документация преди употреба."
             )
 
-        self.current_schedule = gen_result.get("schedule")
+        response_parts.extend(self._format_truncation_warning(analysis))
+        response_parts.extend(
+            self._format_quantity_provenance(self._verify_quantities(gen_result))
+        )
+        response_parts.extend(self._format_duration_report(gen_result))
+        response_parts.extend(self._format_validation_report(gen_result))
+        response_parts.extend(
+            format_injection_warnings(gen_result.get("injection_findings") or [])
+        )
+
+        # GATE (одит 2026-07-23; разширен v6, точка 1): само график с ПРИЕТ
+        # статус става текущ и се записва.  Досега условието беше
+        # `status != "invalid"` — blacklist, който пускаше `error`/`stopped`
+        # (сринат или спрян контрольор) да станат работен график.  Сега е
+        # allowlist: approved / needs_human_review.  Всичко друго се пази само
+        # като неуспешна ревизия — за диагностика, не за употреба.
+        from src.ai_processor import AIProcessor
+        _valid = status in AIProcessor.ACCEPTED_STATUSES
+        if _valid:
+            self.current_schedule = gen_result.get("schedule")
+        else:
+            self.rejected_schedule = gen_result.get("schedule")
         self.correction_history = history
         self.current_project_type = project_type
 
         # Save schedule to project manager
-        if self.project_mgr and self.project_mgr.current_project:
+        if _valid and self.project_mgr and self.project_mgr.current_project:
             pid = self.project_mgr.current_project.get("id")
             if pid:
                 self.project_mgr.save_progress(pid, {
@@ -706,8 +1106,12 @@ class ChatHandler:
 
         return {
             "response": "\n".join(response_parts),
-            "schedule_updated": status in ("approved", "needs_human_review"),
+            "schedule_updated": _valid and status in ("approved", "needs_human_review"),
             "schedule_data": self.current_schedule,
+            "validation": gen_result.get("validation"),
+            "export": {"exportable": gen_result.get("exportable"),
+                       "export_blockers": gen_result.get("export_blockers"),
+                       "export_policy": gen_result.get("export_policy")},
             "correction_info": {
                 "status": status,
                 "cycles": cycles,
@@ -830,10 +1234,139 @@ class ChatHandler:
                         "⚠️ Внимание: AI-ят е направил непредвидени промени."
                     )
 
-        self.current_schedule = new_schedule
+        # ------------------------------------------------------------------
+        # СЪЩИТЕ ЗАЩИТИ КАТО ПРИ ГЕНЕРИРАНЕ (одит 2026-07-23, точка 4).
+        #
+        # Дотук този път правеше САМО структурен diff (`validate_modification`),
+        # показваше предупреждения и записваше графика ВИНАГИ.  Тоест дори
+        # генериращият pipeline да е поправен, една команда „намали срока с
+        # 20 дни" можеше да върне график с duration=-5, самозависимост или
+        # кръгова зависимост — и той ставаше текущият.
+        #
+        # Затова тук: преизчисляване → пълна валидация → gate.
+        # ------------------------------------------------------------------
+        from src.ai_processor import AIProcessor
+
+        modified_tasks = AIProcessor._tasks_from(new_schedule)
+        before_tasks = AIProcessor._tasks_from(self.current_schedule)
+
+        # INPUT-LOCK И ЗА МОДИФИКАЦИЯТА (одит v8, точка 1).
+        #
+        # Досега заключването живееше само в correction cycle-а при генериране.
+        # Тук AI връщаше цял график и можеше да промени екипи/пикетаж/входове/
+        # зависимости на задачи, които човекът НЕ е поискал — прилагаха се и
+        # оставаха strict-exportable.  Сега непоисканите задачи минават през
+        # същото заключване; поисканите (посочените в съобщението) са свободни.
+        mod_lock = AIProcessor.enforce_modification_lock(
+            modified_tasks, before_tasks, message)
+        # TRUST BOUNDARY (одит v12): изтрий AI-подадени provenance статуси ПРЕДИ
+        # човешкото маркиране — иначе AI може да си сложи фалшив human_override и
+        # да заобиколи проверката срещу КСС.  Легитимният произход се задава
+        # само от mark_human_overrides/verify_citations (сървърни операции).
+        try:
+            from src.provenance import strip_ai_provenance
+            strip_ai_provenance(modified_tasks)
+        except Exception as exc:
+            logger.debug("strip_ai_provenance (модификация) се провали: %s", exc)
+        if isinstance(new_schedule, dict):
+            new_schedule = {**new_schedule, "tasks": modified_tasks}
+        else:
+            new_schedule = modified_tasks
+
+        duration_report: dict = {}
+        if modified_tasks and self.builder:
+            recomputed = self.builder.recompute_durations(modified_tasks)
+            modified_tasks = recomputed["schedule"]
+            duration_report = {
+                "applied": True,
+                "changes": recomputed["changes"],
+                "skipped": recomputed["skipped"],
+                "warnings": recomputed["warnings"],
+                "summary": recomputed["summary"],
+            }
+            if isinstance(new_schedule, dict):
+                new_schedule = {**new_schedule, "tasks": modified_tasks}
+            else:
+                new_schedule = modified_tasks
+
+        # BACKLOG т.3 етап 3: количествата, които тази ръчна промяна е сменила,
+        # вече идват от ЧОВЕК, не от AI или документ.  Произходът го отразява.
+        try:
+            from src.provenance import mark_human_overrides
+            mark_human_overrides(before_tasks, modified_tasks, message)
+        except Exception as exc:
+            logger.debug("Маркирането на ръчни промени се провали: %s", exc)
+
+        validation = AIProcessor._validate_final_schedule(new_schedule)
+
+        # GATE на модификацията (одит v5 т.6 + v6 т.1): прилага се само при
+        # валиден график И приет статус.  Досега `_valid` беше само
+        # validation.valid — сринат/спрян контрольор (status error/stopped)
+        # пак прилагаше промяната.  Сега error/stopped я отхвърлят.
+        # Одит v7 т.4 + v8 т.4/6: произходът на количествата влиза в gate-а,
+        # с `checked` за fail-closed при strict (липсващ индекс/грешка).
+        # Смята се ПРЕДИ статуса — за да може непокритие да СВАЛИ статуса, а не
+        # само да е blocker (одит v19: provisional игнорираше blockers).
+        _citation_report: dict = {"checked": False, "reason": "no_boq_index"}
+        _cov_problem = False
+        try:
+            from src.provenance import verify_citations, analyze_boq_coverage
+            _idx = self._boq_index()
+            if _idx:
+                _citation_report = {**verify_citations(modified_tasks, _idx),
+                                    "checked": True}
+                # Одит v18 P0: coverage gate ЛИПСВАШЕ в модификацията — премахване
+                # на задача оставяше КСС ред непокрит, а strict пак пускаше.  Сега
+                # и тук се проверяват непокрити/дублирани/двусмислени позиции.
+                _cov = analyze_boq_coverage(modified_tasks, _idx)
+                _citation_report["uncovered"] = _cov["uncovered"]
+                _citation_report["over_covered"] = sorted(_cov["over_covered"])
+                _citation_report["ambiguous"] = _cov.get("ambiguous", [])
+                _cov_problem = bool(_cov["uncovered"] or _cov["over_covered"]
+                                    or _cov.get("ambiguous"))
+        except Exception as exc:
+            logger.warning("verify_citations при модификация се провали: %s", exc)
+            _citation_report = {"checked": False, "reason": "exception"}
+        # Одит v22 P0: „не можах да проверя" = „не е доказано" — БЕЗ изключения.
+        # Всеки непроверен произход (липсващ КСС индекс ИЛИ exception при самата
+        # проверка) сваля статуса до needs_human_review, за да НЕ е експортируем при
+        # НИКОЯ policy (strict/provisional/lenient).  (v21 пропускаше липсващия индекс
+        # като „degraded режим" — одитът правилно го отхвърли: модификация без
+        # проверим произход е недоказана, точка.)
+        if not _citation_report.get("checked"):
+            _cov_problem = True
+
+        _ctrl_status = verification.get("status", "approved")
+        # Одит v8, точка 1: непоискана AI промяна на защитени полета/структура
+        # → needs_human_review (не се експортира без човек, макар графикът да е
+        # приложен с върнатите оригинални стойности).
+        if mod_lock["unrequested_change"] and _ctrl_status == "approved":
+            _ctrl_status = "needs_human_review"
+        # Одит v19 P0: непокрита/дублирана/двусмислена BOQ позиция след промяна
+        # СВАЛЯ статуса до needs_human_review — така графикът НЕ е експортируем при
+        # НИКОЯ policy (provisional игнорира само blockers, не и статуса), както
+        # твърди документацията („ambiguous е fail-closed навсякъде").
+        if _cov_problem and _ctrl_status == "approved":
+            _ctrl_status = "needs_human_review"
+        _valid = bool(validation.get("valid")) and _ctrl_status in AIProcessor.ACCEPTED_STATUSES
+        _mod_status = _ctrl_status if _valid else (
+            "invalid" if not validation.get("valid") else _ctrl_status
+        )
+        export_decision = AIProcessor._export_decision(
+            _mod_status, validation, {}, duration_report, _citation_report
+        )
+
+        if _valid:
+            self.current_schedule = new_schedule
+        else:
+            self.rejected_schedule = new_schedule
+            logger.error(
+                "Модификацията е ОТХВЪРЛЕНА: %s",
+                "; ".join(validation.get("errors", [])[:3]),
+            )
 
         # Save updated schedule to project manager
-        if self.project_mgr and self.project_mgr.current_project:
+        if _valid and self.project_mgr and self.project_mgr.current_project:
             pid = self.project_mgr.current_project.get("id")
             if pid:
                 self.project_mgr.save_progress(pid, {
@@ -842,22 +1375,87 @@ class ChatHandler:
                 })
 
         # Build response
-        response_parts = [
-            f"Промяната е приложена.",
-            f"Модел: {result.get('model', '?')}, Проверка: {verification.get('status', '?')}",
-        ]
+        if _valid:
+            # Одит v23: показвай АВТОРИТЕТНИЯ статус (_mod_status), не AI-контрольора —
+            # иначе „Проверка: approved" подвежда, докато кодът е needs_human_review.
+            if _mod_status == "needs_human_review":
+                response_parts = [
+                    "Промяната е приложена като РАБОТНА версия, но графикът НЕ е "
+                    "готов за експорт — маркиран е за човешки преглед.",
+                    f"Модел: {result.get('model', '?')}, Статус: needs_human_review",
+                ]
+            else:
+                response_parts = [
+                    "Промяната е приложена.",
+                    f"Модел: {result.get('model', '?')}, Статус: approved",
+                ]
+            # Одит v23: обясни ЗАЩО чака преглед — липсващ произход или недоказано
+            # покритие (иначе UI показваше „чиста проверка" без причина).
+            if not _citation_report.get("checked"):
+                _reason = _citation_report.get("reason")
+                _txt = ("липсва КСС индекс — покритието на количествата не може да "
+                        "се докаже" if _reason == "no_boq_index"
+                        else "грешка при проверката на произхода"
+                        if _reason == "exception" else "произходът не е проверен")
+                response_parts.append(
+                    f"\n⚠️ Произходът на количествата НЕ е проверен ({_txt}); "
+                    "затова графикът чака човешки преглед и няма да се експортира.")
+            elif _cov_problem:
+                _u = len(_citation_report.get("uncovered") or [])
+                _a = len(_citation_report.get("ambiguous") or [])
+                _o = len(_citation_report.get("over_covered") or [])
+                response_parts.append(
+                    f"\n⚠️ Недоказано покритие след промяната: непокрити={_u}, "
+                    f"неопределими={_a}, дублирани={_o} — човешки преглед, без експорт.")
+            # Одит v8, точка 1: ако AI е пипнал непоискани задачи, казваме го
+            # ясно и обясняваме, че защитените полета са върнати и че графикът
+            # чака човешки преглед (не се експортира без него).
+            if mod_lock["unrequested_change"]:
+                touched = sorted(set(
+                    [r["id"] for r in mod_lock["reverted"]]
+                    + mod_lock["dependency_changes"]
+                    + mod_lock["added"] + mod_lock["removed"]
+                ))
+                response_parts.append(
+                    "\n⚠️ Освен поисканото, AI промени и НЕПОИСКАНИ задачи "
+                    f"({', '.join(map(str, touched))}). Защитените полета "
+                    "(екип, пикетаж, входове, зависимости) са върнати към "
+                    "оригинала; графикът е маркиран за човешки преглед и няма "
+                    "да се експортира без него."
+                )
+        else:
+            response_parts = [
+                "🛑 **Промяната е ОТХВЪРЛЕНА** — резултатът не минава "
+                "детерминистичната проверка.",
+                "Предишният график остава непроменен.",
+            ]
         if validation_notes:
             response_parts.append("")
             response_parts.append("**Локална проверка:**")
             response_parts.extend(validation_notes)
 
+        response_parts.extend(self._format_duration_report({"duration_report": duration_report}))
+        response_parts.extend(self._format_validation_report({"validation": validation}))
+
         return {
             "response": "\n".join(response_parts),
-            "schedule_updated": True,
+            "schedule_updated": _valid,
             "schedule_data": self.current_schedule,
+            "validation": validation,
+            "export": {"exportable": export_decision["exportable"],
+                       "export_blockers": export_decision["blockers"],
+                       "export_policy": export_decision["policy"]},
+            "duration_report": duration_report,
+            # Одит v23: произходът се връща на UI/API — вкл. `reason` (напр.
+            # no_boq_index), за да не изглежда „чиста проверка" без обяснение.
+            "citation_report": _citation_report,
             "correction_info": {
-                "status": verification.get("status", "error"),
+                "status": _mod_status,
                 "cycles": verification.get("cycles", 0),
+                # Одит v23: пълният отчет и ВЪТРЕ в correction_info (не само top-level).
+                "citation_report": _citation_report,
+                "provenance_checked": bool(_citation_report.get("checked")),
+                "provenance_reason": _citation_report.get("reason"),
             },
             "intent": "modify_schedule",
             "model_used": result.get("model", "unknown"),
@@ -1007,6 +1605,19 @@ class ChatHandler:
 
     def _handle_evolve(self, message: str) -> dict:
         """Handle self-evolution intent: analyze, plan, generate changes."""
+        # Бариера ПРЕДИ всичко останало — включително преди четенето на
+        # файлове в analyze_request/generate_changes, което се случваше без
+        # никаква проверка и беше път за изнасяне на съдържание към AI.
+        if not evolution_enabled():
+            return {
+                "response": EVOLUTION_DISABLED_MESSAGE,
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "evolve",
+                "model_used": "none",
+            }
+
         if not self.evolution:
             return {
                 "response": "Системата за самоеволюция не е инициализирана.",
@@ -1033,7 +1644,7 @@ class ChatHandler:
         progress: list[str] = []
 
         # Step 1: Analyze
-        progress.append("Анализирам заявката... (Anthropic Sonnet 4.6)")
+        progress.append("Анализирам заявката... (Anthropic Opus 4.8)")
         plan = self.evolution.analyze_request(message)
 
         if plan.get("error"):
@@ -1043,13 +1654,13 @@ class ChatHandler:
                 "schedule_data": None,
                 "correction_info": None,
                 "intent": "evolve",
-                "model_used": "claude-sonnet-4-6",
+                "model_used": MODEL_CONTROLLER,
             }
 
         level = plan.get("level", "red")
 
         # Step 2: Generate changes
-        progress.append("Генерирам код... (Anthropic Sonnet 4.6)")
+        progress.append("Генерирам код... (Anthropic Opus 4.8)")
         changes = self.evolution.generate_changes(plan)
 
         if changes.get("error") and not changes.get("changes"):
@@ -1059,7 +1670,7 @@ class ChatHandler:
                 "schedule_data": None,
                 "correction_info": None,
                 "intent": "evolve",
-                "model_used": "claude-sonnet-4-6",
+                "model_used": MODEL_CONTROLLER,
             }
 
         # Step 3: Preview
@@ -1069,9 +1680,18 @@ class ChatHandler:
         progress_text = "\n".join(progress)
 
         if level == "green":
-            # GREEN: Apply directly, no confirmation needed
+            # GREEN: Apply directly, no confirmation needed.
+            # Бекъп СЕ ПРАВИ и тук — досега само red получаваше такъв, тоест
+            # автоматично приложена промяна в knowledge/ нямаше път назад (P6).
+            progress.append("Създавам backup...")
+            backup = self.evolution.create_backup(plan.get("description", ""))
+            if backup["success"]:
+                progress.append(f"   Git commit: {backup['commit_hash'][:8]}")
+            else:
+                progress.append(f"   Backup неуспешен: {backup.get('error', '?')}")
+
             progress.append("Прилагам промени...")
-            apply_result = self.evolution.apply_changes(changes)
+            apply_result = self.evolution.apply_changes(changes, declared_level=level)
 
             if apply_result["failed"] > 0:
                 error_text = "\n".join(apply_result["errors"])
@@ -1084,7 +1704,7 @@ class ChatHandler:
                     "schedule_data": None,
                     "correction_info": None,
                     "intent": "evolve",
-                    "model_used": "claude-sonnet-4-6",
+                    "model_used": MODEL_CONTROLLER,
                 }
 
             # Log the change
@@ -1100,7 +1720,7 @@ class ChatHandler:
                 "schedule_data": None,
                 "correction_info": None,
                 "intent": "evolve",
-                "model_used": "claude-sonnet-4-6",
+                "model_used": MODEL_CONTROLLER,
             }
 
         elif level == "yellow":
@@ -1116,7 +1736,7 @@ class ChatHandler:
                 "schedule_data": None,
                 "correction_info": None,
                 "intent": "evolve",
-                "model_used": "claude-sonnet-4-6",
+                "model_used": MODEL_CONTROLLER,
                 "evolution_pending": {
                     "level": level,
                     "plan": plan,
@@ -1140,7 +1760,7 @@ class ChatHandler:
                     "schedule_data": None,
                     "correction_info": None,
                     "intent": "evolve",
-                    "model_used": "claude-sonnet-4-6",
+                    "model_used": MODEL_CONTROLLER,
                 }
 
             return {
@@ -1156,7 +1776,7 @@ class ChatHandler:
                 "schedule_data": None,
                 "correction_info": None,
                 "intent": "evolve",
-                "model_used": "claude-sonnet-4-6",
+                "model_used": MODEL_CONTROLLER,
                 "evolution_pending": {
                     "level": level,
                     "plan": plan,
@@ -1561,13 +2181,31 @@ class ChatHandler:
             _cycle_idx[0] += 1
             self._progress(pct, msg)
 
-        gen_result = self.ai.generate_schedule(
-            analysis, project_type, _progress,
-            all_text=all_text,
-            extra_locations=situation_locations or None,
-            sequence_constraints=sequence_constraints,
-            num_teams=num_teams,
-        )
+        # STAGING и в потока след въпросника (проба 2026-07-31): това е пътят
+        # за реален проект (след въпроса за екипи).  Ако КСС има ≥2 части,
+        # генерираме по части — иначе голям проект пак се отрязва.
+        _boq = self._boq_index()
+        # Броим (документ, лист) — одит v13 #6: два файла с лист „КСС" не бива
+        # да се считат за една част (иначе staging не се задейства и голям
+        # проект пак се отрязва).
+        _sheets = {(getattr(getattr(r, "source", None), "document", ""),
+                    getattr(getattr(r, "source", None), "sheet", ""))
+                   for r in _boq if getattr(r, "quantity", None) is not None}
+        if len([s for s in _sheets if s[1]]) >= 2:
+            _progress(f"Голям проект ({len(_sheets)} части) — генерирам по части (staging)...")
+            gen_result = self.ai.generate_schedule_staged(
+                analysis, project_type, _progress,
+                all_text=all_text, boq_index=_boq, num_teams=num_teams,
+            )
+        else:
+            gen_result = self.ai.generate_schedule(
+                analysis, project_type, _progress,
+                all_text=all_text,
+                extra_locations=situation_locations or None,
+                sequence_constraints=sequence_constraints,
+                boq_index=_boq,
+                num_teams=num_teams,
+            )
 
         status = gen_result.get("status", "error")
         cycles = gen_result.get("cycles", 0)
@@ -1578,7 +2216,16 @@ class ChatHandler:
         for msg in progress_messages:
             response_parts.append(f"- {msg}")
 
-        if status == "approved":
+        if status == "invalid":
+            # GATE (одит 2026-07-23): кодът отхвърли графика.  Никакво
+            # „одобрен" — AI статусът вече не е авторитетен.
+            response_parts.append(
+                "\n🛑 **Графикът е ОТХВЪРЛЕН от проверката.** "
+                f"(AI го беше отбелязал като '{gen_result.get('ai_status', '?')}', "
+                f"${cost:.4f})\n"
+                "Не се записва като текущ график и не може да се експортира."
+            )
+        elif status == "approved":
             response_parts.append(
                 f"\n**График одобрен!** ({cycles} {'цикъл' if cycles == 1 else 'цикъла'} проверка, ${cost:.4f})"
             )
@@ -1598,12 +2245,29 @@ class ChatHandler:
             for w in hallucination_warnings[:10]:
                 response_parts.append(f"  - {w}")
 
-        self.current_schedule = gen_result.get("schedule")
+        response_parts.extend(
+            self._format_quantity_provenance(self._verify_quantities(gen_result))
+        )
+        response_parts.extend(self._format_duration_report(gen_result))
+        response_parts.extend(self._format_validation_report(gen_result))
+        response_parts.extend(
+            format_injection_warnings(gen_result.get("injection_findings") or [])
+        )
+
+        # GATE (одит 2026-07-23; разширен v6, точка 1): allowlist на статуса —
+        # error/stopped НЕ стават текущ график.  Виж бележката в
+        # `_handle_generate_schedule`.
+        from src.ai_processor import AIProcessor
+        _valid = status in AIProcessor.ACCEPTED_STATUSES
+        if _valid:
+            self.current_schedule = gen_result.get("schedule")
+        else:
+            self.rejected_schedule = gen_result.get("schedule")
         self.correction_history = history
         self.current_project_type = project_type
 
         # Save to project manager (same as _handle_generate_schedule)
-        if self.project_mgr and self.project_mgr.current_project:
+        if _valid and self.project_mgr and self.project_mgr.current_project:
             pid = self.project_mgr.current_project.get("id")
             if pid:
                 self.project_mgr.save_progress(pid, {
@@ -1613,8 +2277,12 @@ class ChatHandler:
 
         return {
             "response": "\n".join(response_parts),
-            "schedule_updated": bool(self.current_schedule),
+            "schedule_updated": _valid and bool(self.current_schedule),
             "schedule_data": self.current_schedule,
+            "validation": gen_result.get("validation"),
+            "export": {"exportable": gen_result.get("exportable"),
+                       "export_blockers": gen_result.get("export_blockers"),
+                       "export_policy": gen_result.get("export_policy")},
             "correction_info": {
                 "status": status,
                 "cycles": cycles,
@@ -1635,6 +2303,20 @@ class ChatHandler:
         Returns:
             Standard response dict with evolution status.
         """
+        # Одит 2026-07-23: изключването пазеше входа (_handle_evolve), но НЕ и
+        # този път.  Останал `pending_changes` обект от преди изключването
+        # продължаваше към backup и прилагане.  Тук се затваря и той.
+        if not evolution_enabled():
+            return {
+                "response": EVOLUTION_DISABLED_MESSAGE,
+                "schedule_updated": False,
+                "schedule_data": None,
+                "correction_info": None,
+                "intent": "confirm_change",
+                "model_used": "none",
+                "evolution_cleared": True,
+            }
+
         if not self.evolution:
             return {
                 "response": "Системата за самоеволюция не е инициализирана.",
@@ -1694,26 +2376,25 @@ class ChatHandler:
         # Proceed with applying changes
         progress: list[str] = []
 
-        # Backup (for red level)
+        # Backup — ЗА ВСЯКО ниво, не само за red (P6): без бекъп няма rollback.
         backup_hash = ""
-        if level == "red":
-            progress.append("Създавам backup...")
-            backup = self.evolution.create_backup(plan.get("description", ""))
-            if backup["success"]:
-                backup_hash = backup["commit_hash"]
-                progress.append(f"   Git commit: {backup_hash[:8]}")
-            else:
-                progress.append(f"   Backup неуспешен: {backup.get('error', '?')}")
+        progress.append("Създавам backup...")
+        backup = self.evolution.create_backup(plan.get("description", ""))
+        if backup["success"]:
+            backup_hash = backup["commit_hash"]
+            progress.append(f"   Git commit: {backup_hash[:8]}")
+        else:
+            progress.append(f"   Backup неуспешен: {backup.get('error', '?')}")
 
         # Apply changes
         progress.append("Прилагам промени...")
-        apply_result = self.evolution.apply_changes(changes)
+        apply_result = self.evolution.apply_changes(changes, declared_level=level)
         progress.append(f"   Приложени: {apply_result['applied']}, Грешки: {apply_result['failed']}")
 
         if apply_result["failed"] > 0:
             error_text = "\n".join(apply_result["errors"])
-            # Auto-rollback for red level
-            if level == "red" and backup_hash:
+            # Auto-rollback — вече има бекъп на всяко ниво
+            if backup_hash:
                 progress.append("Тестовете не минаха! Автоматично връщам промените...")
                 rollback_result = self.evolution.rollback(backup_hash)
                 if rollback_result["success"]:
@@ -1731,7 +2412,7 @@ class ChatHandler:
                 "schedule_data": None,
                 "correction_info": None,
                 "intent": "confirm_change",
-                "model_used": "claude-sonnet-4-6",
+                "model_used": MODEL_CONTROLLER,
                 "evolution_cleared": True,
             }
 
@@ -1764,7 +2445,7 @@ class ChatHandler:
                     "schedule_data": None,
                     "correction_info": None,
                     "intent": "confirm_change",
-                    "model_used": "claude-sonnet-4-6",
+                    "model_used": MODEL_CONTROLLER,
                     "evolution_cleared": True,
                 }
 
@@ -1785,7 +2466,7 @@ class ChatHandler:
             "schedule_data": None,
             "correction_info": None,
             "intent": "confirm_change",
-            "model_used": "claude-sonnet-4-6",
+            "model_used": MODEL_CONTROLLER,
             "evolution_cleared": True,
             "evolution_applied": True,
         }
@@ -1949,7 +2630,7 @@ class ChatHandler:
     ) -> dict | None:
         """Load a project using the AI-extracted query parameter.
 
-        The AI has already cleaned 'зареди проект Плевен моля' → query='плевен'.
+        The AI has already cleaned 'зареди проект Тестоград моля' → query='Тестоград'.
         We just need to match against recent projects.
 
         Returns:

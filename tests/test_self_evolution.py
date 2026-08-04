@@ -23,6 +23,19 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.self_evolution import CHANGE_LEVELS, SelfEvolution
 
 
+@pytest.fixture(autouse=True)
+def _enable_self_evolution(monkeypatch):
+    """Тези тестове проверяват ВЪТРЕШНИТЕ бариери на self-evolution.
+
+    От одит 2026-07-23 функцията е изключена по подразбиране
+    (ENABLE_SELF_EVOLUTION).  Тук я включваме нарочно, за да се тества това,
+    което пази, КОГАТО е включена.  Поведението при изключена функция си има
+    отделни тестове по-долу.
+    """
+    monkeypatch.setenv("ENABLE_SELF_EVOLUTION", "1")
+
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

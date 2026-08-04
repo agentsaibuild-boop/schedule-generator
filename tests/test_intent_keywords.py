@@ -48,7 +48,7 @@ class TestDetectIntentKeywords:
     def test_load_project_phrase_priority(self):
         """LOAD_PROJECT_PHRASES should match before keyword scoring."""
         h = _handler()
-        assert h._detect_intent_keywords("зареди проект Плевен моля") == "load_project"
+        assert h._detect_intent_keywords("зареди проект Тестоград моля") == "load_project"
 
     def test_load_project_open_phrase(self):
         h = _handler()
@@ -192,13 +192,13 @@ class TestExtractSectionsFromAnalysis:
             "analysis": json.dumps({
                 "quantities": [
                     {"name": "ул. Витоша", "length_m": 100},
-                    {"name": "ул. Раковски", "length_m": 150},
+                    {"name": "ул. Четвърта", "length_m": 150},
                 ]
             })
         }
         result = ChatHandler._extract_sections_from_analysis(analysis)
         assert "ул. Витоша" in result
-        assert "ул. Раковски" in result
+        assert "ул. Четвърта" in result
 
     def test_list_quantities_with_section_key(self):
         analysis = {

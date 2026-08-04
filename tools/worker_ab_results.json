@@ -1,0 +1,191 @@
+[
+  {
+    "model": "deepseek/deepseek-chat",
+    "scenario": "Горноград — довеждащ, DN300 CI, горски",
+    "tasks": 16,
+    "seconds": 137.1846444606781,
+    "cost": 0.01201354,
+    "scores": {
+      "param_dn": 0.8,
+      "param_length": 0.8,
+      "param_material": 0.8,
+      "calculator_coverage": 1.0,
+      "material_correct": 1.0,
+      "dn_present": 1.0,
+      "no_phantom_phases": 1.0,
+      "_phantom_hits": [],
+      "no_hallucinated_places": 0.875,
+      "_hallucinations": 2,
+      "decomposition": 1.0
+    },
+    "composite": 92.88461538461539,
+    "status": "needs_human_review"
+  },
+  {
+    "model": "deepseek/deepseek-chat",
+    "scenario": "Среднево — единичен участък, DN500 PE, 720м",
+    "tasks": 9,
+    "seconds": 83.00449514389038,
+    "cost": 0.01070566,
+    "scores": {
+      "param_dn": 1.0,
+      "param_length": 1.0,
+      "param_material": 1.0,
+      "calculator_coverage": 1.0,
+      "material_correct": 1.0,
+      "dn_present": 1.0,
+      "no_phantom_phases": 1.0,
+      "_phantom_hits": [],
+      "no_hallucinated_places": 0.8888888888888888,
+      "_hallucinations": 1,
+      "decomposition": 0.75
+    },
+    "composite": 98.18376068376068,
+    "status": "needs_human_review"
+  },
+  {
+    "model": "deepseek/deepseek-chat",
+    "scenario": "Опитно — инженеринг, канализация + КПС",
+    "tasks": 31,
+    "seconds": 182.71217823028564,
+    "cost": 0.01344084,
+    "scores": {
+      "param_dn": 0.6,
+      "param_length": 0.6,
+      "param_material": 0.6,
+      "calculator_coverage": 0.7,
+      "dn_present": 1.0,
+      "required_dependency": 0.5,
+      "no_phantom_phases": 1.0,
+      "_phantom_hits": [],
+      "no_hallucinated_places": 0.5806451612903225,
+      "_hallucinations": 13,
+      "decomposition": 1.0
+    },
+    "composite": 69.85111662531017,
+    "status": "needs_human_review"
+  },
+  {
+    "model": "anthropic/claude-sonnet-5",
+    "scenario": "Горноград — довеждащ, DN300 CI, горски",
+    "tasks": 28,
+    "seconds": 320.3345425128937,
+    "cost": 0.38674000000000003,
+    "scores": {
+      "param_dn": 0.5,
+      "param_length": 0.5,
+      "param_material": 0.5,
+      "calculator_coverage": 1.0,
+      "material_correct": 0.5,
+      "dn_present": 1.0,
+      "no_phantom_phases": 1.0,
+      "_phantom_hits": [],
+      "no_hallucinated_places": 0.6785714285714286,
+      "_hallucinations": 9,
+      "decomposition": 1.0
+    },
+    "composite": 74.45054945054946,
+    "status": "needs_human_review"
+  },
+  {
+    "model": "anthropic/claude-sonnet-5",
+    "scenario": "Среднево — единичен участък, DN500 PE, 720м",
+    "tasks": 10,
+    "seconds": 222.50023245811462,
+    "cost": 0.285482,
+    "scores": {
+      "param_dn": 0.4,
+      "param_length": 0.8,
+      "param_material": 0.4,
+      "calculator_coverage": 1.0,
+      "material_correct": 1.0,
+      "dn_present": 1.0,
+      "no_phantom_phases": 1.0,
+      "_phantom_hits": [],
+      "no_hallucinated_places": 0.6,
+      "_hallucinations": 4,
+      "decomposition": 0.8333333333333334
+    },
+    "composite": 80.89743589743588,
+    "status": "needs_human_review"
+  },
+  {
+    "model": "anthropic/claude-sonnet-5",
+    "scenario": "Опитно — инженеринг, канализация + КПС",
+    "tasks": 0,
+    "seconds": 329.08419036865234,
+    "cost": 0.261956,
+    "scores": {
+      "param_dn": 0.0,
+      "param_length": 0.0,
+      "param_material": 0.0,
+      "calculator_coverage": 0.0,
+      "dn_present": 0.0,
+      "required_dependency": 0.0,
+      "no_phantom_phases": 1.0,
+      "_phantom_hits": [],
+      "no_hallucinated_places": 1.0,
+      "_hallucinations": 0,
+      "decomposition": 0.0
+    },
+    "composite": 19.23076923076923,
+    "status": "error",
+    "diagnostic": {
+      "status": "error",
+      "error": "",
+      "remaining_issues": [],
+      "parse_error": null
+    }
+  },
+  {
+    "model": "google/gemini-3.1-pro-preview",
+    "scenario": "Горноград — довеждащ, DN300 CI, горски",
+    "tasks": 7,
+    "seconds": 129.56189131736755,
+    "cost": 0.290898,
+    "scores": {
+      "param_dn": 0.0,
+      "param_length": 0.0,
+      "param_material": 0.0,
+      "calculator_coverage": 0.0,
+      "material_correct": 0.0,
+      "dn_present": 0.0,
+      "no_phantom_phases": 1.0,
+      "_phantom_hits": [],
+      "no_hallucinated_places": 0.8571428571428572,
+      "_hallucinations": 1,
+      "decomposition": 0.5833333333333334
+    },
+    "composite": 20.375457875457872,
+    "status": "needs_human_review"
+  },
+  {
+    "model": "google/gemini-3.1-pro-preview",
+    "scenario": "Среднево — единичен участък, DN500 PE, 720м",
+    "tasks": 9,
+    "seconds": 106.57712173461914,
+    "cost": 0.238474,
+    "scores": {
+      "param_dn": 0.3333333333333333,
+      "param_length": 0.6666666666666666,
+      "param_material": 0.3333333333333333,
+      "calculator_coverage": 0.6666666666666666,
+      "material_correct": 1.0,
+      "dn_present": 1.0,
+      "no_phantom_phases": 1.0,
+      "_phantom_hits": [],
+      "no_hallucinated_places": 0.4444444444444444,
+      "_hallucinations": 5,
+      "decomposition": 0.75
+    },
+    "composite": 69.12393162393163,
+    "status": "needs_human_review"
+  },
+  {
+    "model": "google/gemini-3.1-pro-preview",
+    "scenario": "Опитно — инженеринг, канализация + КПС",
+    "error": "unhashable type: 'dict'",
+    "composite": 0.0,
+    "cost": 0.0
+  }
+]

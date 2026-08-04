@@ -19,6 +19,11 @@ from pathlib import Path
 from reportlab.lib import colors
 from reportlab.lib.colors import HexColor
 
+from src.ai_disclosure import (
+    CONTENT_DISCLOSURE_BG,
+    SYSTEM_NAME,
+    pdf_metadata_keywords,
+)
 from src.constants import COLOR_PALETTE as _COLOR_PALETTE, TYPE_LABELS  # noqa: F401
 from reportlab.lib.pagesizes import A3, landscape
 from reportlab.lib.units import mm
@@ -313,7 +318,8 @@ def _render_pdf(
     end_dt = start_dt + timedelta(days=total_days)
 
     # Calculate rows per page
-    title_area_h = TOP_MARGIN + 18 * mm  # title block
+    # +4mm за реда с разкриването по EU AI Act чл. 50 (виж _draw_title)
+    title_area_h = TOP_MARGIN + 22 * mm  # title block
     legend_area_h = BOTTOM_MARGIN + 10 * mm
     usable_h = PAGE_H - title_area_h - legend_area_h - HEADER_H
     rows_per_page = int(usable_h / ROW_H)
@@ -330,6 +336,10 @@ def _render_pdf(
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=PAGE_SIZE)
     c.setTitle(f"График — {project_name}")
+    # EU AI Act чл. 50(2) — машинно четимо маркиране в метаданните на файла.
+    c.setSubject(CONTENT_DISCLOSURE_BG)
+    c.setCreator(SYSTEM_NAME)
+    c.setKeywords(pdf_metadata_keywords())
 
     for page_num in range(num_pages):
         start_idx = page_num * rows_per_page
@@ -449,6 +459,16 @@ def _draw_title(
     if teams:
         y -= 4 * mm
         c.drawCentredString(PAGE_W / 2, y, f"Екипи: {teams}")
+
+    # EU AI Act чл. 50 — видимо разкриване върху самия документ.
+    # Стои НАД разделителната линия, в заглавния блок: този PDF отива при
+    # възложителя и получателят трябва да види произхода без да рови в
+    # метаданните.
+    y -= 4 * mm
+    c.setFont(font, FONT_SIZE_SMALL)
+    c.setFillColor(colors.grey)
+    c.drawCentredString(PAGE_W / 2, y, CONTENT_DISCLOSURE_BG)
+    c.setFillColor(colors.black)
 
     # Separator line below title
     y -= 3 * mm

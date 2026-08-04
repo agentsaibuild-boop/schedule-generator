@@ -1,0 +1,68 @@
+name: CI
+
+# Одит v19: pre-commit hook-ът се заобикаля с `git commit --no-verify`.  Тук
+# същите защити се НАЛАГАТ и в CI — тестове + PII/секрет скан на всеки push/PR.
+
+on:
+  push:
+    branches: [main, "audit-*"]
+  pull_request:
+
+jobs:
+  test-and-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Unit tests (вкл. scanner-а — test_security_scan.py)
+        run: python -m pytest tests/ --ignore=tests/e2e -q
+
+      - name: Секрет скан (реални API ключове в tracked файлове)
+        run: |
+          KEY_RE='sk-ant-api[0-9]|sk-or-v1-[A-Za-z0-9]{20}|sk-proj-[A-Za-z0-9_-]{20}|sk-[a-f0-9]{32}|gsk_[A-Za-z0-9]{20}|AIza[A-Za-z0-9_-]{30}|xoxb-[0-9]|ghp_[A-Za-z0-9]{20}'
+          if git grep -InE "$KEY_RE" -- . ':!*.example'; then
+            echo "::error::Възможен реален API ключ в кода"; exit 1
+          fi
+          echo "Няма реални ключове."
+
+      - name: Забрана на tracked Office/PDF fixtures (не се сканират за имена)
+        run: |
+          # Одит v20: PII сканът не чете съдържанието на .pdf/.xlsx/.docx, затова
+          # клиентско име ВЪТРЕ в такъв файл би минало.  В audit repo такива файлове
+          # изобщо не бива да са tracked (шрифтовете .ttf са позволени).
+          BAD=$(git ls-files -- '*.pdf' '*.xlsx' '*.xls' '*.docx' '*.doc')
+          if [ -n "$BAD" ]; then
+            echo "::error::Tracked Office/PDF файл(ове) — не се сканират за клиентски имена:"; echo "$BAD"; exit 1
+          fi
+          echo "Няма tracked Office/PDF файлове."
+
+      - name: PII / клиентски denylist скан (ЗАДЪЛЖИТЕЛЕН)
+        env:
+          DENYLIST: ${{ secrets.PII_DENYLIST }}
+        run: |
+          # Одит v20: липсващият secret е BUILD FAILURE, не warning — иначе
+          # „наложено в CI" е вярно само ако някой го е конфигурирал.
+          if [ -z "$DENYLIST" ]; then
+            echo "::error::PII_DENYLIST secret не е зададен — конфигурирай го (Settings → Secrets)."
+            exit 1
+          fi
+          printf '%s\n' "$DENYLIST" > /tmp/denylist.txt
+          # ДВА КАНАЛА (одит v23), NUL-safe:
+          #  1) PATHNAME скан за ВСИЧКИ tracked файлове — вкл. бинарни (docs/Име.png
+          #     не бива да минава дори по име).
+          #  2) CONTENT скан само за текстови файлове.
+          if ! git ls-files -z | xargs -0 python tools/security_scan.py --names-only /tmp/denylist.txt; then
+            echo "::error::Клиентско име в PATHNAME на tracked файл"; exit 1
+          fi
+          if ! git ls-files -z -- . ':!*.png' ':!*.jpg' ':!*.jpeg' ':!*.pdf' ':!*.xlsx' ':!*.docx' ':!*.ttf' ':!*.ico' \
+               | xargs -0 python tools/security_scan.py /tmp/denylist.txt; then
+            echo "::error::Клиентски термин в СЪДЪРЖАНИЕ на tracked файл"; exit 1
+          fi
+          echo "Няма клиентски термини (pathname + съдържание)."

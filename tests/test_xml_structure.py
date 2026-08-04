@@ -149,7 +149,13 @@ def test_predecessor_link_fs_no_lag():
 
 
 def test_predecessor_link_ss_with_lag():
-    """SS+30 → Type=3, LinkLag=30×480×10=144000."""
+    """SS+30 → Type=2, LinkLag=30×480×10=144000.
+
+    Одит 2026-07-23 (round-trip): този тест твърдеше Type=3, което е SF по
+    MSPDI схемата (0=FF, 1=FS, 2=SS, 3=SF).  Тоест и кодът, и тестът бяха
+    сгрешени по един и същи начин — тестът потвърждаваше дефекта, вместо да
+    го хване.  Всяка SS връзка влизаше в MS Project като Start-to-Finish.
+    """
     task = {"id": "t2", "name": "Т2", "dependencies": ["t1"],
             "dependency_type": "SS", "lag_days": 30}
     uid_map = {"t1": 1, "t2": 2}
@@ -157,9 +163,18 @@ def test_predecessor_link_ss_with_lag():
     _add_predecessor_links(task_elem, task, uid_map)
     pred = task_elem.find("PredecessorLink")
     assert pred is not None
-    assert pred.find("Type").text == "3"       # SS
+    assert pred.find("Type").text == "2"       # SS по MSPDI схемата
     expected_lag = str(30 * MINUTES_PER_DAY * LINK_LAG_FACTOR)  # 144000
     assert pred.find("LinkLag").text == expected_lag
+
+
+def test_predecessor_link_sf_is_type_three():
+    """Другата половина на размяната — SF трябва да е 3, не 2."""
+    task = {"id": "t2", "name": "Т2", "dependencies": ["t1"],
+            "dependency_type": "SF"}
+    task_elem = ET.Element("Task")
+    _add_predecessor_links(task_elem, task, {"t1": 1, "t2": 2})
+    assert task_elem.find("PredecessorLink").find("Type").text == "3"
 
 
 def test_predecessor_link_ff():
@@ -410,6 +425,7 @@ if __name__ == "__main__":
         test_flatten_is_subtask_flag,
         test_predecessor_link_fs_no_lag,
         test_predecessor_link_ss_with_lag,
+        test_predecessor_link_sf_is_type_three,
         test_predecessor_link_ff,
         test_predecessor_link_missing_uid_skipped,
         test_predecessor_link_no_dependencies,

@@ -37,7 +37,7 @@ _Дата: 2026-03-11 | Методология: static analysis + py_compile + p
 
 ### C4 — CI vs PE производителност: ~74% занижение
 **Файл:** [src/ai_processor.py](src/ai_processor.py) промпт | **Засяга:** DN300 CI проекти
-При Харманли (673м DN300 CI): AI генерира ~22д вместо реалните 84д. CI тръби са 10–12× по-бавни от PE.
+При Горноград (673м DN300 CI): AI генерира ~22д вместо реалните 84д. CI тръби са 10–12× по-бавни от PE.
 **Fix:** Добави в промпта lookup table с производителности по материал: PE→55м/д, CI→6м/д.
 
 ### C5 — `test_exports.py` return вместо assert (warning → потенциален false positive)
@@ -48,9 +48,9 @@ PytestReturnNotNoneWarning: test function returned <class 'bool'> instead of Non
 Тестът минава, но `return True` не е `assert True` — при промяна на pytest поведението може да спре да хваща грешки.
 **Fix:** Смени `return result` с `assert result`.
 
-### C6 — Враца Tier lookup само в lessons, не в промпта
+### C6 — Долноград Tier lookup само в lessons, не в промпта
 **Файл:** [src/ai_processor.py](src/ai_processor.py)
-При Враца-тип разпределителна мрежа AI прилага Плевен-формулата → ~10% грешка в продължителностите.
+При Долноград-тип разпределителна мрежа AI прилага Тестоград-формулата → ~10% грешка в продължителностите.
 **Fix:** Добави Tier lookup table в системния промпт: Tier1(≤5км)→X дни, Tier2(5-15км)→Y дни, Tier3(>15км)→Z дни.
 
 ### C7 — "В/К" token: false positive в двете keyword групи
@@ -162,6 +162,6 @@ AI използва ~150м/ден за HDD. Реалното е 56м/ден (DN9
 ## Приоритетен план за действие
 
 1. **Веднага** (C1, C2): Fix `project_type` pipeline + добави `out_of_scope` в класификатора
-2. **Тази седмица** (C3, C4, C6): КПС зависимост + CI производителност + Враца Tier lookup
+2. **Тази седмица** (C3, C4, C6): КПС зависимост + CI производителност + Долноград Tier lookup
 3. **Следваща** (M1-M9): Prompt refinements за фантомни фази, настилки, безизкопно, timeout
 4. **Cleanup** (L1-L7): assert вместо return, dead code, inline imports

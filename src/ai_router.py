@@ -20,17 +20,66 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from src.json_contract import (
+    CORRECTION_SPEC,
+    LESSON_SPEC,
+    VERIFICATION_SPEC,
+    JSONContractError,
+    coerce,
+    parse_contract,
+    parse_json_strict,
+)
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Pricing per token (USD)
+# Model selection — SINGLE SOURCE OF TRUTH. Change models here only.
+# ---------------------------------------------------------------------------
+# Worker: generation, chat, OCR, corrections (kept on a DIFFERENT provider than
+# the controller so verification is genuinely independent). MODEL_WORKER
+# tracks DeepSeek's latest stable model.
+# Overridable via .env so the worker can be reached either directly
+# (api.deepseek.com, model "deepseek-chat") or through an OpenAI-compatible
+# gateway like OpenRouter (model "deepseek/deepseek-chat").
+MODEL_WORKER = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+# OCR: работникът е text-only (DeepSeek няма GA vision), затова OCR минава
+# през отделен vision модел на същия OpenAI-съвместим endpoint.  Празно =
+# ползвай работника, т.е. досегашното поведение.  Виж P1 в REVISION_2026-07.md.
+MODEL_OCR = os.getenv("OCR_MODEL", "") or MODEL_WORKER
+# Controller: schedule verification, lesson validation, reasoning-heavy checks.
+# Upgraded 2026-07-22 from claude-sonnet-4-6 → Opus 4.8 (reasoning verifier).
+MODEL_CONTROLLER = "claude-opus-4-8"
+
+# ОПЦИОНАЛЕН Claude РАБОТНИК (проба 2026-08-04): DeepSeek V3 има ~8192 таван на
+# изхода → отрязва големи графици и налага под-разбиване на партиди.  Claude дава
+# 128K изход + по-добро следване на инструкции.  Зададен `WORKER_MODEL=claude-…`
+# насочва работника към този модел (висок max_tokens, без отрязване).  Празно =
+# досегашният DeepSeek работник.
+WORKER_MODEL_OVERRIDE = os.getenv("WORKER_MODEL", "").strip()
+_WORKER_MAX_TOKENS = int(os.getenv("WORKER_MAX_TOKENS", "16000"))
+
+# ---------------------------------------------------------------------------
+# Pricing per token (USD) — fast-moving; verify before relying.
 # ---------------------------------------------------------------------------
 PRICING = {
-    "deepseek-chat": {"input": 0.28 / 1_000_000, "output": 0.42 / 1_000_000},  # V3.2, Feb 2026
-    "claude-sonnet-4-6": {"input": 3.0 / 1_000_000, "output": 15.0 / 1_000_000},
+    MODEL_WORKER: {"input": 0.28 / 1_000_000, "output": 0.42 / 1_000_000},      # DeepSeek (latest)
+    MODEL_CONTROLLER: {"input": 5.0 / 1_000_000, "output": 25.0 / 1_000_000},   # Opus 4.8
+    # Claude-работник опции (проба 2026-08-04).  Sonnet 5 промо $2/$10 до 31.08.
+    "claude-sonnet-5": {"input": 2.0 / 1_000_000, "output": 10.0 / 1_000_000},
+    "claude-opus-5": {"input": 5.0 / 1_000_000, "output": 25.0 / 1_000_000},
 }
+# OCR моделът се задава от .env и цената му не е известна предварително.
+# Без запис тук `_calculate_cost` пада към тарифата на работника и отчита
+# грешна цена мълчаливо — затова задай OCR_PRICE_IN/OUT (USD за 1M токена),
+# ако OCR_MODEL е различен от работника.
+if MODEL_OCR != MODEL_WORKER:
+    PRICING[MODEL_OCR] = {
+        "input": float(os.getenv("OCR_PRICE_IN", "0.10")) / 1_000_000,
+        "output": float(os.getenv("OCR_PRICE_OUT", "0.40")) / 1_000_000,
+    }
 
 # ---------------------------------------------------------------------------
 # Token limits per call type
@@ -127,6 +176,10 @@ class AIRouter:
         self.anthropic_available: bool = True
         self.fallback_active: bool = False
         self.fallback_source: str | None = None  # which API is down
+        # Проба 2026-08-04: работникът е силен Claude модел (Sonnet 5 / Opus).
+        # Тогава вторият AI корекционен цикъл е излишен и е бутилково гърло
+        # (отряза се на голям график) — пропуска се, gate-ът остава авторитет.
+        self.worker_is_claude: bool = WORKER_MODEL_OVERRIDE.startswith("claude")
 
         self.usage_log: list[dict] = []
 
@@ -158,7 +211,7 @@ class AIRouter:
 
         self._deepseek_client = OpenAI(
             api_key=self._deepseek_key,
-            base_url="https://api.deepseek.com",
+            base_url=DEEPSEEK_BASE_URL,
             timeout=_API_TIMEOUT_SECONDS,
         )
         return self._deepseek_client
@@ -226,7 +279,7 @@ class AIRouter:
         try:
             client = self._get_deepseek()
             client.chat.completions.create(
-                model="deepseek-chat",
+                model=MODEL_WORKER,
                 messages=[{"role": "user", "content": "ping"}],
                 max_tokens=5,
                 timeout=15,
@@ -240,7 +293,7 @@ class AIRouter:
         try:
             client = self._get_anthropic()
             client.messages.create(
-                model="claude-sonnet-4-6",
+                model=MODEL_CONTROLLER,
                 max_tokens=5,
                 messages=[{"role": "user", "content": "ping"}],
                 timeout=15,
@@ -279,22 +332,37 @@ class AIRouter:
     # Chat (Worker = DeepSeek, fallback = Anthropic)
     # ------------------------------------------------------------------
 
-    def chat(self, messages: list[dict], system_prompt: str) -> dict:
+    def chat(self, messages: list[dict], system_prompt: str,
+             max_tokens: int = _MAX_TOKENS_CHAT) -> dict:
         """Send a chat message to the worker (DeepSeek). Falls back to Anthropic.
 
         Args:
             messages: List of message dicts with 'role' and 'content'.
             system_prompt: System prompt with knowledge context.
+            max_tokens: Таван на изходните токени.  Проба 2026-07-24: генери-
+                рането на реален график иска повече от default 4096 — подава
+                8192, за да не се отрязва JSON-ът.
 
         Returns:
             Dict with content, model, usage, cost, fallback.
         """
         self._warn_empty_prompt(system_prompt, "chat")
 
+        # Проба 2026-08-04: ако е зададен Claude работник, той поема генерирането
+        # (128K изход → без отрязване).  При провал пада към обичайния път.
+        if WORKER_MODEL_OVERRIDE.startswith("claude") and self.anthropic_available:
+            try:
+                return self._chat_worker_claude(
+                    messages, system_prompt, model=WORKER_MODEL_OVERRIDE,
+                    max_tokens=max(max_tokens, _WORKER_MAX_TOKENS))
+            except Exception as exc:
+                logger.warning("Claude работник (%s) се провали, fallback: %s",
+                               WORKER_MODEL_OVERRIDE, exc)
+
         # Try DeepSeek first
         if self.deepseek_available:
             try:
-                return self._chat_deepseek(messages, system_prompt)
+                return self._chat_deepseek(messages, system_prompt, max_tokens=max_tokens)
             except Exception as exc:
                 logger.warning("DeepSeek chat failed, trying fallback: %s", exc)
                 self.deepseek_available = False
@@ -303,7 +371,8 @@ class AIRouter:
         # Fallback to Anthropic
         if self.anthropic_available:
             try:
-                return self._chat_anthropic(messages, system_prompt, is_fallback=True)
+                return self._chat_anthropic(messages, system_prompt, is_fallback=True,
+                                            max_tokens=max_tokens)
             except Exception as exc:
                 logger.error("Anthropic fallback also failed: %s", exc)
                 self.anthropic_available = False
@@ -318,32 +387,82 @@ class AIRouter:
             "error": True,
         }
 
-    def _chat_deepseek(self, messages: list[dict], system_prompt: str) -> dict:
+    def _chat_deepseek(self, messages: list[dict], system_prompt: str,
+                       max_tokens: int = _MAX_TOKENS_CHAT) -> dict:
         """Send chat to DeepSeek via OpenAI-compatible API."""
         client = self._get_deepseek()
         full_messages = [{"role": "system", "content": system_prompt}] + messages
 
         response = client.chat.completions.create(
-            model="deepseek-chat",
+            model=MODEL_WORKER,
             messages=full_messages,
-            max_tokens=_MAX_TOKENS_CHAT,
+            max_tokens=max_tokens,
             temperature=0.3,
             timeout=_API_TIMEOUT_SECONDS,
         )
 
-        content = response.choices[0].message.content or ""
+        choice = response.choices[0]
+        content = choice.message.content or ""
         usage = response.usage
         tokens_in = usage.prompt_tokens if usage else 0
         tokens_out = usage.completion_tokens if usage else 0
 
-        self._log_usage("deepseek-chat", tokens_in, tokens_out, "chat")
+        self._log_usage(MODEL_WORKER, tokens_in, tokens_out, "chat")
+
+        # Отрязан отговор досега минаваше тихо: JSON-ът излиза невалиден и
+        # проблемът се появяваше чак при парсването, като „моделът се обърка".
+        # Измерено 2026-07-22: reasoning модел изразходва 4990 знака за
+        # разсъждение преди JSON-а и опира в тавана от 4096 токена.
+        truncated = getattr(choice, "finish_reason", None) == "length"
+        if truncated:
+            logger.warning(
+                "Отговорът на %s е ОТРЯЗАН (finish_reason=length, %d изходни "
+                "токена при таван %d). Ако това е reasoning модел, вдигни "
+                "_MAX_TOKENS_CHAT — разсъждението изяжда бюджета преди JSON-а.",
+                MODEL_WORKER, tokens_out, _MAX_TOKENS_CHAT,
+            )
 
         return {
             "content": content,
-            "model": "deepseek-chat",
+            "model": MODEL_WORKER,
             "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out},
-            "cost": self._calculate_cost("deepseek-chat", tokens_in, tokens_out),
+            "cost": self._calculate_cost(MODEL_WORKER, tokens_in, tokens_out),
             "fallback": False,
+            "truncated": truncated,
+        }
+
+    def _chat_worker_claude(
+        self, messages: list[dict], system_prompt: str, *, model: str,
+        max_tokens: int,
+    ) -> dict:
+        """Claude като РАБОТНИК (проба 2026-08-04) — висок max_tokens, без отрязване.
+
+        NB (claude-api): Claude 5 моделите имат thinking ВКЛЮЧЕН по подразбиране →
+        `content[0]` е ThinkingBlock, не текст.  За структуриран JSON thinking не
+        трябва (само бави и харчи токени), затова е ИЗКЛЮЧЕН, а текстът се вади от
+        текстовия блок, не от `content[0]`.  По-дълъг timeout — генерацията е
+        по-голяма от обикновен chat.
+        """
+        client = self._get_anthropic()
+        response = client.messages.create(
+            model=model, max_tokens=max_tokens,
+            thinking={"type": "disabled"},
+            system=system_prompt, messages=messages,
+            timeout=max(_API_TIMEOUT_SECONDS, 300),
+        )
+        content = next((getattr(b, "text", "") for b in (response.content or [])
+                        if getattr(b, "type", None) == "text"), "")
+        tokens_in = response.usage.input_tokens
+        tokens_out = response.usage.output_tokens
+        self._log_usage(model, tokens_in, tokens_out, "chat")
+        truncated = getattr(response, "stop_reason", None) == "max_tokens"
+        if truncated:
+            logger.warning("Claude работник %s ОТРЯЗАН (max_tokens=%d).", model, max_tokens)
+        return {
+            "content": content, "model": model,
+            "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out},
+            "cost": self._calculate_cost(model, tokens_in, tokens_out),
+            "fallback": False, "truncated": truncated,
         }
 
     def _chat_anthropic(
@@ -354,7 +473,7 @@ class AIRouter:
         client = self._get_anthropic()
 
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model=MODEL_CONTROLLER,
             max_tokens=max_tokens,
             system=system_prompt,
             messages=messages,
@@ -365,14 +484,25 @@ class AIRouter:
         tokens_in = response.usage.input_tokens
         tokens_out = response.usage.output_tokens
 
-        self._log_usage("claude-sonnet-4-6", tokens_in, tokens_out, "chat")
+        self._log_usage(MODEL_CONTROLLER, tokens_in, tokens_out, "chat")
+
+        # Одит: DeepSeek пътят разпознаваше отрязан отговор, Anthropic — не.
+        # Тук еквивалентът е stop_reason == "max_tokens".
+        truncated = getattr(response, "stop_reason", None) == "max_tokens"
+        if truncated:
+            logger.warning(
+                "Отговорът на %s е ОТРЯЗАН (stop_reason=max_tokens, %d изходни "
+                "токена при таван %d).",
+                MODEL_CONTROLLER, tokens_out, max_tokens,
+            )
 
         return {
             "content": content,
-            "model": "claude-sonnet-4-6",
+            "model": MODEL_CONTROLLER,
             "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out},
-            "cost": self._calculate_cost("claude-sonnet-4-6", tokens_in, tokens_out),
+            "cost": self._calculate_cost(MODEL_CONTROLLER, tokens_in, tokens_out),
             "fallback": is_fallback,
+            "truncated": truncated,
         }
 
     def chat_anthropic_direct(
@@ -413,12 +543,19 @@ class AIRouter:
         system_prompt = VERIFICATION_SYSTEM_PROMPT.format(rules=f"{type_context}{rules}")
         user_message = f"Провери следния график:\n\n{schedule_json}"
 
+        parse_failures: list[str] = []
+
         # Try Anthropic first
         if self.anthropic_available:
             try:
                 return self._verify_with_model(
                     "anthropic", system_prompt, user_message
                 )
+            except JSONContractError as exc:
+                # Моделът отговори, но неизползваемо — API-то РАБОТИ.
+                # Не го маркирай като недостъпен, само пробвай другия.
+                logger.warning("Anthropic verify: неизползваем отговор — %s", exc)
+                parse_failures.append(f"Anthropic: {exc}")
             except Exception as exc:
                 logger.warning("Anthropic verify failed, trying fallback: %s", exc)
                 self.anthropic_available = False
@@ -430,10 +567,28 @@ class AIRouter:
                 return self._verify_with_model(
                     "deepseek", system_prompt, user_message
                 )
+            except JSONContractError as exc:
+                logger.error("DeepSeek verify: неизползваем отговор — %s", exc)
+                parse_failures.append(f"DeepSeek: {exc}")
             except Exception as exc:
                 logger.error("DeepSeek fallback verify also failed: %s", exc)
                 self.deepseek_available = False
                 self._update_fallback_state()
+
+        if parse_failures:
+            # Разграничено от „моделите са недостъпни": тук те отговарят,
+            # но не спазват формата.  Различна причина → различно решение.
+            return {
+                "approved": False,
+                "issues": [],
+                "corrections": [],
+                "summary": "Отговорът на контрольора не можа да бъде разчетен.",
+                "model": "none",
+                "cost": 0.0,
+                "error": True,
+                "parse_error": True,
+                "details": parse_failures,
+            }
 
         return {
             "approved": False,
@@ -454,22 +609,23 @@ class AIRouter:
         if provider == "anthropic":
             client = self._get_anthropic()
             response = client.messages.create(
-                model="claude-sonnet-4-6",
+                model=MODEL_CONTROLLER,
                 max_tokens=_MAX_TOKENS_CHAT,
                 system=system_prompt,
                 messages=messages,
-                temperature=0.1,
+                # Проба 2026-08-03: Opus 4.8 отхвърля `temperature` (deprecated
+                # for this model) → корекцията гърмеше и падаше на DeepSeek.
                 timeout=_API_TIMEOUT_SECONDS,
             )
             raw = response.content[0].text if response.content else "{}"
             tokens_in = response.usage.input_tokens
             tokens_out = response.usage.output_tokens
-            model = "claude-sonnet-4-6"
+            model = MODEL_CONTROLLER
         else:
             client = self._get_deepseek()
             full_msgs = [{"role": "system", "content": system_prompt}] + messages
             response = client.chat.completions.create(
-                model="deepseek-chat",
+                model=MODEL_WORKER,
                 messages=full_msgs,
                 max_tokens=_MAX_TOKENS_CHAT,
                 temperature=0.1,
@@ -479,19 +635,21 @@ class AIRouter:
             usage = response.usage
             tokens_in = usage.prompt_tokens if usage else 0
             tokens_out = usage.completion_tokens if usage else 0
-            model = "deepseek-chat"
+            model = MODEL_WORKER
 
         self._log_usage(model, tokens_in, tokens_out, "verify")
         cost = self._calculate_cost(model, tokens_in, tokens_out)
 
-        # Parse JSON response
-        parsed = self._parse_json_response(raw)
+        # P7: неизползваем отговор хвърля, вместо да се маскира като
+        # „графикът не е одобрен" — иначе счупен JSON задейства корекционни
+        # цикли за несъществуващ проблем.
+        parsed = parse_contract(raw, VERIFICATION_SPEC, "верификация")
 
         return {
-            "approved": parsed.get("approved", False),
-            "issues": parsed.get("issues", []),
-            "corrections": parsed.get("corrections", []),
-            "summary": parsed.get("summary", ""),
+            "approved": parsed["approved"],
+            "issues": parsed["issues"],
+            "corrections": parsed["corrections"],
+            "summary": parsed["summary"],
             "model": model,
             "cost": cost,
         }
@@ -564,7 +722,7 @@ class AIRouter:
                 {"role": "system", "content": system_prompt}
             ] + messages
             response = client.chat.completions.create(
-                model="deepseek-chat",
+                model=MODEL_WORKER,
                 messages=full_msgs,
                 max_tokens=_MAX_TOKENS_CORRECTION,
                 temperature=0.1,
@@ -574,30 +732,38 @@ class AIRouter:
             usage = response.usage
             tokens_in = usage.prompt_tokens if usage else 0
             tokens_out = usage.completion_tokens if usage else 0
-            model = "deepseek-chat"
+            model = MODEL_WORKER
         else:
             client = self._get_anthropic()
             response = client.messages.create(
-                model="claude-sonnet-4-6",
+                model=MODEL_CONTROLLER,
                 max_tokens=_MAX_TOKENS_CORRECTION,
                 system=system_prompt,
                 messages=messages,
-                temperature=0.1,
+                # Opus 4.8 не приема `temperature` (проба 2026-08-03).
                 timeout=_API_TIMEOUT_SECONDS,
             )
             raw = response.content[0].text if response.content else "{}"
             tokens_in = response.usage.input_tokens
             tokens_out = response.usage.output_tokens
-            model = "claude-sonnet-4-6"
+            model = MODEL_CONTROLLER
 
         self._log_usage(model, tokens_in, tokens_out, "correct")
         cost = self._calculate_cost(model, tokens_in, tokens_out)
 
-        parsed = self._parse_json_response(raw)
+        parsed = parse_json_strict(raw)
+        if parsed.data is None:
+            # Нечетим отговор → връщаме графика НЕПРОМЕНЕН, вместо да
+            # запишем празен dict върху него.
+            raise JSONContractError(f"корекция: {parsed.error}")
+
+        corrected, problems = coerce(parsed.data, CORRECTION_SPEC)
+        if problems:
+            logger.warning("Корекция: отговорът не спазва формата — %s", "; ".join(problems))
 
         return {
-            "corrected_schedule": parsed.get("schedule", schedule_json),
-            "applied": parsed.get("applied", []),
+            "corrected_schedule": corrected["schedule"] or schedule_json,
+            "applied": corrected["applied"],
             "model": model,
             "cost": cost,
         }
@@ -661,7 +827,13 @@ class AIRouter:
                     "cycles": cycle + 1,
                     "total_cost": total_cost,
                     "history": all_issues,
-                    "error": "AI models are unavailable.",
+                    "error": (
+                        "Контрольорът върна нечетим отговор — графикът НЕ е "
+                        "проверен. Опитайте отново."
+                        if verification.get("parse_error")
+                        else "AI models are unavailable."
+                    ),
+                    "parse_error": verification.get("parse_error", False),
                 }
 
             if verification["approved"]:
@@ -858,7 +1030,7 @@ class AIRouter:
         })
 
         response = client.chat.completions.create(
-            model="deepseek-chat",
+            model=MODEL_OCR,
             messages=messages,
             max_tokens=_MAX_TOKENS_CHAT,
             timeout=_API_TIMEOUT_SECONDS,
@@ -867,7 +1039,7 @@ class AIRouter:
         usage = response.usage
         tokens_in = usage.prompt_tokens if usage else 0
         tokens_out = usage.completion_tokens if usage else 0
-        self._log_usage("deepseek-chat", tokens_in, tokens_out, "ocr")
+        self._log_usage(MODEL_OCR, tokens_in, tokens_out, "ocr")
         return text
 
     def _ocr_anthropic(
@@ -876,7 +1048,7 @@ class AIRouter:
         """OCR via Anthropic vision."""
         client = self._get_anthropic()
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model=MODEL_CONTROLLER,
             max_tokens=_MAX_TOKENS_CHAT,
             system=system_prompt if system_prompt else "",
             messages=[{
@@ -897,7 +1069,7 @@ class AIRouter:
         )
         text = response.content[0].text if response.content else ""
         self._log_usage(
-            "claude-sonnet-4-6",
+            MODEL_CONTROLLER,
             response.usage.input_tokens,
             response.usage.output_tokens,
             "ocr",
@@ -933,25 +1105,25 @@ class AIRouter:
             try:
                 client = self._get_anthropic()
                 response = client.messages.create(
-                    model="claude-sonnet-4-6",
+                    model=MODEL_CONTROLLER,
                     max_tokens=_MAX_TOKENS_LESSON,
                     system=system_prompt,
                     messages=messages,
-                    temperature=0.1,
+                    # Opus 4.8 не приема `temperature` (проба 2026-08-03).
                 )
                 raw = response.content[0].text if response.content else "{}"
                 self._log_usage(
-                    "claude-sonnet-4-6",
+                    MODEL_CONTROLLER,
                     response.usage.input_tokens,
                     response.usage.output_tokens,
                     "lesson",
                 )
-                parsed = self._parse_json_response(raw)
+                parsed = parse_contract(raw, LESSON_SPEC, "валидиране на урок")
                 return {
-                    "approved": parsed.get("approved", False),
-                    "formatted_lesson": parsed.get("formatted_lesson", lesson_text),
-                    "reason": parsed.get("reason", ""),
-                    "model": "claude-sonnet-4-6",
+                    "approved": parsed["approved"],
+                    "formatted_lesson": parsed["formatted_lesson"] or lesson_text,
+                    "reason": parsed["reason"],
+                    "model": MODEL_CONTROLLER,
                 }
             except Exception as exc:
                 logger.warning("Anthropic lesson check failed: %s", exc)
@@ -962,7 +1134,7 @@ class AIRouter:
                 client = self._get_deepseek()
                 full_msgs = [{"role": "system", "content": system_prompt}] + messages
                 response = client.chat.completions.create(
-                    model="deepseek-chat",
+                    model=MODEL_WORKER,
                     messages=full_msgs,
                     max_tokens=_MAX_TOKENS_LESSON,
                     temperature=0.1,
@@ -970,17 +1142,17 @@ class AIRouter:
                 raw = response.choices[0].message.content or "{}"
                 usage = response.usage
                 self._log_usage(
-                    "deepseek-chat",
+                    MODEL_WORKER,
                     usage.prompt_tokens if usage else 0,
                     usage.completion_tokens if usage else 0,
                     "lesson",
                 )
-                parsed = self._parse_json_response(raw)
+                parsed = parse_contract(raw, LESSON_SPEC, "валидиране на урок")
                 return {
-                    "approved": parsed.get("approved", False),
-                    "formatted_lesson": parsed.get("formatted_lesson", lesson_text),
-                    "reason": parsed.get("reason", ""),
-                    "model": "deepseek-chat",
+                    "approved": parsed["approved"],
+                    "formatted_lesson": parsed["formatted_lesson"] or lesson_text,
+                    "reason": parsed["reason"],
+                    "model": MODEL_WORKER,
                 }
             except Exception as exc:
                 logger.error("DeepSeek lesson fallback failed: %s", exc)
@@ -1009,10 +1181,14 @@ class AIRouter:
 
         for entry in self.usage_log:
             model = entry["model"]
-            if model == "deepseek-chat":
-                target = deepseek_stats
-            else:
+            # Само контрольорът е Anthropic; всичко останало (работник, OCR
+            # модел) минава през OpenAI-съвместимия endpoint.  Проверката е
+            # по контрольора, а не по работника — иначе OCR модел, различен
+            # от MODEL_WORKER, се брои погрешно като Anthropic разход.
+            if model == MODEL_CONTROLLER:
                 target = anthropic_stats
+            else:
+                target = deepseek_stats
 
             target["calls"] += 1
             target["tokens_in"] += entry["tokens_in"]
@@ -1047,7 +1223,7 @@ class AIRouter:
         })
 
         # Update cumulative (persisted to disk)
-        key = "deepseek" if model == "deepseek-chat" else "anthropic"
+        key = "anthropic" if model == MODEL_CONTROLLER else "deepseek"
         self._cumulative[key] = self._cumulative.get(key, 0.0) + cost
         self._cumulative["total"] = self._cumulative.get("total", 0.0) + cost
         self._cumulative["total_calls"] = self._cumulative.get("total_calls", 0) + 1
@@ -1056,7 +1232,7 @@ class AIRouter:
     @staticmethod
     def _calculate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
         """Calculate cost for a specific API call."""
-        rate = PRICING.get(model, PRICING["deepseek-chat"])
+        rate = PRICING.get(model, PRICING[MODEL_WORKER])
         return tokens_in * rate["input"] + tokens_out * rate["output"]
 
     # ------------------------------------------------------------------
@@ -1101,29 +1277,21 @@ class AIRouter:
 
     @staticmethod
     def _parse_json_response(raw: str) -> dict:
-        """Parse a JSON response from AI, handling common formatting issues."""
-        text = raw.strip()
+        """Parse a JSON response from AI, handling common formatting issues.
 
-        # Remove markdown code fences if present
-        if text.startswith("```"):
-            lines = text.split("\n")
-            # Remove first and last lines (``` markers)
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            text = "\n".join(lines)
+        При провал връща ПРАЗЕН dict, не измислен резултат от верификация.
+        Старото поведение връщаше `{"approved": False, "issues": [...]}` —
+        което извикващите за класификация на файлове и разпознаване на
+        намерение получаваха като „отговор" с напълно чужди полета, а
+        верификацията четеше като „графикът има проблеми" (P7).
 
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-
-        # Try to find JSON object in the text
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            try:
-                return json.loads(text[start : end + 1])
-            except json.JSONDecodeError:
-                pass
-
-        logger.warning("Failed to parse JSON response: %.200s", text)
-        return {"approved": False, "issues": ["Invalid JSON response from AI"], "corrections": []}
+        За операции с известна форма ползвай `json_contract.parse_contract`,
+        което хвърля вместо да гадае.
+        """
+        parsed = parse_json_strict(raw)
+        if parsed.data is None:
+            logger.warning(
+                "Неуспешно парсване на JSON отговор (%s): %.200s", parsed.error, raw
+            )
+            return {}
+        return parsed.data

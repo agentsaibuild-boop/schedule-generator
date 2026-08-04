@@ -117,12 +117,12 @@ def test_status_label_unknown_returns_status_itself():
 def test_welcome_new_project_mentions_file_count(tmp_path):
     pm = _make_pm(str(tmp_path))
     msg = pm.get_welcome_message({
-        "name": "Плевен",
+        "name": "Тестоград",
         "path": "/tmp/plevn",
         "status": "new",
         "progress": {"files_total": 7, "files_converted": 0},
     })
-    assert "Плевен" in msg
+    assert "Тестоград" in msg
     assert "7" in msg
 
 
@@ -152,7 +152,7 @@ def test_welcome_schedule_generated_mentions_tasks_and_days(tmp_path):
 def test_welcome_exported_mentions_export_type(tmp_path):
     pm = _make_pm(str(tmp_path))
     msg = pm.get_welcome_message({
-        "name": "Враца",
+        "name": "Долноград",
         "path": "/tmp/vr",
         "status": "exported",
         "progress": {

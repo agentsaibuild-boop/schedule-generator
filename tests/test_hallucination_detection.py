@@ -41,19 +41,19 @@ def test_no_warnings_when_location_in_whitelist():
 
 
 def test_no_warnings_when_location_in_corpus():
-    """Task mentions 'Илиенци' found in raw document text → no warning."""
-    tasks = [_task("2", "Полагане — кв. Илиенци")]
-    warnings = _validate(tasks, locations_whitelist=[], all_text="квартал Илиенци, общ. Враца")
+    """Task mentions 'Пробен' found in raw document text → no warning."""
+    tasks = [_task("2", "Полагане — кв. Пробен")]
+    warnings = _validate(tasks, locations_whitelist=[], all_text="квартал Пробен, общ. Долноград")
     assert warnings == [], f"Expected no warnings, got: {warnings}"
 
 
 def test_warning_for_hallucinated_location():
-    """Task mentions 'Младост' absent from both whitelist and corpus → warning issued."""
-    tasks = [_task("3", "Монтаж — ул. Младост")]
-    # Corpus and whitelist contain only 'Витоша' — 'Младост' is hallucinated
-    warnings = _validate(tasks, locations_whitelist=["Витоша"], all_text="обект в гр. Плевен")
+    """Task mentions 'Измисленград' absent from both whitelist and corpus → warning issued."""
+    tasks = [_task("3", "Монтаж — ул. Измисленград")]
+    # Corpus and whitelist contain only 'Витоша' — 'Измисленград' is hallucinated
+    warnings = _validate(tasks, locations_whitelist=["Витоша"], all_text="обект в гр. Тестоград")
     assert len(warnings) == 1
-    assert "Младост" in warnings[0]
+    assert "Измисленград" in warnings[0]
     assert "3" in warnings[0]
 
 
@@ -67,10 +67,10 @@ def test_skip_words_produce_no_warning():
 def test_multiple_tasks_only_hallucinated_ones_flagged():
     """Mix of clean and hallucinated tasks — only the hallucinated one is flagged."""
     tasks = [
-        _task("5", "Изкоп — ул. Плевен"),   # 'Плевен' in corpus
+        _task("5", "Изкоп — ул. Тестоград"),   # 'Тестоград' in corpus
         _task("6", "Полагане — ул. Химера"),  # 'Химера' invented
     ]
-    corpus = "обект в гр. Плевен, Плевенска община"
+    corpus = "обект в гр. Тестоград, Тестоградска община"
     warnings = _validate(tasks, locations_whitelist=[], all_text=corpus)
     assert len(warnings) == 1
     assert "Химера" in warnings[0]
@@ -78,9 +78,9 @@ def test_multiple_tasks_only_hallucinated_ones_flagged():
 
 
 def test_whitelist_partial_substring_match():
-    """Token 'Смолян' should match whitelist entry 'гр. Смолян' (substring)."""
-    tasks = [_task("7", "Дезинфекция — Смолян")]
-    warnings = _validate(tasks, locations_whitelist=["гр. Смолян"], all_text="")
+    """Token 'Планинско' should match whitelist entry 'гр. Планинско' (substring)."""
+    tasks = [_task("7", "Дезинфекция — Планинско")]
+    warnings = _validate(tasks, locations_whitelist=["гр. Планинско"], all_text="")
     assert warnings == [], f"Substring match in whitelist should suppress warning: {warnings}"
 
 

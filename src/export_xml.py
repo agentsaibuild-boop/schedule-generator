@@ -20,7 +20,48 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from src.ai_disclosure import (
+    CONTENT_DISCLOSURE_BG,
+    CONTENT_NOTICE_LONG_BG,
+    SYSTEM_NAME,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def _working_day_to_date(start_dt: datetime, day_index: int, calendar_type: str) -> datetime:
+    """Превърни индекс на РАБОТЕН ден в календарна дата.
+
+    `start_day`/`end_day` в графика броят работни дни (ден 1 = първият
+    работен ден).  При 7-дневен календар всеки календарен ден е работен и
+    преобразуването е тривиално.  При 5-дневен трябва да се прескачат
+    съботите и неделите — иначе датите в XML-а се разминават с
+    продължителностите и MS Project премества задачите при отваряне.
+
+    Args:
+        start_dt: Начална дата на проекта (ден 1).
+        day_index: 1-базиран индекс на работен ден.
+        calendar_type: "7-day" или "5-day".
+
+    Returns:
+        Календарната дата на този работен ден.
+    """
+    steps = max(int(day_index), 1) - 1
+
+    if calendar_type != "5-day":
+        return start_dt + timedelta(days=steps)
+
+    # Ако проектът стартира в почивен ден, започни от следващия работен.
+    current = start_dt
+    while current.weekday() >= 5:          # 5=събота, 6=неделя
+        current += timedelta(days=1)
+
+    remaining = steps
+    while remaining > 0:
+        current += timedelta(days=1)
+        if current.weekday() < 5:
+            remaining -= 1
+    return current
 
 NAMESPACE = "http://schemas.microsoft.com/project"
 
@@ -33,6 +74,10 @@ FIELD_ID_TEXT1 = "188743731"    # Text1 = DN
 FIELD_ID_TEXT2 = "188743734"    # Text2 = Мярка
 FIELD_ID_TEXT3 = "188743737"    # Text3 = Екип
 FIELD_ID_NUMBER1 = "188743767"  # Number1 = L(м)
+# Text4 = вътрешното ID на задачата.  Одит 2026-07-23: ID-то изобщо не
+# влизаше в XML-а, тоест round-trip идентичност беше невъзможна — редактиран
+# в MS Project и върнат файл не може да се свърже обратно със задачите.
+FIELD_ID_TEXT4 = "188743740"    # Text4 = ID
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +91,7 @@ def export_to_mspdi_xml(
     start_date: str = "2026-06-01",
     calendar_type: str = "7-day",
     filename: str | None = None,
+    constraint_mode: str = "pinned",
 ) -> bytes | None:
     """Generate MSPDI XML file compatible with MS Project 2010+.
 
@@ -64,7 +110,8 @@ def export_to_mspdi_xml(
         return None
 
     try:
-        root = _build_xml(schedule_data, project_name, start_date, calendar_type)
+        root = _build_xml(schedule_data, project_name, start_date, calendar_type,
+                          constraint_mode)
         xml_bytes = _serialize_xml(root)
 
         if filename:
@@ -88,6 +135,7 @@ def _build_xml(
     project_name: str,
     start_date: str,
     calendar_type: str,
+    constraint_mode: str = "pinned",
 ) -> ET.Element:
     """Build the full MSPDI XML tree."""
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
@@ -122,6 +170,14 @@ def _build_xml(
 
     ET.SubElement(root, "DaysPerMonth").text = "30"
 
+    # EU AI Act чл. 50(2) — маркиране на генерираното съдържание.
+    # `Title`/`Subject`/`Comments` са стандартни MSPDI полета и оцеляват
+    # при Save As .mpp, т.е. маркерът пътува с файла до възложителя.
+    ET.SubElement(root, "Author").text = SYSTEM_NAME
+    ET.SubElement(root, "Subject").text = CONTENT_DISCLOSURE_BG
+    ET.SubElement(root, "Comments").text = CONTENT_NOTICE_LONG_BG
+    ET.SubElement(root, "Category").text = "ai-generated"
+
     # --- 2. Extended attributes (custom fields) ---
     _build_extended_attributes(root)
 
@@ -130,7 +186,8 @@ def _build_xml(
 
     # --- 4. Tasks ---
     flat_tasks = _flatten_schedule(schedule_data)
-    uid_map = _build_tasks(root, flat_tasks, start_dt, project_name)
+    uid_map = _build_tasks(root, flat_tasks, start_dt, project_name,
+                           calendar_type, constraint_mode)
 
     # --- 5. Resources ---
     resource_map = _build_resources(root, flat_tasks)
@@ -162,6 +219,12 @@ def _build_extended_attributes(root: ET.Element) -> None:
     ET.SubElement(attr3, "FieldID").text = FIELD_ID_TEXT2
     ET.SubElement(attr3, "FieldName").text = "Text2"
     ET.SubElement(attr3, "Alias").text = "\u041c\u044f\u0440\u043a\u0430"  # Мярка
+
+    # Text4 = вътрешно ID (за round-trip идентичност)
+    attr5 = ET.SubElement(ext_attrs, "ExtendedAttribute")
+    ET.SubElement(attr5, "FieldID").text = FIELD_ID_TEXT4
+    ET.SubElement(attr5, "FieldName").text = "Text4"
+    ET.SubElement(attr5, "Alias").text = "ID"
 
     # Text3 = Екип
     attr4 = ET.SubElement(ext_attrs, "ExtendedAttribute")
@@ -209,6 +272,8 @@ def _build_tasks(
     flat_tasks: list[dict],
     start_dt: datetime,
     project_name: str,
+    calendar_type: str = "7-day",
+    constraint_mode: str = "pinned",
 ) -> dict[str, int]:
     """Build the Tasks section. Returns a map of task_id → UID."""
     tasks_elem = ET.SubElement(root, "Tasks")
@@ -225,16 +290,36 @@ def _build_tasks(
     ET.SubElement(root_task, "Summary").text = "1"
     ET.SubElement(root_task, "CalendarUID").text = "1"
 
+    # ------------------------------------------------------------------
+    # ПРОХОД 1: раздай UID на ВСИЧКИ задачи, преди да се строят връзки.
+    #
+    # Одит 2026-07-23: досега uid_map се пълнеше в същия цикъл, в който се
+    # добавяха predecessor връзките.  Ако задача стоеше във файла ПРЕДИ своя
+    # предшественик, той още нямаше UID и `_add_predecessor_links` го
+    # пропускаше с `continue` — БЕЗШУМНО.  Резултатът е MS Project файл,
+    # който се отваря нормално, но е без никаква логика: всяка задача се
+    # движи независимо.  Възпроизведено с нула predecessor links.
+    #
+    # Редът на задачите идва от AI и не е гарантирано топологичен.
+    # ------------------------------------------------------------------
     uid_map: dict[str, int] = {}
     uid_counter = 1
+    for task in flat_tasks:
+        task_id = task.get("id", "")
+        if task_id and task_id not in uid_map:
+            uid_map[task_id] = uid_counter
+        uid_counter += 1
 
     # Outline number tracking: (level, parent_id) → current count
     _outline_counters: dict[tuple, int] = {}
     _outline_nums: dict[str, str] = {}  # task_id → "1.2.3"
 
+    # ------------------------------------------------------------------
+    # ПРОХОД 2: изгради задачите и връзките с вече пълна карта на UID.
+    # ------------------------------------------------------------------
+    uid_counter = 1
     for task in flat_tasks:
         task_id = task.get("id", "")
-        uid_map[task_id] = uid_counter
 
         task_elem = ET.SubElement(tasks_elem, "Task")
         ET.SubElement(task_elem, "UID").text = str(uid_counter)
@@ -262,24 +347,43 @@ def _build_tasks(
         duration = task.get("duration", 0)
         end_day = task.get("end_day", start_day + max(duration, 1) - 1)
 
-        task_start = start_dt + timedelta(days=start_day - 1)
-        task_finish = start_dt + timedelta(days=end_day - 1)
+        # Одит 2026-07-23: датите се смятаха с `timedelta(days=...)`, тоест
+        # КАЛЕНДАРНИ дни, докато продължителността се подава като РАБОТНИ
+        # часове.  При 5-дневен календар двете се разминават около уикендите
+        # и MS Project премества задачите при отваряне.  Индексите start_day
+        # и end_day са работни дни — превръщането трябва да прескача почивните.
+        task_start = _working_day_to_date(start_dt, start_day, calendar_type)
+        task_finish = _working_day_to_date(start_dt, end_day, calendar_type)
 
         start_str = task_start.strftime("%Y-%m-%dT08:00:00")
         finish_str = task_finish.strftime("%Y-%m-%dT17:00:00")
         ET.SubElement(task_elem, "Start").text = start_str
         ET.SubElement(task_elem, "Finish").text = finish_str
 
-        # Duration: days × 8 hours → PT{hours}H0M0S
-        hours = max(duration, 1) * 8
+        # Duration: days × 8 hours.  Milestone-ът е ТОЧКА във времето и
+        # трябва да е PT0H0M0S — досега получаваше 8 часа и едновременно
+        # <Milestone>1</Milestone>, което е вътрешно противоречиво (одит).
+        is_milestone = duration == 0
+        hours = 0 if is_milestone else max(duration, 1) * 8
         ET.SubElement(task_elem, "Duration").text = f"PT{hours}H0M0S"
         ET.SubElement(task_elem, "DurationFormat").text = "5"  # days
 
-        # Auto-scheduled (Manual=0) — no pin icons in Task Mode column
-        # Dates are locked via ConstraintType=2 (Must Start On)
+        # Auto-scheduled (Manual=0) — no pin icons in Task Mode column.
+        #
+        # ConstraintType=2 (Must Start On) закова НАЧАЛОТО на всяка задача.
+        # Това пази датите точно както ги е сметнал детерминистичният двигател
+        # и ги държи в синхрон с PDF-а, който получава същият възложител —
+        # но прави зависимостите декоративни: MS Project не може да пренареди
+        # графика при промяна, а рапортува конфликти (одит 2026-07-23).
+        #
+        # Затова режимът е избираем.  'pinned' пази досегашното поведение
+        # (урок #19); 'flexible' оставя MS Project да планира по зависимости.
         ET.SubElement(task_elem, "Manual").text = "0"
-        ET.SubElement(task_elem, "ConstraintType").text = "2"  # Must Start On
-        ET.SubElement(task_elem, "ConstraintDate").text = start_str
+        if constraint_mode == "flexible":
+            ET.SubElement(task_elem, "ConstraintType").text = "0"  # As Soon As Possible
+        else:
+            ET.SubElement(task_elem, "ConstraintType").text = "2"  # Must Start On
+            ET.SubElement(task_elem, "ConstraintDate").text = start_str
 
         # Calendar
         ET.SubElement(task_elem, "CalendarUID").text = "1"
@@ -289,7 +393,7 @@ def _build_tasks(
         ET.SubElement(task_elem, "Summary").text = "1" if is_summary else "0"
 
         # Milestone (0 duration)
-        ET.SubElement(task_elem, "Milestone").text = "1" if duration == 0 else "0"
+        ET.SubElement(task_elem, "Milestone").text = "1" if is_milestone else "0"
 
         # Critical path
         ET.SubElement(task_elem, "Critical").text = (
@@ -323,6 +427,20 @@ def _add_task_custom_fields(task_elem: ET.Element, task: dict) -> None:
         ET.SubElement(ea, "FieldID").text = FIELD_ID_NUMBER1
         ET.SubElement(ea, "Value").text = str(length)
 
+    # Text2 = Мярка (unit) — полето беше ДЕФИНИРАНО, но никога не се пишеше
+    unit = task.get("unit")
+    if unit:
+        ea = ET.SubElement(task_elem, "ExtendedAttribute")
+        ET.SubElement(ea, "FieldID").text = FIELD_ID_TEXT2
+        ET.SubElement(ea, "Value").text = str(unit)
+
+    # Text4 = вътрешното ID — без него round-trip не може да свърже задачите
+    task_id = task.get("id")
+    if task_id:
+        ea = ET.SubElement(task_elem, "ExtendedAttribute")
+        ET.SubElement(ea, "FieldID").text = FIELD_ID_TEXT4
+        ET.SubElement(ea, "Value").text = str(task_id)
+
     # Text3 = Екип (team)
     team = task.get("team")
     if team and team != "\u2014":
@@ -331,11 +449,20 @@ def _add_task_custom_fields(task_elem: ET.Element, task: dict) -> None:
         ET.SubElement(ea, "Value").text = team
 
 
+# MSPDI PredecessorLink/Type — стойностите са фиксирани от схемата:
+#   0 = Finish-to-Finish, 1 = Finish-to-Start,
+#   2 = Start-to-Start,   3 = Start-to-Finish
+#
+# Одит 2026-07-23 (round-trip): SS и SF бяха РАЗМЕНЕНИ — SS се записваше
+# като 3 (SF) и обратно.  Тоест всяка SS връзка (урок #15: изкоп SS+1d
+# полагане — най-често срещаната след FS) влизаше в MS Project като
+# Start-to-Finish, което е безсмислено технологично, и Project пренареждаше
+# графика по нея.  Хванато чак когато XML-ът беше прочетен обратно.
 _DEPENDENCY_TYPE_MAP = {
-    "FS": "1",  # Finish-to-Start (default)
-    "SS": "3",  # Start-to-Start
-    "FF": "0",  # Finish-to-Finish
-    "SF": "2",  # Start-to-Finish
+    "FF": "0",
+    "FS": "1",  # default
+    "SS": "2",
+    "SF": "3",
 }
 
 
@@ -371,7 +498,13 @@ def _add_predecessor_links(
 
         dep_uid = uid_map.get(dep_id)
         if dep_uid is None:
-            logger.debug("Predecessor %s not found in uid_map (task %s)", dep_id, task.get("id"))
+            # След two-pass това вече значи РЕАЛНО липсващ предшественик, а
+            # не въпрос на ред във файла.  Затова е warning, не debug:
+            # тихо изпусната зависимост е тихо изгубена логика на графика.
+            logger.warning(
+                "Зависимост ИЗПУСНАТА в XML: задача %s сочи към %r, което "
+                "не съществува в графика.", task.get("id"), dep_id,
+            )
             continue
 
         pred = ET.SubElement(task_elem, "PredecessorLink")

@@ -276,11 +276,38 @@ def test_valid_schedule_no_warnings():
 # Edge cases — lines not covered by the above tests
 # ---------------------------------------------------------------------------
 
-def test_negative_duration_produces_warning():
-    """Line 112: negative duration should generate a warning (not an error)."""
-    task = _task("T1", "Задача", start=1, duration=-3, end=1)
-    result = _v([task])
-    assert any("отрицателна продължителност" in w for w in result["warnings"])
+def test_negative_duration_is_an_error():
+    """Одит 2026-07-23: беше само предупреждение, тоест график с duration=-3
+    получаваше valid=True.  Отрицателна продължителност е невъзможна, не
+    спорна — трябва да е твърда грешка."""
+    result = _v([_task("T1", "Задача", start=1, duration=-3, end=1)])
+    assert result["valid"] is False
+    assert any("отрицателна продължителност" in e for e in result["errors"])
+
+
+def test_non_numeric_duration_is_an_error_not_a_crash():
+    """Низ в duration сваляше валидатора с TypeError и заедно с него
+    цялото генериране."""
+    result = _v([_task("T1", "Задача", start=1, duration="пет", end=1)])
+    assert result["valid"] is False
+    assert any("невалиден тип" in e for e in result["errors"])
+
+
+def test_dict_dependency_does_not_crash_the_validator():
+    """`export_xml` поддържа този формат; валидаторът гърмеше с
+    TypeError: unhashable type: 'dict'."""
+    t1 = _task("T1", "Изкоп", start=1, duration=5, end=5)
+    t2 = _task("T2", "Полагане", start=6, duration=5, end=10)
+    t2["dependencies"] = [{"predecessor_id": "T1", "type": "SS", "lag_days": 3}]
+    result = _v([t1, t2])
+    assert result["valid"] is True
+
+
+def test_dict_dependency_to_missing_task_is_still_caught():
+    t = _task("T1", "Задача", start=1, duration=5, end=5)
+    t["dependencies"] = [{"predecessor_id": "НЯМА"}]
+    result = _v([t])
+    assert result["valid"] is False
 
 
 def test_sub_activity_without_end_day_out_of_bounds():
@@ -316,17 +343,35 @@ def test_team_overlap_task_without_end_day():
     assert any("Екип А" in w for w in result["warnings"])
 
 
-def test_large_schedule_above_limit_skips_cycle_check():
-    """Line 141: schedule with >1000 tasks bypasses cycle detection and
-    adds a warning instead of an error."""
-    # Build 1001 independent tasks (no dependencies).
-    tasks = [_task(f"T{i}", f"Задача {i}", start=i, duration=1, end=i)
-             for i in range(1, 1002)]
+def test_cycle_is_detected_in_a_large_schedule():
+    """Одит 2026-07-24: 1001 задачи в цикъл минаваха за валидни (fail-OPEN),
+    защото проверката се пропускаше над 1000, а рекурсивният DFS блъскаше
+    стека.  Сега DFS е итеративен и цикълът се хваща на всеки мащаб."""
+    tasks = [_task(f"T{i}", f"Задача {i}", start=1, duration=1, end=1,
+                   deps=[f"T{(i - 1) % 1001}"]) for i in range(1001)]
     result = _v(tasks)
-    # No cycle error expected — cycle check was skipped.
-    assert not any("кръгова" in e.lower() for e in result["errors"])
-    # A warning about skipping the check must be present.
-    assert any("пропусната" in w.lower() for w in result["warnings"])
+    assert result["valid"] is False
+    assert any("кръгова" in e.lower() for e in result["errors"])
+
+
+def test_large_acyclic_schedule_is_valid():
+    """Линейна верига от 1001 задачи не бива да гърми, нито да е невалидна."""
+    tasks = [_task(f"L{i}", f"Задача {i}", start=i + 1, duration=1, end=i + 1,
+                   deps=[f"L{i - 1}"] if i > 0 else [])
+             for i in range(1001)]
+    result = _v(tasks)
+    assert result["valid"] is True
+
+
+def test_schedule_above_hard_limit_is_rejected():
+    """Над 20000 задачи проверката не може да се изпълни → fail-CLOSED,
+    графикът се отхвърля, не се одобрява непроверен."""
+    from src.schedule_builder import _MAX_TASKS_FOR_CYCLE_CHECK
+    n = _MAX_TASKS_FOR_CYCLE_CHECK + 1
+    tasks = [_task(f"T{i}", "x", start=1, duration=1, end=1) for i in range(n)]
+    result = _v(tasks)
+    assert result["valid"] is False
+    assert any("не е потвърден" in e.lower() for e in result["errors"])
 
 
 def test_total_duration_zero_when_end_day_before_start():

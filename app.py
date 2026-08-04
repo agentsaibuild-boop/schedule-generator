@@ -15,10 +15,11 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
+from src.ai_disclosure import CHAT_DISCLOSURE_BG
 from src.ai_processor import AIProcessor
-from src.ai_router import AIRouter
+from src.ai_router import AIRouter, MODEL_CONTROLLER, MODEL_WORKER
 from src.chat_handler import ChatHandler
-from src.file_manager import FileManager
+from src.file_manager import SUPPORTED_EXTENSIONS, FileManager
 from src.gantt_chart import get_schedule_stats
 from src.export_pdf import export_to_pdf
 from src.export_xml import export_to_mspdi_xml
@@ -471,21 +472,49 @@ def _run_conversion(force: bool = False) -> None:
     classification = file_mgr.classify_files(ai_processor=ai_processor)
     ai_label = " (AI)" if classification.get("ai_used") else ""
 
+    # BACKLOG т.1: по ИМЕНА не е намерена КСС.  Това НЕ значи, че количества
+    # липсват — в българската практика таблицата често е приложение към
+    # техническото предложение или целият пакет е един PDF.
+    #
+    # Затова: конвертирай ВСЕ ПАК и потърси количествена таблица в
+    # СЪДЪРЖАНИЕТО.  Блокировката пази от липсващи количества, не от
+    # неудобно име на файл.
+    _content_boq: dict = {"found": [], "details": {}}
+    if not classification["can_proceed"]:
+        status_area.caption(
+            "По имена не е намерена КСС — проверявам съдържанието на файловете…"
+        )
+        file_mgr.convert_all(
+            ai_processor=ai_processor, progress_callback=progress_cb, force=force
+        )
+        _content_boq = file_mgr.find_boq_by_content()
+        if _content_boq["found"]:
+            classification["required"] = list(_content_boq["found"])
+            classification["can_proceed"] = True
+            classification["boq_by_content"] = True
+
     if not classification["can_proceed"]:
         progress_bar.empty()
         status_area.empty()
         warning_lines = [
-            "**⛔ Няма намерен КСС файл — генерирането е блокирано.**\n",
-            "За да продължи обработката, папката трябва да съдържа "
-            "**Количествено-стойностна сметка** (КСС).\n",
+            "**⛔ Няма намерени количества — генерирането е блокирано.**\n",
+            "Проверих и имената на файловете, и съдържанието им. "
+            "Никъде няма количествена таблица (позиции с мярка и количество).\n",
         ]
-        if classification["unknown"]:
+        # Кажи КАКВО е видяно във всеки файл, за да не е решението непрозрачно.
+        if _content_boq["details"]:
+            warning_lines.append("Какво намерих във всеки файл:")
+            for name, verdict in _content_boq["details"].items():
+                evidence = "; ".join(verdict["evidence"]) or "няма следи от таблица"
+                warning_lines.append(f"  - **{name}** — {evidence}")
+        elif classification["unknown"]:
             warning_lines.append("Неразпознати файлове:")
             for f in classification["unknown"]:
                 warning_lines.append(f"  - {f}")
         warning_lines.append(
-            "\nПреименувайте файла така, че да съдържа 'КСС' или 'количествена сметка',"
-            f" или преместете нерелевантни файлове извън папката{ai_label}."
+            "\nДобавете файл с количествено-стойностна сметка. Ако количествата "
+            "са в друг документ, уверете се, че таблицата е извлечена — сканиран "
+            f"PDF без OCR не се чете{ai_label}."
         )
         st.session_state.messages.append({
             "role": "assistant",
@@ -493,6 +522,18 @@ def _run_conversion(force: bool = False) -> None:
         })
         st.rerun()
         return
+
+    if classification.get("boq_by_content"):
+        found = ", ".join(classification["required"])
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": (
+                f"ℹ️ **Количества намерени по съдържание**, не по име на файл: "
+                f"**{found}**.\n\n"
+                "Файлът не се казва 'КСС', но съдържа таблица с позиции, мерки "
+                "и количества. Продължавам с него."
+            ),
+        })
 
     # Warn about unknown files but allow proceeding
     if classification["unknown"]:
@@ -783,12 +824,23 @@ with st.sidebar:
 
     # --- Drag & Drop file upload ---
     with st.expander("📎 Влачи файлове тук", expanded=False):
+        # Типовете се извеждат от това, което конверторът НАИСТИНА поддържа.
+        # Ръчният списък се беше разминал: приемаше `.doc` (за който няма
+        # конвертор — файлът се записваше и после мълчаливо не се обработваше)
+        # и НЕ приемаше `.csv`, `.txt`, `.json`, които се поддържат.
         dropped_files = st.file_uploader(
             "drag",
             accept_multiple_files=True,
-            type=["pdf", "xlsx", "xls", "docx", "doc"],
+            type=sorted(ext.lstrip(".") for ext in SUPPORTED_EXTENSIONS),
             label_visibility="collapsed",
             key="drag_drop_uploader",
+        )
+        st.caption(
+            "Приемат се: "
+            + ", ".join(sorted(SUPPORTED_EXTENSIONS))
+            + ". ЗАДЪЛЖИТЕЛЕН е файл с КСС — името му трябва да съдържа "
+            "'КСС', 'количествен' или 'сметка'. Без него генерирането се "
+            "блокира (урок #06)."
         )
         if dropped_files:
             current_names = {uf.name for uf in dropped_files}
@@ -972,6 +1024,11 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 st.markdown("### \U0001f4ac Чат")
 
+# EU AI Act чл. 50(1) — потребителят трябва да знае, че взаимодейства с AI
+# система.  Стои постоянно над чата, не еднократно в welcome съобщението:
+# то се показва веднъж и се губи при превъртане.
+st.caption(f"\U0001f916 {CHAT_DISCLOSURE_BG}")
+
 # Welcome message (shown once)
 if not st.session_state.welcome_shown:
     # Build welcome with AI status
@@ -1095,8 +1152,20 @@ if st.session_state.pending_changes:
         st.info(f"{lvl_emoji} \u041e\u0447\u0430\u043a\u0432\u0430 \u0441\u0435 **\u043f\u043e\u0442\u0432\u044a\u0440\u0436\u0434\u0435\u043d\u0438\u0435** \u0437\u0430 \u043f\u0440\u0438\u043b\u0430\u0433\u0430\u043d\u0435 \u043d\u0430 \u043f\u0440\u043e\u043c\u0435\u043d\u0438...")
 
 if user_input:
+    # Одит 2026-07-23: admin кодът се въвежда като обикновено чат съобщение
+    # и се записваше в plaintext в session_state.messages, оттам в историята
+    # на чата, оттам във файловете на проекта — ПРЕДИ изобщо да бъде проверен.
+    # Тоест единствената бариера пред самопромяната на кода оставаше на диска.
+    #
+    # Реалната стойност пътува до обработчика; в историята влиза маска.
+    _awaiting_admin_code = (
+        st.session_state.pending_changes
+        and st.session_state.pending_changes.get("level") == "red"
+    )
     st.session_state.messages.append(
-        {"role": "user", "content": user_input}
+        {"role": "user", "content": "••••••• (админ код)"}
+        if _awaiting_admin_code
+        else {"role": "user", "content": user_input}
     )
 
     # Sync schedule state: if session has schedule but chat_handler lost it
@@ -1218,12 +1287,12 @@ if user_input:
     # Check for fallback notice
     if router.fallback_active and result.get("model_used") not in ("none", None):
         src = router.fallback_source
-        if src == "deepseek" and result.get("model_used") == "claude-sonnet-4-6":
+        if src == "deepseek" and result.get("model_used") == MODEL_CONTROLLER:
             response_text = (
                 "\u26a0\ufe0f _DeepSeek не отговаря. Превключвам към Anthropic._\n\n"
                 + response_text
             )
-        elif src == "anthropic" and result.get("model_used") == "deepseek-chat":
+        elif src == "anthropic" and result.get("model_used") == MODEL_WORKER:
             response_text = (
                 "\u26a0\ufe0f _Anthropic не отговаря. Превключвам към DeepSeek._\n\n"
                 + response_text
@@ -1232,6 +1301,13 @@ if user_input:
     st.session_state.messages.append(
         {"role": "assistant", "content": response_text}
     )
+
+    # Резултатът от детерминистичната валидация захранва export gate-а.
+    # Пази се дори когато графикът е отхвърлен — точно тогава е нужен.
+    if "validation" in result:
+        st.session_state.last_validation = result["validation"]
+    if "export" in result:
+        st.session_state.last_export = result["export"]
 
     # Update schedule if changed
     if result.get("schedule_updated") and result.get("schedule_data"):
@@ -1299,6 +1375,70 @@ if schedule:
     with tab_export:
         project_name = st.session_state.get("project_name", "ВиК Проект")
         export_start_date = st.session_state.get("project_start_date", "2026-06-01")
+
+        # EXPORT GATE (одит 2026-07-23): бутоните бяха активни за всеки
+        # наличен график, без да поглеждат резултата от валидацията.
+        # Невалиден график можеше да излезе като XML/PDF при възложителя.
+        _validation = st.session_state.get("last_validation") or {}
+        _export = st.session_state.get("last_export") or {}
+
+        # Одит 2026-07-24: валидацията е обвързана с КОНКРЕТНАТА версия на
+        # графика.  Ако текущият график е различен от онзи, който е бил
+        # валидиран (зареден стар проект, приложена корекция, ръчна промяна),
+        # старата валидация НЕ важи — export се блокира, докато не мине нова
+        # проверка.  Иначе:
+        #   - сменен график ползва стара „валидна" валидация;
+        #   - или валиден стар график се блокира от валидацията на отхвърлена
+        #     ревизия.
+        _current_hash = AIProcessor.schedule_hash(schedule)
+        _validated_hash = _validation.get("schedule_hash")
+        _stale = bool(_validated_hash) and _validated_hash != _current_hash
+
+        def _fresh_artifact(stored, current_hash):
+            """Върни байтовете само ако артефактът е за ТЕКУЩАТА ревизия.
+
+            Одит v7, точка 6: генериран PDF/XML за ревизия A оставаше за
+            сваляне след промяна към ревизия B.  Сега артефактът пази hash-а
+            си; при разминаване се смята за застоял и не се предлага.
+            Поддържа и стария формат (голи bytes) — третира се като застоял.
+            """
+            if isinstance(stored, dict) and stored.get("hash") == current_hash:
+                return stored.get("bytes")
+            return None
+
+        # Одит 2026-07-24 (точки 3, 4): export gate чете РЕШЕНИЕТО от
+        # pipeline-а (политика strict/provisional/lenient), не само валидност.
+        if _stale:
+            _blocked = True
+            _blockers = ["графикът е променен след последната проверка — "
+                         "генерирайте отново, за да се валидира тази версия"]
+        elif "exportable" in _export:
+            _blocked = not _export["exportable"]
+            _blockers = _export.get("export_blockers") or []
+        elif _validation.get("checked"):
+            _blocked = not _validation.get("valid")
+            _blockers = _validation.get("errors", [])
+        else:
+            # Няма валидация за ТОЗИ график (напр. зареден стар проект) —
+            # блокирай, вместо да разрешиш непроверен експорт.
+            _blocked = True
+            _blockers = ["графикът не е валидиран в тази сесия — "
+                         "генерирайте или регенерирайте, за да мине проверка"]
+
+        if _blocked:
+            st.error(
+                "🛑 **Експортът е блокиран.** Графикът не е готов за възложител."
+            )
+            for _b in _blockers[:5]:
+                st.caption(f"• {_b}")
+        elif _export.get("export_blockers"):
+            # Експортът е разрешен, но с уговорки (provisional).
+            st.warning(
+                "⚠️ **Предварителен график** — експортът е разрешен, но:"
+            )
+            for _b in _export["export_blockers"][:5]:
+                st.caption(f"• {_b}")
+
         st.caption("**Налични формати:**")
         exp_c1, exp_c2, exp_c3 = st.columns(3)
 
@@ -1306,7 +1446,7 @@ if schedule:
             st.markdown("**📄 PDF (A3 Gantt)**")
             st.caption("За печат и представяне")
             show_critical = st.checkbox("Критичен път в PDF", value=True, key="pdf_critical")
-            if st.button("Генерирай PDF", type="primary", key="btn_pdf", use_container_width=True):
+            if st.button("Генерирай PDF", type="primary", key="btn_pdf", disabled=_blocked, use_container_width=True):
                 with st.spinner("Генерирам PDF..."):
                     try:
                         pdf_bytes = export_to_pdf(
@@ -1315,46 +1455,52 @@ if schedule:
                             show_critical_path=show_critical,
                         )
                         if pdf_bytes:
-                            st.session_state["pdf_ready"] = pdf_bytes
+                            # Одит v7, точка 6: артефактът се обвързва с hash-а
+                            # на графика, за да не остане за сваляне след промяна.
+                            st.session_state["pdf_ready"] = {
+                                "bytes": pdf_bytes, "hash": _current_hash}
                         else:
                             st.error("PDF генерирането не успя.")
                     except Exception as e:
                         st.error(f"Грешка при PDF: {e}")
-            if st.session_state.get("pdf_ready"):
+            _pdf = _fresh_artifact(st.session_state.get("pdf_ready"), _current_hash)
+            if _pdf is not None and not _blocked:
                 st.download_button(
                     label="⬇️ Свали PDF",
-                    data=st.session_state["pdf_ready"],
+                    data=_pdf,
                     file_name=f"график_{project_name}.pdf",
                     mime="application/pdf",
                     use_container_width=True,
                 )
-                st.caption(f"✅ {len(st.session_state['pdf_ready']):,} bytes")
+                st.caption(f"✅ {len(_pdf):,} bytes")
 
         with exp_c2:
             st.markdown("**📋 XML (MS Project)**")
             st.caption("За отваряне в MS Project")
             st.info("MS Project → File → Open → XML Format", icon="💡")
-            if st.button("Генерирай XML", type="primary", key="btn_xml", use_container_width=True):
+            if st.button("Генерирай XML", type="primary", key="btn_xml", disabled=_blocked, use_container_width=True):
                 with st.spinner("Генерирам XML..."):
                     try:
                         xml_bytes = export_to_mspdi_xml(
                             schedule, project_name, start_date=export_start_date,
                         )
                         if xml_bytes:
-                            st.session_state["xml_ready"] = xml_bytes
+                            st.session_state["xml_ready"] = {
+                                "bytes": xml_bytes, "hash": _current_hash}
                         else:
                             st.error("XML генерирането не успя.")
                     except Exception as e:
                         st.error(f"Грешка при XML: {e}")
-            if st.session_state.get("xml_ready"):
+            _xml = _fresh_artifact(st.session_state.get("xml_ready"), _current_hash)
+            if _xml is not None and not _blocked:
                 st.download_button(
                     label="⬇️ Свали XML",
-                    data=st.session_state["xml_ready"],
+                    data=_xml,
                     file_name=f"график_{project_name}.xml",
                     mime="application/xml",
                     use_container_width=True,
                 )
-                st.caption(f"✅ {len(st.session_state['xml_ready']):,} bytes")
+                st.caption(f"✅ {len(_xml):,} bytes")
 
         with exp_c3:
             st.markdown("**🔧 JSON (суров)**")
@@ -1372,12 +1518,15 @@ if schedule:
                 },
                 ensure_ascii=False, indent=2, default=str,
             )
+            # JSON се строи от ТЕКУЩИЯ график (винаги свеж), но пак минава през
+            # export gate-а — одит v7, точка 6: досега беше активен винаги.
             st.download_button(
                 label="⬇️ Свали JSON",
                 data=json_data.encode("utf-8"),
                 file_name=f"график_{project_name}.json",
                 mime="application/json",
                 use_container_width=True,
+                disabled=_blocked,
             )
         st.divider()
         st.caption(
