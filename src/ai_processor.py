@@ -329,8 +329,19 @@ class AIProcessor:
         sequence_constraints: dict | None = None,
         num_teams: int = 1,
         boq_index: list | None = None,
+        scope_note: str = "",
+        skip_correction: bool = False,
     ) -> dict:
         """Generate a schedule via worker, then verify via controller.
+
+        `scope_note` (staging): ако е зададен, ограничава генерирането до
+        конкретна ЧАСТ (напр. само водопроводната мрежа) — за да не се опитва
+        моделът да генерира целия проект и да опира в тавана на токените.
+
+        `skip_correction` (staging): пропуска AI-корекцията и MS-обогатяването.
+        Полезно, когато контрольорът (Anthropic) е недостъпен — тогава те само
+        гърмят, retry-ват и падат на DeepSeek, което бави без полза.
+        Детерминистичният код (продължителности, валидация, gate) остава.
 
         Args:
             analysis: Analysis dict from analyze_documents.
@@ -443,7 +454,18 @@ class AIProcessor:
 
             boq_section = (
                 format_boq_for_prompt(boq_index)
-                + "\n\nЗАДЪЛЖИТЕЛНО — ЦИТИРАЙ ИЗТОЧНИКА:\n"
+                + f"\n\n⛔ ПОКРИТИЕ — ЗАДЪЛЖИТЕЛНО: таблицата има {len(boq_index)} "
+                "реда с количество. Генерирай поне ЕДНА производствена дейност за "
+                "ВСЕКИ ред — НЕ пропускай нито един. Това НЕ е примерен списък; "
+                "всеки ред е реална позиция от договора и трябва да е в графика.\n"
+                "  • Тръбен ред (водопровод/канализация DN…): направи веригата "
+                "изкоп → полагане → засипване → възстановяване; ПОЛАГАНЕТО цитира "
+                "реда.\n"
+                "  • Настилка/бордюр/тротоар (m²/m): дейност настилка, цитира реда.\n"
+                "  • Шахта/СКО/СВО/арматура (бр.): дейност монтаж, цитира реда.\n"
+                "Накрая провери: всеки от изброените редове има поне една дейност, "
+                "която го цитира. Липсващ ред = непълен график = отхвърлен.\n\n"
+                "ЗАДЪЛЖИТЕЛНО — ЦИТИРАЙ ИЗТОЧНИКА:\n"
                 "За всяка задача, чието количество идва от таблицата по-горе, "
                 "попълни поле `source_ref` с точния ref на реда (напр. "
                 "'КСС.xlsx!Водопровод!4').\n"
@@ -457,10 +479,23 @@ class AIProcessor:
             analysis_text, label="АНАЛИЗ"
         )
 
+        scope_section = ""
+        if scope_note:
+            scope_section = (
+                "⛔ ОБХВАТ — ГЕНЕРИРАЙ САМО ТАЗИ ЧАСТ, НО ЦЯЛАТА:\n"
+                f"{scope_note}\n"
+                "Покрий ВСИЧКИ позиции от списъка КОЛИЧЕСТВА по-долу — за ВСЕКИ ред "
+                "поне една дейност, която го цитира. НЕ пропускай редове; НЕ давай "
+                "само примерни 1-2.\n"
+                "НЕ добавяй други мрежи/части на проекта (те се генерират отделно).\n"
+                "НЕ добавяй обща мобилизация/финално приемане — те са на ниво проект.\n\n"
+            )
+
         messages = [{
             "role": "user",
             "content": (
                 f"Генерирай строителен линеен график за следния проект:\n\n"
+                f"{scope_section}"
                 f"{safe_analysis}\n\n"
                 f"{locations_section}"
                 f"{sequence_section}\n\n"
@@ -527,14 +562,14 @@ class AIProcessor:
                 "ЗАДЪЛЖИТЕЛНО: КПС стартира САМО след завършване на Тласкател.\n"
                 "Зависимост: [Тласкател] → [КПС] тип FS (Finish-to-Start), lag = 0.\n"
                 "НИКОГА не планирай КПС паралелно с Тласкател или преди него!\n\n"
-                "ВРАЦА ТИП — Tier lookup за разпределителна мрежа (7 дейности/участък):\n"
+                "Долноград ТИП — Tier lookup за разпределителна мрежа (7 дейности/участък):\n"
                 "Определи категорията по сумата Act2+Act3 (Изкоп + Полагане):\n"
                 "- Act2+Act3 ≈ 1.0д → 6 дни/участък\n"
                 "- Act2+Act3 ≈ 2.0д → 7 дни/участък\n"
                 "- Act2+Act3 ≈ 3.5д → 9 дни/участък\n"
                 "- Act2+Act3 ≈ 3.6д + много сградни отклонения (СВО↑) → 10 дни/участък\n"
                 "Подготовка (Act1=0.5д) и Почистване (Act7=0.5д) са ФИКСИРАНИ за всяка категория.\n"
-                "НЕ прилагай Плевен-формулата (pipeline overlap 16д) за Враца тип проекти!\n\n"
+                "НЕ прилагай Тестоград-формулата (pipeline overlap 16д) за Долноград тип проекти!\n\n"
                 "ПРАВИЛО — Настилки (асфалтиране, павета, тротоарна настилка):\n"
                 "Настилките са ОТДЕЛНА бригада — не са дейност на основния изкопен екип.\n"
                 "Зависимост: [Настилки] SS+30 от [Изкопни работи] — настилките стартират\n"
@@ -558,7 +593,7 @@ class AIProcessor:
                 f"{boq_section}"
                 "ЗАДЪЛЖИТЕЛНО — ПИКЕТАЖ (когато документите го съдържат):\n"
                 "Всяка задача по трасе получава:\n"
-                "  alignment_id     — по коя ос/улица е (напр. 'ул. Христо Ботев')\n"
+                "  alignment_id     — по коя ос/улица е (напр. 'ул. Първа')\n"
                 "  start_chainage   — от кой метър започва (число или '0+000')\n"
                 "  end_chainage     — до кой метър свършва\n"
                 "  crew_id          — коя бригада я изпълнява\n"
@@ -577,7 +612,12 @@ class AIProcessor:
             ),
         }]
 
-        gen_result = self.router.chat(messages, system_prompt)
+        # Проба 2026-07-24 (реален проект): default таван от 4096
+        # изходни токена ОТРЯЗВАШЕ графика — реален ВиК проект с десетки
+        # позиции не се събира.  Генерирането ползва пълния таван на работника
+        # (8192, колкото и корекцията).  При много голям проект (>1000 задачи)
+        # truncation детекторът пак ще подскаже разделяне на етапи.
+        gen_result = self.router.chat(messages, system_prompt, max_tokens=8192)
 
         if gen_result.get("error"):
             return {
@@ -617,14 +657,21 @@ class AIProcessor:
             progress_callback("Преизчислявам продължителностите от productivities.json...")
         schedule_json, duration_report = self._apply_deterministic_durations(schedule_json)
 
-        # Step 2: Verification cycle
-        rules = self.build_verification_prompt()
-
-        cycle_result = self.router.run_correction_cycle(
-            schedule_json, rules, max_cycles=1, progress_callback=progress_callback,
-            project_type=project_type,
-            knowledge_prompt=system_prompt,
-        )
+        # Step 2: Verification cycle (пропуска се при skip_correction ИЛИ когато
+        # работникът вече е силен Claude модел — проба 2026-08-04: вторият AI
+        # преглед е излишен и се отряза на голям график; gate-ът остава авторитет).
+        if skip_correction or getattr(self.router, "worker_is_claude", False):
+            cycle_result = {
+                "status": "approved", "schedule": schedule_json, "cycles": 0,
+                "total_cost": 0.0, "history": [], "remaining_issues": [],
+            }
+        else:
+            rules = self.build_verification_prompt()
+            cycle_result = self.router.run_correction_cycle(
+                schedule_json, rules, max_cycles=1, progress_callback=progress_callback,
+                project_type=project_type,
+                knowledge_prompt=system_prompt,
+            )
 
         gen_cost = gen_result.get("cost", 0.0)
         cycle_cost = cycle_result.get("total_cost", 0.0)
@@ -660,10 +707,10 @@ class AIProcessor:
                     schedule_tasks, locations, all_text
                 )
 
-        # Step 4: MS Project expert enrichment
+        # Step 4: MS Project expert enrichment (пропуска се при skip_correction)
         verified_schedule = cycle_result.get("schedule", {})
         msp_cost = 0.0
-        if verified_schedule:
+        if verified_schedule and not skip_correction:
             if progress_callback:
                 progress_callback("Обогатявам за MS Project... (Anthropic)")
             enriched, msp_cost = self.enrich_for_msproject(verified_schedule)
@@ -714,9 +761,58 @@ class AIProcessor:
         #     минаваха за експортируеми.
         # Provenance беше информация, не контрол.
         #
+        # ПРОИЗХОД НА КОЛИЧЕСТВАТА — вътре в gate-а (одит v7, точка 4).
+        #
+        # Досега `verify_citations` течеше в ChatHandler СЛЕД като export
+        # решението е взето, затова strict пускаше график с измислен цитат или
+        # количество, различно от КСС (mismatch), стига продължителностите да
+        # са доказани.  „strict" рекламираше доказани КОЛИЧЕСТВА, а проверяваше
+        # само ПРОДЪЛЖИТЕЛНОСТИ.  Тук цитатите се проверяват ПРЕДИ решението.
+        # `checked` разграничава „проверката МИНА" от „не се изпълни" — при
+        # strict второто е fail-closed (одит v8, точки 4 и 6): липсващ КСС
+        # индекс или грешка в provenance не бива да пуска експорт.
+        citation_report: dict = {"checked": False, "reason": "no_boq_index"}
+        if boq_index:
+            try:
+                from src.provenance import verify_citations
+                citation_report = {
+                    **verify_citations(self._tasks_from(verified_schedule), boq_index),
+                    "checked": True,
+                }
+                # BOQ coverage чрез ДОМЕЙН МОДЕЛА (одит v16): всяка позиция трябва
+                # да е покрита от точно ЕДНА дейност от правилния клас-покривач.
+                # Производните дейности (изкоп/засип на тръбен ред) не покриват, а
+                # дублираните покривачи (две полагания) са нарушение.
+                from src.provenance import analyze_boq_coverage
+                cov = analyze_boq_coverage(
+                    self._tasks_from(verified_schedule), boq_index)
+                citation_report["uncovered"] = cov["uncovered"]
+                citation_report["over_covered"] = sorted(cov["over_covered"])
+                citation_report["ambiguous"] = cov.get("ambiguous", [])
+                # Одит v19 P0: непокрита/дублирана/двусмислена BOQ позиция СВАЛЯ
+                # статуса до needs_human_review — за да НЕ е експортируем при НИКОЯ
+                # policy (provisional игнорира само blockers, не и статуса).
+                if (cov["uncovered"] or cov["over_covered"]
+                        or cov.get("ambiguous")) and status == "approved":
+                    status = "needs_human_review"
+            except Exception as exc:  # provenance не бива да събаря генерирането
+                logger.warning("verify_citations в gate се провали: %s", exc)
+                citation_report = {"checked": False, "reason": "exception"}
+
+        # Одит v20 P0: „не можах да проверя" = „не е доказано".  Ако произходът НЕ е
+        # проверен (липсващ КСС индекс ИЛИ exception при самата проверка), статусът
+        # СЛИЗА до needs_human_review — иначе provisional (default) експортира
+        # недоказан график.  Отказът на защитната проверка е fail-closed, наравно
+        # с намерен проблем.
+        if not citation_report.get("checked") and status == "approved":
+            status = "needs_human_review"
+
         # Тук се решава по политика (EXPORT_POLICY), не автоматично.
+        # Одит v5, точка 5: използва се ФИНАЛНИЯТ duration report (след
+        # correction и повторното изчисление), не отчетът отпреди корекцията.
+        final_duration_report = correction_report.get("duration_report") or duration_report
         export = self._export_decision(status, validation, correction_report,
-                                       duration_report)
+                                       final_duration_report, citation_report)
 
         return {
             "status": status,
@@ -725,6 +821,7 @@ class AIProcessor:
             "export_blockers": export["blockers"],
             "export_policy": export["policy"],
             "correction_report": correction_report,
+            "citation_report": citation_report,
             "schedule": verified_schedule,
             "cycles": cycle_result["cycles"],
             "total_cost": gen_cost + cycle_cost + msp_cost,
@@ -732,8 +829,283 @@ class AIProcessor:
             "remaining_issues": cycle_result.get("remaining_issues", []),
             "gen_model": gen_result["model"],
             "hallucination_warnings": hallucination_warnings,
-            "duration_report": duration_report,
+            "duration_report": final_duration_report,
+            "initial_duration_report": duration_report,
             "injection_findings": analysis_injections,
+            "validation": validation,
+        }
+
+    # Кратки представки за частите на КСС — за уникални ID-та при сливане.
+    _PART_PREFIXES = (
+        ("vodoprovod", "В"),
+        ("kanaliza", "К"),
+        ("пътна", "П"), ("patna", "П"), ("pathna", "П"),
+        ("ел", "Е"), ("тт", "Е"),
+    )
+
+    @classmethod
+    def _prefix_for_sheet(cls, sheet: str) -> str:
+        low = (sheet or "").lower()
+        for key, pref in cls._PART_PREFIXES:
+            if key in low:
+                return pref
+        # По подразбиране: първата буква на листа (или 'X').
+        for ch in low:
+            if ch.isalpha():
+                return ch.upper()
+        return "X"
+
+    @staticmethod
+    def _prefix_part_tasks(tasks: list[dict], prefix: str) -> list[dict]:
+        """Дай уникални ID-та на задачите от една част и пренасочи зависимостите.
+
+        Задачите от отделните части се генерират независимо и ID-тата им се
+        застъпват (T1, T2…).  При сливане се слага представка (В-T1, К-T1) и
+        всички вътрешно-частови зависимости се пренасочват към новите ID-та.
+        Зависимости към несъществуващо в частта ID се изхвърлят (няма
+        cross-part връзки — частите са паралелни мрежи).
+        """
+        id_map = {str(t.get("id")): f"{prefix}-{t.get('id')}"
+                  for t in tasks if t.get("id") is not None}
+        out: list[dict] = []
+        for t in tasks:
+            nt = dict(t)
+            nt["id"] = id_map.get(str(t.get("id")), f"{prefix}-{t.get('id')}")
+            new_deps = []
+            for d in (t.get("dependencies") or []):
+                if isinstance(d, dict):
+                    pid = str(d.get("predecessor_id") or d.get("id") or "")
+                    if pid in id_map:
+                        nd = dict(d)
+                        nd[("predecessor_id" if "predecessor_id" in d else "id")] = id_map[pid]
+                        new_deps.append(nd)
+                elif str(d) in id_map:
+                    new_deps.append(id_map[str(d)])
+            nt["dependencies"] = new_deps
+            out.append(nt)
+        return out
+
+    def generate_schedule_staged(
+        self,
+        analysis: dict,
+        project_type: str,
+        progress_callback: Any | None = None,
+        all_text: str = "",
+        boq_index: list | None = None,
+        num_teams: int = 1,
+    ) -> dict:
+        """Генерирай ГОЛЯМ проект на ЧАСТИ и слей в един график.
+
+        Проба 2026-07-31 (реален проект): целият проект (водопровод +
+        канализация + пътна) не се събира в едно извикване дори на 8192 токена
+        (максимума на DeepSeek) → отрязан JSON.  Тук всяка част от КСС се
+        генерира ОТДЕЛНО (всяка се събира), после задачите се сливат с
+        уникални ID-та и се пуска ЕДИН детерминистичен gate върху целия график.
+        Така никое AI извикване не надхвърля лимита.
+
+        Частите са паралелни мрежи (различни тръби, различни екипи) — няма
+        cross-part зависимости в тази версия.
+
+        Returns:
+            Същата форма като `generate_schedule`, плюс `parts` (по части) и
+            `staged=True`.
+        """
+        def _prog(msg: str) -> None:
+            if progress_callback:
+                progress_callback(msg)
+
+        boq_index = boq_index or []
+        # Групирай по ДОКУМЕНТ+ЛИСТ (одит v11 #3.2): два различни файла с лист
+        # „КСС" не бива да се слеят в една част.  Само редове с реално количество.
+        groups: dict[tuple[str, str], list] = {}
+        for row in boq_index:
+            if getattr(row, "quantity", None) is None:
+                continue
+            src = getattr(row, "source", None)
+            doc = getattr(src, "document", "") or "?"
+            sheet = getattr(src, "sheet", "") or "?"
+            groups.setdefault((doc, sheet), []).append(row)
+
+        if not groups:
+            # Няма количествени части — падни към обикновеното генериране.
+            return self.generate_schedule(
+                analysis, project_type, progress_callback,
+                all_text=all_text, boq_index=boq_index)
+
+        # Под-разбиване на голям лист на ПАРТИДИ (проба 2026-08-04): при мандат за
+        # пълно покритие ~15 реда × вериги надхвърлят 8192-токенния таван на
+        # DeepSeek → отрязан JSON.  Всеки лист се дели на партиди от най-много
+        # MAX_ROWS_PER_PART реда — всяка партида е отделно AI извикване под тавана.
+        # Конфигурируем (проба 2026-08-04): DeepSeek (8K изход) иска ≤5; Claude
+        # работник (128K) може цял лист наведнъж → авто 50.  Env го надделява.
+        _rows_default = "50" if getattr(self.router, "worker_is_claude", False) else "5"
+        MAX_ROWS_PER_PART = int(os.getenv("MAX_ROWS_PER_PART", _rows_default))
+        plan: list[tuple[str, str, list, int, int]] = []
+        for (doc, sheet), rows in groups.items():
+            n_batches = (len(rows) + MAX_ROWS_PER_PART - 1) // MAX_ROWS_PER_PART
+            for bi in range(n_batches):
+                chunk = rows[bi * MAX_ROWS_PER_PART:(bi + 1) * MAX_ROWS_PER_PART]
+                plan.append((doc, sheet, chunk, bi + 1, n_batches))
+
+        _prog(f"Генериране на {len(plan)} части (партиди) поотделно...")
+
+        merged_tasks: list[dict] = []
+        parts_info: list[dict] = []
+        used_prefixes: dict[str, int] = {}
+        total_cost = 0.0
+        gen_model = ""
+        for (doc, sheet, rows, bi, n_batches) in plan:
+            # Уникална представка (одит v11 #3.1): два „Водопровод" листа НЕ бива
+            # да получат еднакво „В-"; също и партидите на един лист.
+            base = self._prefix_for_sheet(sheet)
+            used_prefixes[base] = used_prefixes.get(base, 0) + 1
+            prefix = base if used_prefixes[base] == 1 else f"{base}{used_prefixes[base]}"
+            batch_txt = f" — партида {bi}/{n_batches}" if n_batches > 1 else ""
+            _prog(f"  Част '{sheet}'{batch_txt} ({len(rows)} позиции) → '{prefix}-'")
+            # Корекция на всяка част — само ако контрольорът (Anthropic) е
+            # наличен.  Без него тя само гърми/бави (пада на DeepSeek), затова
+            # се пропуска — детерминистичният gate остава авторитетът.
+            _skip = not (self.router and getattr(self.router, "anthropic_available", False))
+            part = self.generate_schedule(
+                analysis, project_type, progress_callback,
+                all_text=all_text, boq_index=rows, num_teams=num_teams,
+                scope_note=f"Част «{sheet}»{batch_txt} ({len(rows)} позиции).",
+                skip_correction=_skip)
+            total_cost += part.get("total_cost", 0.0)
+            gen_model = part.get("gen_model") or gen_model
+            ptasks = self._tasks_from(part.get("schedule"))
+            ptasks = self._prefix_part_tasks(ptasks, prefix)
+            merged_tasks.extend(ptasks)
+            parts_info.append({
+                "sheet": f"{sheet}{batch_txt}", "prefix": prefix,
+                "tasks": len(ptasks),
+                "part_status": part.get("status"),
+                "truncated": part.get("truncated"),
+            })
+
+        _prog("Сливане и детерминистична проверка на целия график...")
+
+        # ЕДИН детерминистичен цикъл върху слетия график: продължителности → gate.
+        merged: dict = {"tasks": merged_tasks}
+        recomputed = ScheduleBuilder().recompute_durations(merged_tasks)
+        merged["tasks"] = recomputed["schedule"]
+        merged_duration_report = {
+            "applied": True, "final": True,
+            "changes": recomputed["changes"], "skipped": recomputed["skipped"],
+            "warnings": recomputed["warnings"], "summary": recomputed["summary"],
+        }
+
+        validation = self._validate_final_schedule(merged)
+
+        # FAIL-CLOSED staging (одит v11, P0): досега статусът гледаше само
+        # validation.valid — провалена/отрязана/празна ЧАСТ пак ставаше
+        # approved+exportable, тоест цял лист от КСС можеше да изчезне тихо.
+        # Тук: (1) всяка част трябва да е с приет статус, без отрязване, с
+        # поне 1 задача; (2) всеки задължителен ред от КСС трябва да е ПОКРИТ
+        # от задача (BOQ coverage gate).  Иначе графикът е НЕПЪЛЕН → invalid.
+        # verify_citations ПЪРВО — за да имаме ДОКАЗАНО покритите редове
+        # (одит v12): coverage вече е доказателствен (verified), не синтактичен
+        # (само наличие на source_ref).  Преди това триене на AI provenance —
+        # trust boundary.
+        from src.provenance import (verify_citations, strip_ai_provenance,
+                                     analyze_boq_coverage)
+        strip_ai_provenance(merged["tasks"])
+        citation_report: dict = {"checked": False, "reason": "no_boq_index"}
+        uncovered: list = []
+        over_covered: list = []
+        ambiguous: list = []
+        if boq_index:
+            try:
+                citation_report = {
+                    **verify_citations(merged["tasks"], boq_index), "checked": True}
+                # ДОМЕЙН МОДЕЛ (одит v16): покритие по клас-покривач, не по суров
+                # verified_ref.  Производните дейности не покриват; дублираните
+                # покривачи са нарушение.
+                cov = analyze_boq_coverage(merged["tasks"], boq_index)
+                uncovered = cov["uncovered"]
+                over_covered = sorted(cov["over_covered"])
+                ambiguous = cov.get("ambiguous", [])
+                citation_report["uncovered"] = uncovered
+                citation_report["over_covered"] = over_covered
+                citation_report["ambiguous"] = ambiguous
+            except Exception as exc:
+                logger.warning("verify_citations (staged) се провали: %s", exc)
+                citation_report = {"checked": False, "reason": "exception"}
+
+        failed_parts = [
+            p for p in parts_info
+            if p["part_status"] not in AIProcessor.ACCEPTED_STATUSES
+            or p["truncated"] or p["tasks"] == 0
+        ]
+
+        staging_blockers: list[str] = []
+        for p in failed_parts:
+            staging_blockers.append(
+                f"част «{p['sheet']}» НЕ е генерирана успешно "
+                f"(статус={p['part_status']}, отрязана={p['truncated']}, "
+                f"{p['tasks']} задачи) — графикът е НЕПЪЛЕН")
+        if uncovered:
+            staging_blockers.append(
+                f"{len(uncovered)} позиции от КСС не са ДОКАЗАНО покрити "
+                f"(няма дейност от правилния клас; напр. {', '.join(uncovered[:3])})")
+        if over_covered:
+            staging_blockers.append(
+                f"{len(over_covered)} позиции с ДУБЛИРАН покривач "
+                f"(две дейности от един клас; напр. {', '.join(over_covered[:3])})")
+        if ambiguous:
+            staging_blockers.append(
+                f"{len(ambiguous)} позиции с НЕОПРЕДЕЛИМ клас-покривач — "
+                f"недоказано покритие, нужен е човешки преглед "
+                f"(напр. {', '.join(ambiguous[:3])})")
+
+        # Статусът наследява НАЙ-ТЕЖКОТО (одит v12 #3): провалена част → invalid;
+        # недоказано покритие ИЛИ част иска преглед → needs_human_review;
+        # всичко чисто → approved.  needs_human_review вече не изчезва.
+        parts_need_review = any(
+            p["part_status"] == "needs_human_review" for p in parts_info)
+        # Одит v20: over_covered ЛИПСВАШЕ в статуса — експортът се блокираше през
+        # staging blocker, но статусът оставаше approved (approved + exportable=False
+        # обърква инженера и противоречи на „най-тежкия статус").  Одит v20 P0:
+        # непроверен произход (checked=False) също слиза — отказът на проверката е
+        # недоказан произход, не „чисто".
+        _provenance_unchecked = not citation_report.get("checked")
+        if not validation.get("valid") or failed_parts:
+            status = "invalid"
+        elif (uncovered or ambiguous or over_covered or parts_need_review
+              or _provenance_unchecked):
+            status = "needs_human_review"
+        else:
+            status = "approved"
+
+        export = self._export_decision(status, validation, {},
+                                       merged_duration_report, citation_report)
+        # Staging блокерите винаги надделяват — непълен/недоказан не се експортира.
+        if staging_blockers:
+            export = {"exportable": False, "policy": export["policy"],
+                      "blockers": staging_blockers + export.get("blockers", [])}
+
+        return {
+            "status": status,
+            "ai_status": status,
+            "staged": True,
+            "parts": parts_info,
+            "failed_parts": [p["sheet"] for p in failed_parts],
+            "coverage": {
+                "required": len({r.ref for r in boq_index
+                                 if getattr(r, "quantity", None) is not None}),
+                "uncovered": uncovered,
+                "over_covered": over_covered,
+                "ambiguous": ambiguous,
+            },
+            "exportable": export["exportable"],
+            "export_blockers": export["blockers"],
+            "export_policy": export["policy"],
+            "citation_report": citation_report,
+            "schedule": merged,
+            "cycles": len(groups),
+            "total_cost": total_cost,
+            "gen_model": gen_model,
+            "duration_report": merged_duration_report,
             "validation": validation,
         }
 
@@ -819,6 +1191,16 @@ class AIProcessor:
         if not after_tasks:
             return cycle_result, {"applied": False, "reason": "няма задачи след correction"}
 
+        # TRUST BOUNDARY (одит v12): изтрий provenance статусите, които AI може
+        # да е сложил в свободния JSON (напр. фалшив „human_override" за да
+        # заобиколи проверката срещу КСС).  Те са server-owned — задават се само
+        # от verify_citations/mark_human_overrides/recompute.
+        try:
+            from src.provenance import strip_ai_provenance
+            strip_ai_provenance(after_tasks)
+        except Exception as exc:
+            logger.debug("strip_ai_provenance се провали: %s", exc)
+
         before_tasks = self._tasks_from(before_json)
         before_by_id = {t.get("id"): t for t in before_tasks if t.get("id")}
         before_ids = set(before_by_id)
@@ -830,18 +1212,30 @@ class AIProcessor:
         if progress_callback and (removed or added):
             progress_callback("AI корекцията промени структурата — проверявам...")
 
-        # ЗАЩИТА НА ВХОДОВЕТЕ (одит 2026-07-24, точка 1).
+        # ЗАЩИТА НА ВХОДОВЕТЕ (одит 2026-07-24 v5, точки 1, 2, 3, 4).
         #
-        # Дотук се възстановяваше само `duration`.  Но AI correction връща
-        # цял график и може да подмени количество, DN, материал — а после
-        # кодът коректно смята ВЪРХУ подменения вход, и резултатът изглежда
-        # доказан.  Възпроизведено: length_m 720 → 15000, duration 1000д,
-        # статус approved.
+        # v4 връщаше поле само ако то е присъствало в оригинала и по гола
+        # равенство на стойността.  Одитът показа три байпаса на това:
+        #   1. AI ДОБАВЯ липсвал вход (material="PE") → не се отменя → код
+        #      смята ВЪРХУ него → резултатът е белязан „calculated".
+        #   2. Alias: AI слага diameter=110, докато dn=500 стои непокътнато;
+        #      равенството по dn не вижда нарушение, но detect_dn чете 110.
+        #   3. AI сменя type/milestone (milestone=true) → калкулаторът връща
+        #      0 дни и го бележи „calculated" — пълен байпас на защитата.
         #
-        # Тези полета са ИЗМЕРВАНИЯ от документа, не решения на модела.  AI
-        # correction няма право да ги пипа — при разминаване се връща
-        # оригиналната стойност и се отбелязва.
-        reverted = self._revert_protected_fields(after_tasks, before_by_id)
+        # Затова тук защитата е allowlist, не blacklist: заключените полета
+        # (измервания + класификация) идват от ОРИГИНАЛА по id — добавяне,
+        # смяна или триене се отменя.  Alias-ите се свеждат до едно канонично
+        # поле ПРЕДИ това, за да няма скрит втори вход.  Всяка намеса праща
+        # задачата на човешки преглед — код никога не бележи AI-измислен вход
+        # като „изчислен".
+        reverted, alias_conflicts = self._apply_input_lock(after_tasks, before_by_id)
+
+        # Промяна в графа на зависимостите (точка 4): смяна/махане на връзка
+        # на СЪЩЕСТВУВАЩА задача не е промяна на task ID, затова v4 я
+        # пропускаше.  Тук се засича и се третира като структурна промяна —
+        # AI няма последната дума върху планиращата логика.
+        dep_changes = self._dependency_changes(after_tasks, before_by_id)
 
         # Преизчисли наново: връща `calculated_duration` и `duration_source`,
         # които AI-ят може да е изтрил, и налага числата, които кодът доказва.
@@ -860,34 +1254,80 @@ class AIProcessor:
         updated = dict(cycle_result)
         updated["schedule"] = data
 
-        # Структурна промяна (добавена/премахната задача) НЕ се одобрява
-        # автоматично — иска човешки поглед.  Одит: досега само се докладваше.
-        structural_change = bool(removed or added)
+        # Структурна промяна НЕ се одобрява автоматично — иска човешки поглед.
+        # Одит v5: „структурна" вече включва и промяна на входове/класификация
+        # (reverted), на графа на зависимостите (dep_changes) и alias-конфликт.
+        structural_change = bool(
+            removed or added or dep_changes or reverted or alias_conflicts
+        )
+
+        # Финален duration report — СЛЕД AI correction и повторното изчисление
+        # (одит v5, точка 5).  Досега към export gate отиваше отчетът отпреди
+        # корекцията; AI можеше да въведе недоказана продължителност, а strict
+        # да пусне експорт по остарелия „unresolved=0".
+        #
+        # Одит v6, точка 6: носи пълната форма (applied/changes/skipped/
+        # warnings/summary), за да може UI formatter-ът да покаже КОИ
+        # продължителности са недоказани — иначе връщаше [] и човекът не
+        # виждаше нищо, макар gate-ът да ползваше верния отчет.
+        final_duration_report = {
+            "applied": True,
+            "final": True,
+            "changes": result["changes"],
+            "skipped": result["skipped"],
+            "warnings": result["warnings"],
+            "summary": result["summary"],
+        }
 
         report = {
             "applied": True,
             "removed_tasks": removed,
             "added_tasks": added,
             "reverted_fields": reverted,
+            "alias_conflicts": alias_conflicts,
+            "dependency_changes": dep_changes,
             "structural_change": structural_change,
             "recomputed": result["summary"]["recomputed"],
             "unresolved": result["summary"]["unresolved"],
             "by_code": result["summary"]["by_code"],
+            "duration_report": final_duration_report,
         }
         if structural_change:
             logger.warning(
-                "AI корекцията промени СТРУКТУРАТА: премахнати %s, добавени %s "
+                "AI корекцията промени графика (премахнати %s, добавени %s, "
+                "деп. промени %s, върнати входове %d, alias-конфликти %d) "
                 "— форсирам needs_human_review.",
                 removed[:5] or "няма", added[:5] or "няма",
+                dep_changes[:5] or "няма", len(reverted), len(alias_conflicts),
             )
-            # Не позволявай „approved" при променена структура.
+            # Не позволявай „approved" при променен график.
             if updated.get("status") == "approved":
                 updated["status"] = "needs_human_review"
-                updated.setdefault("remaining_issues", []).append(
-                    f"AI корекцията промени структурата на графика "
-                    f"(премахнати: {', '.join(removed) or 'няма'}; "
-                    f"добавени: {', '.join(added) or 'няма'}) — нужен е човешки преглед."
-                )
+                issues = updated.setdefault("remaining_issues", [])
+                if removed or added:
+                    issues.append(
+                        f"AI корекцията промени структурата (премахнати: "
+                        f"{', '.join(removed) or 'няма'}; добавени: "
+                        f"{', '.join(added) or 'няма'}) — нужен е човешки преглед."
+                    )
+                if dep_changes:
+                    issues.append(
+                        f"AI корекцията промени зависимостите на: "
+                        f"{', '.join(map(str, dep_changes[:10]))} — нужен е преглед."
+                    )
+                if reverted:
+                    fields = ", ".join(
+                        f"{r['id']}.{r['field']}" for r in reverted[:10]
+                    )
+                    issues.append(
+                        f"AI корекцията опита да смени защитени входове "
+                        f"({fields}) — върнати към оригинала, нужен е преглед."
+                    )
+                if alias_conflicts:
+                    issues.append(
+                        "Противоречиви alias-полета (напр. dn срещу diameter) "
+                        "— нужен е човешки преглед."
+                    )
         if reverted:
             logger.warning(
                 "AI correction опита да смени защитени входове в %d задачи — "
@@ -901,90 +1341,369 @@ class AIProcessor:
             )
         return updated, report
 
-    # Полета, които са ИЗМЕРВАНИЯ от документа, не решения на модела.
-    # AI correction няма право да ги мени.
-    _PROTECTED_FIELDS = ("length_m", "quantity", "dn", "diameter", "material",
-                         "method", "source_ref")
+    # Полета, които са ИЗМЕРВАНИЯ от документа ИЛИ определят КАК кодът смята
+    # продължителност.  AI correction няма право да ги въвежда, маха или мени.
+    # Класификацията (type/milestone/unit) е тук нарочно: смяна на type или
+    # milestone=true променя резултата на калкулатора, без да пипа измерване.
+    #
+    # `name` е тук от одит v6, точка 2: `duration_calculator` извлича от името
+    # дали задачата е тръбна, DN, материал и метод (HDD/open).  Затова смяна
+    # само на името („Подготвителни работи" → „Полагане DN110 PE") пре-
+    # класифицира входа и кодът бележи резултата „calculated" — същият клас
+    # байпас като milestone=true, само през друго поле.
+    #
+    # Ресурсите и пространството (team/crew_id/alignment_id/start_chainage/
+    # end_chainage) са тук от одит v7, точка 2: без тях AI можеше да премести
+    # задача към друг екип или друга ос СЛЕД финалната валидация и така да
+    # „разреши" ресурсен или пространствен конфликт, който валидаторът иначе
+    # би хванал.  Смяната им сега се връща и праща задачата на човешки преглед.
+    _LOCKED_FIELDS = ("name", "length_m", "quantity", "dn", "material", "method",
+                      "source_ref", "type", "milestone", "is_milestone", "unit",
+                      "team", "crew_id", "alignment_id",
+                      "start_chainage", "end_chainage")
+
+    # Alias-и, които duration_calculator чете като едно и също понятие.  Свеждат
+    # се до първото (каноничното) име ПРЕДИ защитата — иначе AI слага diameter
+    # успоредно на dn и заобикаля заключването (одит v5, точка 2).
+    _INPUT_ALIASES = {
+        "dn": ("dn", "DN", "diameter", "nominal_diameter"),
+        "length_m": ("length_m", "length", "dyljina_m"),
+        "material": ("material", "pipe_material"),
+    }
+
+    @staticmethod
+    def _scalar_eq(a: Any, b: Any) -> bool:
+        """Равенство, устойчиво на int/str и регистър (500 == '500', PE == pe).
+
+        Пази срещу фалшив „reverted" само защото AI е върнал 500 като низ.
+        """
+        return str(a).strip().lower() == str(b).strip().lower()
 
     @classmethod
-    def _revert_protected_fields(
-        cls, after_tasks: list[dict], before_by_id: dict
-    ) -> list[dict]:
-        """Върни защитените входове към оригиналните им стойности.
+    def _canonicalize_inputs(cls, task: dict) -> list[dict]:
+        """Слей alias-полетата в едно канонично поле; върни конфликтите.
 
-        Ако AI correction е сменил количество/DN/материал на СЪЩЕСТВУВАЩА
-        задача, промяната се отменя и се записва.  Нови задачи нямат „преди"
-        — техните стойности се оставят, но структурната промяна се хваща
-        отделно.
+        Ако два alias-а на едно понятие имат РАЗЛИЧНИ стойности (dn=500 и
+        diameter=110), това е конфликт — връща се, за да отиде на човешки
+        преглед.  Иначе се оставя каноничното име и се трият дубликатите, за
+        да има точно един авторитетен вход.
+        """
+        conflicts: list[dict] = []
+        for canonical, aliases in cls._INPUT_ALIASES.items():
+            present = {a: task[a] for a in aliases
+                       if a in task and task[a] is not None}
+            if not present:
+                continue
+            distinct = {str(v).strip().lower() for v in present.values()}
+            if len(distinct) > 1:
+                conflicts.append({"field": canonical, "values": dict(present)})
+            chosen = next(task[a] for a in aliases if a in present)
+            for a in aliases:
+                if a != canonical and a in task:
+                    del task[a]
+            task[canonical] = chosen
+        return conflicts
+
+    # Сентинел: цялата задача е освободена (човекът я е посочил, без да уточни поле).
+    _EXEMPT_ALL = "__ALL__"
+
+    @classmethod
+    def _apply_input_lock(
+        cls, after_tasks: list[dict], before_by_id: dict,
+        exempt_fields: dict | None = None,
+    ) -> tuple[list[dict], list[dict]]:
+        """Заключи входовете и класификацията към оригинала (allowlist модел).
+
+        За всяка СЪЩЕСТВУВАЩА задача заключените полета идват от оригинала:
+          - AI сменил стойност → връща се оригиналната;
+          - AI добавил липсвало поле → трие се (не става авторитетен вход);
+          - AI изтрил поле → връща се.
+        Нови задачи нямат „преди" — хващат се от структурната проверка.
+
+        `exempt_fields` (одит v8 т.1 + v9 т.1/2): карта id → освободени полета.
+        Стойност `_EXEMPT_ALL` = цялата задача е свободна; множество от имена =
+        само тези полета са свободни (field-level intent), останалите се
+        заключват.  Празно/липсва = нищо не е освободено (fail-closed).  При
+        генериране картата е празна — там нищо не е поискано от човек.
+        Alias-канонизацията се прилага ВИНАГИ, за да няма скрит втори вход.
 
         Returns:
-            Списък от {id, field, ai_value, restored} за отменените промени.
+            (reverted, conflicts).
         """
+        exempt_fields = exempt_fields or {}
         reverted: list[dict] = []
+        conflicts: list[dict] = []
         for task in after_tasks:
+            conflicts.extend(cls._canonicalize_inputs(task))
+            exempt = exempt_fields.get(task.get("id"))
+            if exempt == cls._EXEMPT_ALL:
+                continue
+            exempt = exempt or set()
             original = before_by_id.get(task.get("id"))
             if original is None:
                 continue
-            for field in cls._PROTECTED_FIELDS:
-                if field not in original:
+            orig = dict(original)
+            cls._canonicalize_inputs(orig)
+            for field in cls._LOCKED_FIELDS:
+                if field in exempt:
                     continue
-                if task.get(field) != original[field]:
-                    reverted.append({
-                        "id": task.get("id"),
-                        "field": field,
-                        "ai_value": task.get(field),
-                        "restored": original[field],
-                    })
-                    task[field] = original[field]
-        return reverted
+                has_orig = orig.get(field) is not None
+                has_ai = task.get(field) is not None
+                if not has_orig and not has_ai:
+                    continue
+                if has_orig and has_ai and cls._scalar_eq(task[field], orig[field]):
+                    continue
+                reverted.append({
+                    "id": task.get("id"),
+                    "field": field,
+                    "ai_value": task.get(field) if has_ai else None,
+                    "restored": orig.get(field) if has_orig else None,
+                })
+                if has_orig:
+                    task[field] = orig[field]
+                elif field in task:
+                    del task[field]
+        return reverted, conflicts
+
+    @staticmethod
+    def _dep_signature(task: dict) -> tuple:
+        """Нормализиран отпечатък на зависимостите на една задача.
+
+        Одит v6, точка 4: при СТАРИЯ формат (`dependencies: ["A"]` + task-level
+        `dependency_type`/`lag_days`) типът и лагът стоят на самата задача, не в
+        речник.  Досега отпечатъкът хешираше само "A" и игнорираше task-level
+        тип/лаг — затова смяна FS+0 → SS+5 оставаше невидима за input protection
+        И за revision hash.  Тук низовите зависимости наследяват task-level
+        семантиката, за да е промяната видима.
+        """
+        task_type = str(task.get("dependency_type", "FS")).upper()
+        task_lag = task.get("lag_days", 0)
+        sig: list[str] = []
+        for d in (task.get("dependencies") or []):
+            if isinstance(d, dict):
+                pred = d.get("predecessor_id") or d.get("id")
+                typ = str(d.get("type", d.get("dependency_type", "FS"))).upper()
+                lag = d.get("lag_days", d.get("lag", 0))
+            else:
+                pred, typ, lag = d, task_type, task_lag
+            sig.append(f"{pred}:{typ}:{lag}")
+        return tuple(sorted(sig))
+
+    @classmethod
+    def _dependency_changes(
+        cls, after_tasks: list[dict], before_by_id: dict,
+        exempt_fields: dict | None = None,
+    ) -> list:
+        """ID-та на съществуващи задачи, чиито зависимости AI е променил.
+
+        Зависимостите на дадена задача са освободени само ако цялата задача е
+        освободена (`_EXEMPT_ALL`) или заявката изрично споменава зависимости
+        (`"dependencies"` в освободените полета) — одит v8 т.1 + v9 т.2.
+        """
+        exempt_fields = exempt_fields or {}
+        changed: list = []
+        for task in after_tasks:
+            exempt = exempt_fields.get(task.get("id"))
+            if exempt == cls._EXEMPT_ALL or (
+                isinstance(exempt, set) and "dependencies" in exempt):
+                continue
+            original = before_by_id.get(task.get("id"))
+            if original is None:
+                continue
+            if cls._dep_signature(task) != cls._dep_signature(original):
+                changed.append(task.get("id"))
+        return changed
+
+    @classmethod
+    def enforce_modification_lock(
+        cls, after_tasks: list[dict], before_tasks: list[dict], message: str,
+    ) -> dict:
+        """Приложи input-lock/структурен gate към ЧАТ МОДИФИКАЦИЯ.
+
+        Одит v8 т.1 + v9 т.1/2/4: заключването живееше само в correction cycle-а
+        при генериране.  При чат модификация AI връщаше цял график и можеше да
+        промени екипи/пикетаж/зависимости/входове на непоискани задачи.
+
+        Разпознаване на целта:
+          - по ID И по ИМЕ (естествена заявка „промени водопровода" вече намира
+            задачата — v9 т.1);
+          - field-level: ако заявката спомене конкретно поле (напр. „екип"),
+            само то е свободно за посочената задача; другите ѝ полета се
+            заключват (v9 т.2);
+          - FAIL-CLOSED: ако НИЩО не се разпознае, нищо не е освободено —
+            всяка защитена промяна се връща (не „всичко разрешено").
+        Добавяне/махане на задача е освободено само за изрично посочена задача
+        (v9 т.4).  `after_tasks` се МУТИРА (връща непоисканите полета).
+
+        Returns:
+            {reverted, conflicts, dependency_changes, added, removed, targets,
+             fields, unrequested_change} — `unrequested_change` е True, ако AI
+            е пипнал нещо непоискано (→ извикващият форсира needs_human_review).
+        """
+        from src.provenance import requested_targets, requested_fields
+
+        before_by_id = {t.get("id"): t for t in before_tasks if t.get("id")}
+        before_ids = set(before_by_id)
+        after_ids = {t.get("id") for t in after_tasks if t.get("id")}
+
+        # Цел — по ID ИЛИ по ИМЕ (одит v9 т.1: естествена заявка без ID вече
+        # намира задачата).  Ако НИЩО не съвпадне, targets е празно и всичко се
+        # заключва — FAIL-CLOSED, не „всичко разрешено".
+        all_tasks = before_tasks + [t for t in after_tasks
+                                    if t.get("id") not in before_ids]
+        try:
+            targets = requested_targets(message, all_tasks)
+            fields = requested_fields(message)
+        except Exception:
+            targets, fields = set(), set()
+
+        # Карта id → освободени полета (одит v9 т.2 — field-level intent):
+        #   посочена задача + конкретно поле  → само това поле е свободно;
+        #   посочена задача без поле          → цялата задача е свободна;
+        #   непосочена задача                 → нищо не е свободно.
+        exempt_fields: dict = {}
+        for tid in targets:
+            exempt_fields[tid] = set(fields) if fields else cls._EXEMPT_ALL
+
+        reverted, conflicts = cls._apply_input_lock(
+            after_tasks, before_by_id, exempt_fields=exempt_fields)
+        dep_changes = cls._dependency_changes(
+            after_tasks, before_by_id, exempt_fields=exempt_fields)
+
+        # Структурни промени: добавяне/махане е освободено само за ИЗРИЧНО
+        # посочена задача (v9 т.4 — при неясна заявка не се разрешава тихо
+        # заместване на задачи).
+        removed = sorted(i for i in before_ids - after_ids
+                         if i and i not in targets)
+        added = sorted(i for i in after_ids - before_ids
+                       if i and i not in targets)
+
+        unrequested = bool(
+            reverted or conflicts or dep_changes or removed or added)
+        return {
+            "reverted": reverted,
+            "conflicts": conflicts,
+            "dependency_changes": dep_changes,
+            "added": added,
+            "removed": removed,
+            "targets": sorted(targets),
+            "fields": sorted(fields),
+            "unrequested_change": unrequested,
+        }
+
+    # Статуси, чийто график е ГОДЕН да стане текущ (валиден резултат, дори ако
+    # чака човешки преглед).  Всичко извън списъка — error, stopped, parse_error,
+    # непознат — е ПРОВАЛ и не бива да се записва като работен график.
+    ACCEPTED_STATUSES = frozenset({"approved", "needs_human_review"})
+
+    # Статуси, чийто график може да се ЕКСПОРТИРА без човешка намеса.  По-тесен
+    # от ACCEPTED: needs_human_review е валиден, но чака човек — не се експортира.
+    EXPORTABLE_STATUSES = frozenset({"approved"})
 
     @staticmethod
     def _export_decision(
         status: str, validation: dict, correction_report: dict,
-        duration_report: dict,
+        duration_report: dict, citation_report: dict | None = None,
     ) -> dict:
         """Реши дали графикът е готов за ЕКСПОРТ — не само дали е валиден.
 
         Три политики (env `EXPORT_POLICY`):
-          strict      — експорт само при чист график: валиден, човешки
-                        преглед не е нужен, всички количества доказани.
-          provisional — (по подразбиране) експорт при валиден график, но с
+          strict      — експорт само при чист график: одобрен, всички
+                        продължителности доказани от нормите И количествата с
+                        коректен произход (без mismatch/измислен цитат).
+          provisional — (по подразбиране) експорт при одобрен график, но с
                         видими предупреждения; PDF/XML носят маркер
                         „предварителен".
-          lenient     — старото поведение: валиден = експортируем.
+          lenient     — по-меко: одобрен график е експортируем.
 
-        Detерминистично валиден е ПРЕДПОСТАВКА за всички: невалиден график не
-        се експортира при никоя политика.
+        Одит 2026-07-24 v6, точка 1: статусът е ALLOWLIST, не blacklist.
+        Досега се блокираха само invalid и (по политика) needs_human_review —
+        а `error`/`stopped`/непознат статус минаваха за експортируеми, ако
+        графикът е структурно валиден.  Тоест сринат контрольор или спрян от
+        потребителя процес можеше да произведе „готов за възложител" файл.
+        Сега: САМО `approved` е експортируем при която и да е политика; всичко
+        друго се блокира, независимо от валидността.
+
+        Одит v7, точка 4: strict вече проверява и произхода на КОЛИЧЕСТВАТА —
+        `mismatch` (число различно от КСС) и `unknown_ref` (измислен цитат)
+        блокират.  Досега strict рекламираше доказани количества, а гледаше
+        само продължителности.
+
+        Detерминистично валиден е ПРЕДПОСТАВКА: невалиден график не се
+        експортира при никоя политика.
         """
         policy = (os.getenv("EXPORT_POLICY", "provisional") or "provisional").strip().lower()
         if policy not in {"strict", "provisional", "lenient"}:
             policy = "provisional"
-
-        blockers: list[str] = []
 
         # Невалиден → никога.
         if not validation.get("valid"):
             return {"exportable": False, "policy": policy,
                     "blockers": ["графикът не минава детерминистичната проверка"]}
 
-        needs_review = status == "needs_human_review"
-        unresolved = int((duration_report or {}).get("summary", {}).get("unresolved", 0))
+        # ALLOWLIST на статуса — само одобрен минава.
+        if status not in AIProcessor.EXPORTABLE_STATUSES:
+            if status == "needs_human_review":
+                reason = "AI сигнализира нужда от човешки преглед (needs_human_review)"
+            elif status in {"error", "stopped"}:
+                reason = (f"генерирането не завърши успешно (статус '{status}') "
+                          "— графикът не е одобрен")
+            else:
+                reason = f"графикът не е одобрен (статус '{status}')"
+            return {"exportable": False, "policy": policy, "blockers": [reason]}
 
-        if needs_review:
-            blockers.append("AI сигнализира нужда от човешки преглед "
-                            "(needs_human_review)")
+        # Оттук нататък статусът е 'approved' и графикът е валиден.
+        blockers: list[str] = []
+        unresolved = int((duration_report or {}).get("summary", {}).get("unresolved", 0))
         if unresolved:
             blockers.append(f"{unresolved} продължителности не са доказани от нормите")
 
-        if policy == "lenient":
-            exportable = True                      # старото поведение
-        elif policy == "strict":
-            exportable = not blockers              # само чист график
-        else:  # provisional
-            # Експорт се разрешава, но с предупреждения; needs_human_review
-            # все пак блокира — той е изрична човешка нужда, не просто липса
-            # на доказан произход.
-            exportable = not needs_review
+        # Произход на количествата (одит v7 т.4 + v8 т.4/5/6).
+        #   mismatch/unknown_ref — доказано грешен или измислен цитат;
+        #   uncited            — количество без източник (недоказано);
+        #   not checked        — липсва КСС индекс ИЛИ грешка → fail-closed.
+        # strict изисква ДОКАЗАНИ количества, не само „няма доказано грешни".
+        cr = citation_report or {}
+        checked = bool(cr.get("checked"))
+        mismatch = int(cr.get("mismatch", 0))
+        unknown_ref = int(cr.get("unknown_ref", 0))
+        uncited = int(cr.get("uncited", 0))
+        if mismatch:
+            blockers.append(
+                f"{mismatch} количества се разминават с КСС (mismatch)")
+        if unknown_ref:
+            blockers.append(
+                f"{unknown_ref} цитата сочат несъществуващ ред (измислен цитат)")
+        if uncited:
+            blockers.append(
+                f"{uncited} количества без цитат към КСС (недоказан произход)")
+        # BOQ coverage — общ инвариант (одит v13 #1): задължителни КСС редове,
+        # които НЕ са доказано покрити от реална задача.
+        uncovered = cr.get("uncovered") or []
+        if uncovered:
+            blockers.append(
+                f"{len(uncovered)} позиции от КСС не са ДОКАЗАНО покрити "
+                f"(напр. {', '.join(map(str, uncovered[:3]))})")
+        over_covered = cr.get("over_covered") or []
+        if over_covered:
+            blockers.append(
+                f"{len(over_covered)} позиции с ДУБЛИРАН покривач "
+                f"(напр. {', '.join(map(str, over_covered[:3]))})")
+        ambiguous = cr.get("ambiguous") or []
+        if ambiguous:
+            blockers.append(
+                f"{len(ambiguous)} позиции с НЕОПРЕДЕЛИМ клас-покривач — "
+                f"нужен е човешки преглед (напр. {', '.join(map(str, ambiguous[:3]))})")
+        if not checked:
+            reason = cr.get("reason", "непроверен")
+            blockers.append(
+                "произходът на количествата не е проверен "
+                f"({'липсва КСС индекс' if reason == 'no_boq_index' else 'грешка при проверката' if reason == 'exception' else reason})")
+
+        if policy == "strict":
+            exportable = not blockers              # само чист, доказан график
+        else:  # provisional / lenient — одобрен график минава, с предупреждения
+            exportable = True
 
         return {"exportable": exportable, "policy": policy, "blockers": blockers}
 
@@ -992,29 +1711,40 @@ class AIProcessor:
     def schedule_hash(schedule: Any) -> str:
         """Стабилен hash на графика — за обвързване на валидацията с версия.
 
-        Хешира само полетата, които влияят на ВАЛИДНОСТТА (id, дати,
-        продължителност, зависимости, пикетаж).  Козметика (име, бележки) не
-        участва — преименуване на задача не отменя проверката.
+        Хешира всяко поле, което влияе на КОРЕКТНОСТТА — не само датите.
+        Одит v5, точка 7: v4 пропускаше name/type (класификация на
+        продължителност), team/crew_id (ресурсни и пространствени конфликти),
+        method (производителност), unit/source_ref (произход), milestone (XML
+        и продължителност).  Промяна в тях не сменяше hash-а, затова UI
+        приемаше стара валидация за нова версия.  Извън hash-а остават само
+        доказано козметичните полета (напр. notes/comment/description).
         """
         import hashlib
+
+        def _dn(task: dict) -> Any:
+            for key in ("dn", "DN", "diameter", "nominal_diameter"):
+                if task.get(key) is not None:
+                    return task[key]
+            return None
 
         tasks = AIProcessor._tasks_from(schedule)
         signature: list = []
         for task in sorted(tasks, key=lambda t: str(t.get("id", ""))):
-            deps = sorted(
-                f"{d.get('predecessor_id') or d.get('id')}:"
-                f"{str(d.get('type', 'FS')).upper()}:{d.get('lag_days', 0)}"
-                if isinstance(d, dict) else str(d)
-                for d in (task.get("dependencies") or [])
-            )
+            # Одит v6, точка 4: споделен отпечатък, който отчита и task-level
+            # dependency_type/lag_days при стария низов формат.
+            deps = AIProcessor._dep_signature(task)
             signature.append((
                 str(task.get("id", "")),
+                task.get("name"), task.get("type"),
                 task.get("start_day"), task.get("end_day"), task.get("duration"),
-                task.get("length_m"), task.get("quantity"),
-                task.get("dn"), task.get("diameter"), task.get("material"),
+                task.get("length_m"), task.get("quantity"), task.get("unit"),
+                _dn(task), task.get("material"), task.get("method"),
+                task.get("source_ref"),
+                bool(task.get("milestone") or task.get("is_milestone")),
+                task.get("team"), task.get("crew_id"),
                 task.get("alignment_id"),
                 task.get("start_chainage"), task.get("end_chainage"),
-                tuple(deps),
+                deps,
             ))
         blob = json.dumps(signature, ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
@@ -1150,7 +1880,7 @@ class AIProcessor:
 
         Strategy:
         - Extract capitalised Bulgarian/Latin tokens from each task name
-          (likely street/place names, e.g. "Витоша", "Илиенци")
+          (likely street/place names, e.g. "Витоша", "Пробен")
         - A token is suspicious if it appears in neither the whitelist nor
           the full document text
         - Returns list of human-readable warning strings
@@ -1579,7 +2309,7 @@ class AIProcessor:
             "НЕ ВКЛЮЧВАЙ: числа, координати, диаметри (DN, Ф), коти, дати, "
             "имена на фирми/проектанти, 'ПСОВ' самостоятелно без топоним.\n\n"
             "Отговори САМО с валиден JSON:\n"
-            '{"locations": ["ул. Примерна", "бул. Витоша", "кв. Лозенец", "ж.к. Надежда"]}'
+            '{"locations": ["ул. Примерна", "бул. Витоша", "кв. Южен", "ж.к. Надежда"]}'
         )
 
         all_locations: list[str] = []

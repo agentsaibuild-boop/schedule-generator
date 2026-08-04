@@ -1,7 +1,7 @@
 [
   {
     "model": "deepseek/deepseek-chat",
-    "scenario": "Харманли — довеждащ, DN300 CI, горски",
+    "scenario": "Горноград — довеждащ, DN300 CI, горски",
     "tasks": 16,
     "seconds": 137.1846444606781,
     "cost": 0.01201354,
@@ -23,7 +23,7 @@
   },
   {
     "model": "deepseek/deepseek-chat",
-    "scenario": "Перник — единичен участък, DN500 PE, 720м",
+    "scenario": "Среднево — единичен участък, DN500 PE, 720м",
     "tasks": 9,
     "seconds": 83.00449514389038,
     "cost": 0.01070566,
@@ -45,7 +45,7 @@
   },
   {
     "model": "deepseek/deepseek-chat",
-    "scenario": "Иваняне — инженеринг, канализация + КПС",
+    "scenario": "Опитно — инженеринг, канализация + КПС",
     "tasks": 31,
     "seconds": 182.71217823028564,
     "cost": 0.01344084,
@@ -67,7 +67,7 @@
   },
   {
     "model": "anthropic/claude-sonnet-5",
-    "scenario": "Харманли — довеждащ, DN300 CI, горски",
+    "scenario": "Горноград — довеждащ, DN300 CI, горски",
     "tasks": 28,
     "seconds": 320.3345425128937,
     "cost": 0.38674000000000003,
@@ -89,7 +89,7 @@
   },
   {
     "model": "anthropic/claude-sonnet-5",
-    "scenario": "Перник — единичен участък, DN500 PE, 720м",
+    "scenario": "Среднево — единичен участък, DN500 PE, 720м",
     "tasks": 10,
     "seconds": 222.50023245811462,
     "cost": 0.285482,
@@ -111,7 +111,7 @@
   },
   {
     "model": "anthropic/claude-sonnet-5",
-    "scenario": "Иваняне — инженеринг, канализация + КПС",
+    "scenario": "Опитно — инженеринг, канализация + КПС",
     "tasks": 0,
     "seconds": 329.08419036865234,
     "cost": 0.261956,
@@ -139,7 +139,7 @@
   },
   {
     "model": "google/gemini-3.1-pro-preview",
-    "scenario": "Харманли — довеждащ, DN300 CI, горски",
+    "scenario": "Горноград — довеждащ, DN300 CI, горски",
     "tasks": 7,
     "seconds": 129.56189131736755,
     "cost": 0.290898,
@@ -161,7 +161,7 @@
   },
   {
     "model": "google/gemini-3.1-pro-preview",
-    "scenario": "Перник — единичен участък, DN500 PE, 720м",
+    "scenario": "Среднево — единичен участък, DN500 PE, 720м",
     "tasks": 9,
     "seconds": 106.57712173461914,
     "cost": 0.238474,
@@ -183,7 +183,7 @@
   },
   {
     "model": "google/gemini-3.1-pro-preview",
-    "scenario": "Иваняне — инженеринг, канализация + КПС",
+    "scenario": "Опитно — инженеринг, канализация + КПС",
     "error": "unhashable type: 'dict'",
     "composite": 0.0,
     "cost": 0.0

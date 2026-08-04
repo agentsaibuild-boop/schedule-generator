@@ -53,12 +53,23 @@ MODEL_OCR = os.getenv("OCR_MODEL", "") or MODEL_WORKER
 # Upgraded 2026-07-22 from claude-sonnet-4-6 → Opus 4.8 (reasoning verifier).
 MODEL_CONTROLLER = "claude-opus-4-8"
 
+# ОПЦИОНАЛЕН Claude РАБОТНИК (проба 2026-08-04): DeepSeek V3 има ~8192 таван на
+# изхода → отрязва големи графици и налага под-разбиване на партиди.  Claude дава
+# 128K изход + по-добро следване на инструкции.  Зададен `WORKER_MODEL=claude-…`
+# насочва работника към този модел (висок max_tokens, без отрязване).  Празно =
+# досегашният DeepSeek работник.
+WORKER_MODEL_OVERRIDE = os.getenv("WORKER_MODEL", "").strip()
+_WORKER_MAX_TOKENS = int(os.getenv("WORKER_MAX_TOKENS", "16000"))
+
 # ---------------------------------------------------------------------------
 # Pricing per token (USD) — fast-moving; verify before relying.
 # ---------------------------------------------------------------------------
 PRICING = {
     MODEL_WORKER: {"input": 0.28 / 1_000_000, "output": 0.42 / 1_000_000},      # DeepSeek (latest)
     MODEL_CONTROLLER: {"input": 5.0 / 1_000_000, "output": 25.0 / 1_000_000},   # Opus 4.8
+    # Claude-работник опции (проба 2026-08-04).  Sonnet 5 промо $2/$10 до 31.08.
+    "claude-sonnet-5": {"input": 2.0 / 1_000_000, "output": 10.0 / 1_000_000},
+    "claude-opus-5": {"input": 5.0 / 1_000_000, "output": 25.0 / 1_000_000},
 }
 # OCR моделът се задава от .env и цената му не е известна предварително.
 # Без запис тук `_calculate_cost` пада към тарифата на работника и отчита
@@ -165,6 +176,10 @@ class AIRouter:
         self.anthropic_available: bool = True
         self.fallback_active: bool = False
         self.fallback_source: str | None = None  # which API is down
+        # Проба 2026-08-04: работникът е силен Claude модел (Sonnet 5 / Opus).
+        # Тогава вторият AI корекционен цикъл е излишен и е бутилково гърло
+        # (отряза се на голям график) — пропуска се, gate-ът остава авторитет.
+        self.worker_is_claude: bool = WORKER_MODEL_OVERRIDE.startswith("claude")
 
         self.usage_log: list[dict] = []
 
@@ -317,22 +332,37 @@ class AIRouter:
     # Chat (Worker = DeepSeek, fallback = Anthropic)
     # ------------------------------------------------------------------
 
-    def chat(self, messages: list[dict], system_prompt: str) -> dict:
+    def chat(self, messages: list[dict], system_prompt: str,
+             max_tokens: int = _MAX_TOKENS_CHAT) -> dict:
         """Send a chat message to the worker (DeepSeek). Falls back to Anthropic.
 
         Args:
             messages: List of message dicts with 'role' and 'content'.
             system_prompt: System prompt with knowledge context.
+            max_tokens: Таван на изходните токени.  Проба 2026-07-24: генери-
+                рането на реален график иска повече от default 4096 — подава
+                8192, за да не се отрязва JSON-ът.
 
         Returns:
             Dict with content, model, usage, cost, fallback.
         """
         self._warn_empty_prompt(system_prompt, "chat")
 
+        # Проба 2026-08-04: ако е зададен Claude работник, той поема генерирането
+        # (128K изход → без отрязване).  При провал пада към обичайния път.
+        if WORKER_MODEL_OVERRIDE.startswith("claude") and self.anthropic_available:
+            try:
+                return self._chat_worker_claude(
+                    messages, system_prompt, model=WORKER_MODEL_OVERRIDE,
+                    max_tokens=max(max_tokens, _WORKER_MAX_TOKENS))
+            except Exception as exc:
+                logger.warning("Claude работник (%s) се провали, fallback: %s",
+                               WORKER_MODEL_OVERRIDE, exc)
+
         # Try DeepSeek first
         if self.deepseek_available:
             try:
-                return self._chat_deepseek(messages, system_prompt)
+                return self._chat_deepseek(messages, system_prompt, max_tokens=max_tokens)
             except Exception as exc:
                 logger.warning("DeepSeek chat failed, trying fallback: %s", exc)
                 self.deepseek_available = False
@@ -341,7 +371,8 @@ class AIRouter:
         # Fallback to Anthropic
         if self.anthropic_available:
             try:
-                return self._chat_anthropic(messages, system_prompt, is_fallback=True)
+                return self._chat_anthropic(messages, system_prompt, is_fallback=True,
+                                            max_tokens=max_tokens)
             except Exception as exc:
                 logger.error("Anthropic fallback also failed: %s", exc)
                 self.anthropic_available = False
@@ -356,7 +387,8 @@ class AIRouter:
             "error": True,
         }
 
-    def _chat_deepseek(self, messages: list[dict], system_prompt: str) -> dict:
+    def _chat_deepseek(self, messages: list[dict], system_prompt: str,
+                       max_tokens: int = _MAX_TOKENS_CHAT) -> dict:
         """Send chat to DeepSeek via OpenAI-compatible API."""
         client = self._get_deepseek()
         full_messages = [{"role": "system", "content": system_prompt}] + messages
@@ -364,7 +396,7 @@ class AIRouter:
         response = client.chat.completions.create(
             model=MODEL_WORKER,
             messages=full_messages,
-            max_tokens=_MAX_TOKENS_CHAT,
+            max_tokens=max_tokens,
             temperature=0.3,
             timeout=_API_TIMEOUT_SECONDS,
         )
@@ -397,6 +429,40 @@ class AIRouter:
             "cost": self._calculate_cost(MODEL_WORKER, tokens_in, tokens_out),
             "fallback": False,
             "truncated": truncated,
+        }
+
+    def _chat_worker_claude(
+        self, messages: list[dict], system_prompt: str, *, model: str,
+        max_tokens: int,
+    ) -> dict:
+        """Claude като РАБОТНИК (проба 2026-08-04) — висок max_tokens, без отрязване.
+
+        NB (claude-api): Claude 5 моделите имат thinking ВКЛЮЧЕН по подразбиране →
+        `content[0]` е ThinkingBlock, не текст.  За структуриран JSON thinking не
+        трябва (само бави и харчи токени), затова е ИЗКЛЮЧЕН, а текстът се вади от
+        текстовия блок, не от `content[0]`.  По-дълъг timeout — генерацията е
+        по-голяма от обикновен chat.
+        """
+        client = self._get_anthropic()
+        response = client.messages.create(
+            model=model, max_tokens=max_tokens,
+            thinking={"type": "disabled"},
+            system=system_prompt, messages=messages,
+            timeout=max(_API_TIMEOUT_SECONDS, 300),
+        )
+        content = next((getattr(b, "text", "") for b in (response.content or [])
+                        if getattr(b, "type", None) == "text"), "")
+        tokens_in = response.usage.input_tokens
+        tokens_out = response.usage.output_tokens
+        self._log_usage(model, tokens_in, tokens_out, "chat")
+        truncated = getattr(response, "stop_reason", None) == "max_tokens"
+        if truncated:
+            logger.warning("Claude работник %s ОТРЯЗАН (max_tokens=%d).", model, max_tokens)
+        return {
+            "content": content, "model": model,
+            "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out},
+            "cost": self._calculate_cost(model, tokens_in, tokens_out),
+            "fallback": False, "truncated": truncated,
         }
 
     def _chat_anthropic(
@@ -547,7 +613,8 @@ class AIRouter:
                 max_tokens=_MAX_TOKENS_CHAT,
                 system=system_prompt,
                 messages=messages,
-                temperature=0.1,
+                # Проба 2026-08-03: Opus 4.8 отхвърля `temperature` (deprecated
+                # for this model) → корекцията гърмеше и падаше на DeepSeek.
                 timeout=_API_TIMEOUT_SECONDS,
             )
             raw = response.content[0].text if response.content else "{}"
@@ -673,7 +740,7 @@ class AIRouter:
                 max_tokens=_MAX_TOKENS_CORRECTION,
                 system=system_prompt,
                 messages=messages,
-                temperature=0.1,
+                # Opus 4.8 не приема `temperature` (проба 2026-08-03).
                 timeout=_API_TIMEOUT_SECONDS,
             )
             raw = response.content[0].text if response.content else "{}"
@@ -1042,7 +1109,7 @@ class AIRouter:
                     max_tokens=_MAX_TOKENS_LESSON,
                     system=system_prompt,
                     messages=messages,
-                    temperature=0.1,
+                    # Opus 4.8 не приема `temperature` (проба 2026-08-03).
                 )
                 raw = response.content[0].text if response.content else "{}"
                 self._log_usage(

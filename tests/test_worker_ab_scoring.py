@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tools.worker_ab import WEIGHTS, composite, score_schedule  # noqa: E402
 
-ANALYSIS = "Довеждащ водопровод, гр. Харманли. Чугунени тръби DN300, горски терен."
+ANALYSIS = "Довеждащ водопровод, гр. Горноград. Чугунени тръби DN300, горски терен."
 
 
 def _pipe(name="Полагане DN300 CI", **kw) -> dict:
