@@ -305,7 +305,7 @@ def _build_tasks(
     uid_map: dict[str, int] = {}
     uid_counter = 1
     for task in flat_tasks:
-        task_id = task.get("id", "")
+        task_id = str(task.get("id", "")).strip()
         if task_id and task_id not in uid_map:
             uid_map[task_id] = uid_counter
         uid_counter += 1
@@ -319,7 +319,7 @@ def _build_tasks(
     # ------------------------------------------------------------------
     uid_counter = 1
     for task in flat_tasks:
-        task_id = task.get("id", "")
+        task_id = str(task.get("id", "")).strip()
 
         task_elem = ET.SubElement(tasks_elem, "Task")
         ET.SubElement(task_elem, "UID").text = str(uid_counter)
@@ -485,11 +485,11 @@ def _add_predecessor_links(
         # Old: ["D01", "D02"]  (array of strings)
         # New: [{"predecessor_id": "D01", "type": "SS", "lag": 20}]  (array of dicts)
         if isinstance(dep, dict):
-            dep_id = dep.get("predecessor_id") or dep.get("id", "")
+            dep_id = str(dep.get("predecessor_id") or dep.get("id", "")).strip()
             dep_type_str = (dep.get("type") or "FS").upper()
             lag_days = int(dep.get("lag") or dep.get("lag_days") or 0)
         else:
-            dep_id = str(dep)
+            dep_id = str(dep).strip()
             dep_type_str = (task.get("dependency_type") or "FS").upper()
             lag_days = int(task.get("lag_days") or 0)
 
@@ -556,7 +556,7 @@ def _build_assignments(
     asn_uid = 1
 
     for task in flat_tasks:
-        task_id = task.get("id", "")
+        task_id = str(task.get("id", "")).strip()
         team = task.get("team")
         is_summary = task.get("_has_children", False)
 

@@ -180,3 +180,26 @@ def test_seven_day_export_is_unchanged():
 def test_duration_format_still_days():
     """Урок #19 — не бива да се губи при тези промени."""
     assert "<DurationFormat>5</DurationFormat>" in _xml([NORMAL])
+
+
+# ===================================================================
+# Зависимости при ЦЕЛОЧИСЛЕНИ ID-та (реален DeepSeek изход, 2026-08)
+# ===================================================================
+
+def test_dependencies_survive_integer_task_ids():
+    """Регресия: при int ID-та (DeepSeek ги генерира числови) зависимостите
+    тихо се ИЗПУСКАХА от MS Project XML — uid_map се пълнеше с int ключ, а
+    търсенето беше str(dep). Сега и двете са нормализирани към str."""
+    schedule = [
+        {"id": 1, "name": "Полагане DN300 PP", "duration": 9, "start_day": 1,
+         "dependencies": []},
+        {"id": 2, "name": "Засипване", "duration": 4, "start_day": 10,
+         "dependencies": [1]},
+        {"id": 3, "name": "Финал", "duration": 0, "start_day": 20,
+         "milestone": True, "dependencies": [2]},
+    ]
+    xml = _xml(schedule)
+    links = [e for e in ET.fromstring(xml).iter(f"{NS}PredecessorLink")]
+    assert len(links) == 2, "зависимостите трябва да оцелеят при int ID-та"
+    puids = {l.findtext(f"{NS}PredecessorUID") for l in links}
+    assert puids == {"1", "2"}
