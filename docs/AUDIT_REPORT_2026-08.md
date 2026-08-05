@@ -9,13 +9,13 @@
 ```
 Audit target branch      : feat/structured-output-streaming   (PR #2)
 Branch tip (жив)         : прочетете с `git rev-parse HEAD` (докладът е върхът)
-Последна ЛОГИЧЕСКА промяна: 827efb889421044f88ac300d37636fdf96641ec9
-                           (MSPDI dependency int-ID fix, §6; commit-ите над него —
-                            доклад — НЕ променят логика; 1795 passed важи за tip-а)
+Последна ЛОГИЧЕСКА промяна: 94306295fee559c072ad7fcf9082e750009696ce
+                           (одит v27 фиксове §6; commit-ите над него — доклад —
+                            НЕ променят логика; 1801 passed важи за tip-а)
 Base main SHA            : 44302a9d3a5e7a34575b4a38d71d22222f25d0dc
 Working tree             : clean
-Archive SHA-256 @827efb8 : 02447726c7f0bba0f1d38af6a734c95d6ebde6fad9f07a55c648b2a845b9bd72
-                           (git archive --format=tar 827efb8 | sha256sum)
+Archive SHA-256 @9430629 : a289f07b6e3b0d2b7aa668b3b4bbc82c4f6cfeae3d26c87f4aadb2a969ef9825
+                           (git archive --format=tar 9430629 | sha256sum)
 ```
 
 **Важно за обхвата:** PR #1 е **merge-нат в main**; PR #2 (този HEAD) е **отворен,
@@ -23,7 +23,7 @@ Archive SHA-256 @827efb8 : 02447726c7f0bba0f1d38af6a734c95d6ebde6fad9f07a55c648b
 проверка ползвайте горния HEAD (или чист ZIP от него). Твърденията по-долу,
 маркирани „(PR #2)", НЕ са в main.
 
-**Статус на тестовете:** **1795 unit/integration теста преминават, 1 пропуснат
+**Статус на тестовете:** **1801 unit/integration теста преминават, 1 пропуснат
 (skip); директорията `tests/e2e` е ИЗКЛЮЧЕНА изцяло → 0 E2E теста изпълнени.**
 (виж раздел 9 за какво това НЕ доказва.)
 
@@ -48,7 +48,7 @@ Archive SHA-256 @827efb8 : 02447726c7f0bba0f1d38af6a734c95d6ebde6fad9f07a55c648b
 | BOQ coverage / provenance | `3335079` | да |
 | int-ID crash fix | `16c898c` | да |
 | CI actions v7 | `d99c1a3` | да |
-| **material enum + streaming + този доклад** | `1e9763e`, `dd11109` | **НЕ (PR #2)** |
+| **material enum + streaming + одит v27 фиксове + доклад** | `1e9763e`…`9430629` | **НЕ (PR #2)** |
 
 ---
 
@@ -56,8 +56,19 @@ Archive SHA-256 @827efb8 : 02447726c7f0bba0f1d38af6a734c95d6ebde6fad9f07a55c648b
 
 `config/productivities.json` е единственият **нормативен** източник за
 детерминистично **ДОКАЗАНИТЕ** продължителности. AI-предложена стойност за
-задача без приложимо правило остава `NOT_PROVEN` и НЕ се допуска до експорт —
-т.е. файлът НЕ е единственият източник на *всички* стойности, а на доказаните.
+задача без приложимо правило остава `NOT_PROVEN` — файлът НЕ е източник на
+*всички* стойности, а на доказаните.
+
+**⚠️ Корекция на предишно надценяване (одит т.1):** NOT_PROVEN **не значи
+автоматично „не се експортира".** Реалното поведение по политика (`EXPORT_POLICY`,
+`_export_decision`):
+- **strict** — недоказани продължителности (и mismatch/uncovered) **блокират** експорта.
+- **provisional (ПО ПОДРАЗБИРАНЕ)** / **lenient** — одобрен+валиден график **Е
+  експортируем**, а недоказаните излизат като видими `export_blockers`
+  (предупреждения) + маркер „предварителен".
+Т.е. fail-closed важи безусловно за **невалиден** и **неодобрен** график (всички
+политики); за недоказани ДУРАЦИИ — само под strict. Тестовете изрично изискват
+provisional експорт да е разрешен.
 
 Всяка v0.5 норма носи структуриран произход в `_provenance_v0_5` (config):
 
@@ -121,8 +132,16 @@ Archive SHA-256 @827efb8 : 02447726c7f0bba0f1d38af6a734c95d6ebde6fad9f07a55c648b
 run** (за предпочитане Sonnet) и все още НЕ е направен (чака кредити). Настоящата
 таблица доказва, че детекцията+нормите работят, НЕ че конкретните 59 са станали 14.
 
-Скрипт: изважда `ecb63f3:src/duration_calculator.py` + config и пуска и двете
-версии върху `КСС.json` (не е в репото — клиентски данни).
+**Възпроизводимо от пакета (одит т.7):** реалният `КСС.json` е клиентски и не е
+в репото, но `tests/fixtures/synthetic_kss_rows.json` (генерична нотация, СЪЩИТЕ
+капани: Ф-диаметри, PP, „брой", кв.м) + `tools/kss_coverage_demo.py` дават
+проверимо покритие **13/16** доказани. Одиторът пуска:
+```
+python tools/kss_coverage_demo.py      # → 13/16 доказани, всички по очакване
+```
+За before: `git checkout ecb63f3 -- src/duration_calculator.py config/productivities.json`
+→ пусни пак → **0 доказани** (всички Ф-диаметри падат MISSING_DN) → върни с
+`git checkout HEAD -- ...`. Тоест 0→13 е независимо възпроизводимо от репото.
 
 ---
 
@@ -170,6 +189,22 @@ milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `Predeces
 опростен спрямо реалния (audit-референтен) подход. **НЕ е доказано:** отваряне в
 реален Microsoft Project (§10.4 остава частично).
 
+### 6г. Одит v27 — намерени от втория одит (7098b26), поправени
+
+| # | Находка (възпроизведена от одитора) | Фикс | Тест |
+|---|-------------------------------------|------|------|
+| т.2 **(КРИТИЧНО)** | `validate_schedule` отхвърляше ВАЛИДЕН график с int ID (A.id=1, B.deps=[1]) като „несъществуващо ID"; cycle-detection също счупен | нормализация `task_id`→str навсякъде (`_task_key`) | `test_validation_gate.py::test_valid_schedule_with_integer_ids_*` |
+| т.3 | MSPDI `OutlineNumber` при числов `parent_id` даваше „1" вместо „1.1" | нормализация `parent_id`→str | `test_..._survives_integer_parent_id` |
+| т.4 | security scanner: път с малки букви заобикаляше блокирането | `re.IGNORECASE` на `_PATH_RE` | `test_security_scan.py::test_machine_path_lowercase_*` |
+| т.5 | дробна дурация → `PT12.0H0M0S`, importer четеше 0 | цяло число часове (`int(round(...))`) | `test_fractional_duration_is_integer_hours` |
+| т.6 | milestone `Start=08:00`, `Finish=17:00` (непоследователно) | `Finish == Start` за milestone | `test_milestone_start_equals_finish` |
+
+**⚠️ Важно следствие от т.2:** валидаторът е давал **false-positive** „фантомни
+зависимости" за числови ID. Затова „гейтът отхвърли всяка част" в §5 частично се
+дължи на този бъг, НЕ само на слаб модел. След фикса частите с валидни числови
+зависимости вече не се отхвърлят фалшиво — §5 таблицата трябва да се пре-пусне
+със Sonnet (чака кредити), преди да се твърди „моделът дава счупени графи".
+
 ---
 
 ## 7. Structured output + streaming (PR #2 — НЕ в main)
@@ -193,7 +228,7 @@ milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `Predeces
 
 ## 8. Тестове — какво доказват и какво НЕ
 
-- Изпълнено: `pytest tests/ --ignore=tests/e2e` → **1795 passed, 1 skipped**.
+- Изпълнено: `pytest tests/ --ignore=tests/e2e` → **1801 passed, 1 skipped**.
 - **0 E2E теста изпълнени** (`tests/e2e` изключена).
 - Следователно НЕ са доказани от този резултат: реалните provider SDK пътища,
   structured output срещу жив модел, streaming срещу жив модел, UI, MSPDI
@@ -224,8 +259,15 @@ milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `Predeces
 
 ## 10. Известни ограничения / остава да се направи (пълен списък)
 
+> Одит v27 (§6г) поправи 5 кодови находки (int-ID валидатор, MSPDI outline,
+> scanner lowercase, дробни дурации, milestone). Остатъкът по-долу е реален.
+
 1. Реален **Sonnet run** (чака Anthropic кредити) — worker пътят непроверен.
-2. **Before/after на самите 59** от AI-генериран график (§4 е детерминистичен проксѝ).
+   ⚠️ Заедно с §5: **пре-пусни таблицата** — int-ID false-positives (т.2) са
+   надували „счупените графи", затова текущата §5 НЕ е чисто доказателство за
+   слаб модел.
+2. **Before/after на самите 59** от AI-генериран график. Детерминистичният
+   проксѝ вече е независимо възпроизводим (§4: synthetic fixture, 0→13).
 3. **Live structured-output** и при двата provider пътя (Claude/DeepSeek).
 4. **MSPDI round-trip** — структурата е валидирана детерминистично (§6в:
    DurationFormat=5, дати заковани, зависимости запазени след §6б); ОСТАВА
@@ -245,12 +287,12 @@ milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `Predeces
 ```bash
 # 0. Точна ревизия
 git rev-parse HEAD           # запишете SHA-то (branch tip)
-git rev-parse dd11109        # последна логическа промяна (кодът под одит)
+git rev-parse 9430629        # последна логическа промяна (кодът под одит)
 git status --short           # трябва: празно (clean)
 
 # 1. Всички unit теста (0 E2E)
 uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e
-#   Очаквано: 1795 passed, 1 skipped
+#   Очаквано: 1801 passed, 1 skipped
 
 # 2. Норм-стойности + структуриран произход
 python -c "import json;d=json.load(open('config/productivities.json',encoding='utf-8'));print(d['version']);import pprint;pprint.pprint(d['_provenance_v0_5'])"
@@ -273,6 +315,6 @@ git log --oneline 44302a9..HEAD    # PR #2 delta спрямо main
 детерминистичен before/after (0→14 от 24 КСС-дейности), структуриран произход на
 нормите, fail-closed артефакт и ясно разделяне unit↔E2E и HEAD↔история.
 Абсолютните твърдения („never breaks", „removes timeout risk", „bypass-proof")
-са смекчени. За пълна проверка е нужен чист audit ZIP от HEAD `dd11109` и
+са смекчени. За пълна проверка е нужен чист audit ZIP от HEAD `9430629` и
 изпълнение на остатъка от раздел 10 (Sonnet run, MSPDI round-trip, live
 structured output, E2E, history scan).
