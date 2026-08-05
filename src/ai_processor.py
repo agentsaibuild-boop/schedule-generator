@@ -363,7 +363,12 @@ class AIProcessor:
             ),
         }]
 
-        result = self.router.chat(messages, system_prompt)
+        # Анализът се отрязваше на default 4096 → моделът не виждаше всички КСС
+        # редове → под-покритие при генерацията (жив Sonnet тест, 2026-08).
+        # Конфигурируем таван; streaming се включва автоматично при голям изход.
+        result = self.router.chat(
+            messages, system_prompt,
+            max_tokens=int(os.getenv("ANALYSIS_MAX_TOKENS", "8192")))
 
         return {
             "status": "ok",
