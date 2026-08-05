@@ -9,13 +9,13 @@
 ```
 Audit target branch      : feat/structured-output-streaming   (PR #2)
 Branch tip (жив)         : прочетете с `git rev-parse HEAD` (докладът е върхът)
-Последна ЛОГИЧЕСКА промяна: 4c0205d983ed9289ce32ddd654683247f5815dc1
-                           (одит v28 фиксове §6д; commit-ите над него — доклад —
-                            НЕ променят логика; 1803 passed (Win) важи за tip-а)
+Последна ЛОГИЧЕСКА промяна: cc5b913eaf0ec07f12583be788fa8f0c625db696
+                           (Sonnet §5 re-run фиксове §6е; commit-ите над него —
+                            доклад — НЕ променят логика; 1803 passed (Win))
 Base main SHA            : 44302a9d3a5e7a34575b4a38d71d22222f25d0dc
 Working tree             : clean
-Archive SHA-256 @4c0205d : 28feeab5822cddb7292196551c5ddfad7c67cfaca95534b2b2fc4cc480354e41
-                           (git archive --format=tar 4c0205d | sha256sum)
+Archive SHA-256 @cc5b913 : ce9fa2fb4a3a6e1b03807201f66c11ff82e35d7281f53dc2baad1950afc42f54
+                           (git archive --format=tar cc5b913 | sha256sum)
 ```
 
 **Важно за обхвата:** PR #1 е **merge-нат в main**; PR #2 (този HEAD) е **отворен,
@@ -48,7 +48,7 @@ Archive SHA-256 @4c0205d : 28feeab5822cddb7292196551c5ddfad7c67cfaca95534b2b2fc4
 | BOQ coverage / provenance | `3335079` | да |
 | int-ID crash fix | `16c898c` | да |
 | CI actions v7 | `d99c1a3` | да |
-| **material enum + streaming + одит v27 фиксове + доклад** | `1e9763e`…`4c0205d` | **НЕ (PR #2)** |
+| **material enum + streaming + одит v27 фиксове + доклад** | `1e9763e`…`cc5b913` | **НЕ (PR #2)** |
 
 ---
 
@@ -132,9 +132,9 @@ AI-disclosure маркер (EU AI Act чл. 50), НЕ отделен „пред
 
 **⚠️ Разграничение:** горното е ДЕТЕРМИНИСТИЧНИЯТ слой върху КСС-редове.
 Първоначалните „59 недоказани" бяха от AI-**генериран** (разгънат) график —
-различна популация задачи. **Пълен before/after на самите 59 изисква нов AI
-run** (за предпочитане Sonnet) и все още НЕ е направен (чака кредити). Настоящата
-таблица доказва, че детекцията+нормите работят, НЕ че конкретните 59 са станали 14.
+различна популация задачи. Sonnet §5 re-run **е направен** (§6е, през OpenRouter),
+но чисто пълно покритие остава да се докара. Настоящата таблица доказва, че
+детекцията+нормите работят, НЕ че конкретните 59 са станали 14.
 
 **Възпроизводимо от пакета (одит т.7):** реалният `КСС.json` е клиентски и не е
 в репото, но `tests/fixtures/synthetic_kss_rows.json` (генерична нотация, СЪЩИТЕ
@@ -228,6 +228,39 @@ milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `Predeces
 синхронизиран с реалната export политика; „предварителен" маркер уточнен (не е
 във файловете); бройки 1801→1803.
 
+### 6е. §5 RE-RUN със Sonnet 5 (през OpenRouter, 2026-08) — направен
+
+Пуснат реалният търг с **Claude Sonnet 5 през OpenRouter** (Anthropic директните
+кредити са изчерпани; OpenRouter има). Разход: **~$2.30**.
+
+**Резултати:**
+- ✅ **НЯМА „несъществуващо ID" false-positives** при валидни числови/структурни
+  зависимости → **потвърждава т.2**: старите „фантомни зависимости" в §5-таблицата
+  бяха бъг на валидатора, НЕ на модела.
+- 🐛→✅ **КРИТИЧЕН production бъг, намерен от този тест:** `response_schema`
+  (json_schema от PR #2) при строги provider-и (Anthropic/OpenRouter) **ИЗТРИВАШЕ
+  всички недекларирани полета** — Sonnet върна `{"tasks":[{"material":"PE"}]}`
+  (id/name/duration изтрити) → генерацията се чупеше. Пълната schema после удари
+  union-type лимита (>16). **Решение:** `{"type":"json_object"}` режим (валиден
+  JSON без ограничаване на полета, всички provider-и); материалният enum остава в
+  промпта. Commit `912bbf9`.
+- 🐛→✅ **OpenRouter worker пътят:** твърд таван 8192, без streaming → truncation.
+  Добавени streaming (`_openai_request`) + `GEN_MAX_TOKENS`/`ANALYSIS_MAX_TOKENS`
+  (commits `912bbf9`, `cc5b913`).
+- ⚠️ **Ново реално наблюдение (НЕ false-positive):** Sonnet понякога пише
+  зависимостите като `"V03 (SS+30)"` — вгражда тип/лаг В ID-то. Валидаторът
+  правилно ги отхвърля (няма задача с това ID) → **коректно fail-closed на реална
+  грешка на модела**. Подобрение (парсване на този формат / промпт) = бъдеща работа.
+
+**Извод:** дефинитивният §5 re-run **засилва доверието в гейта** (реалните
+рехекции са реални, false-positive-ите ги няма) и разкри критичен бъг, който щеше
+да счупи всеки силен provider. Пълно чисто покритие остава да се докара (анализ/
+генерация тавани + дефолт-конфиг за Sonnet).
+
+**За постоянна употреба (`.env`):** `DEEPSEEK_MODEL=anthropic/claude-sonnet-5`
++ `GEN_MAX_TOKENS=32000` + `MAX_ROWS_PER_PART=50` (или `deepseek/deepseek-v4-flash`
+за ~10× по-евтино).
+
 ---
 
 ## 7. Structured output + streaming (PR #2 — НЕ в main)
@@ -315,7 +348,7 @@ milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `Predeces
 ```bash
 # 0. Точна ревизия
 git rev-parse HEAD           # запишете SHA-то (branch tip)
-git rev-parse 4c0205d        # последна логическа промяна (кодът под одит)
+git rev-parse cc5b913        # последна логическа промяна (кодът под одит)
 git status --short           # трябва: празно (clean)
 
 # 1. Всички unit теста (0 E2E)
@@ -344,6 +377,6 @@ git log --oneline 44302a9..HEAD    # PR #2 delta спрямо main
 synthetic fixture; реалният КСС даде 0→14 от 24, но иска Git история), структуриран произход на
 нормите, fail-closed артефакт и ясно разделяне unit↔E2E и HEAD↔история.
 Абсолютните твърдения („never breaks", „removes timeout risk", „bypass-proof")
-са смекчени. За пълна проверка е нужен чист audit ZIP от HEAD `4c0205d` и
+са смекчени. За пълна проверка е нужен чист audit ZIP от HEAD `cc5b913` и
 изпълнение на остатъка от раздел 10 (Sonnet run, MSPDI round-trip, live
 structured output, E2E, history scan).
