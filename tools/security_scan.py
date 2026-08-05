@@ -45,8 +45,13 @@ _KEY_RE = re.compile(
     r"sk-ant-api[0-9]|sk-or-v1-[A-Za-z0-9]{20}|sk-proj-[A-Za-z0-9_-]{20}"
     r"|sk-[a-f0-9]{32}|gsk_[A-Za-z0-9]{20}|AIza[A-Za-z0-9_-]{30}"
     r"|xoxb-[0-9]|ghp_[A-Za-z0-9]{20}")
+# IGNORECASE (одит 2026-08, т.4): без него същият машинен път, изписан изцяло
+# с малки букви, заобикаляше блокирането, докато формата с главни се лавеше.
+# Пътищата не са case-sensitive на Windows/macOS, затова сгъваме регистъра.
+# (Без литерален пример тук — иначе скенерът флагва собствения си коментар.)
 _PATH_RE = re.compile(
-    r"Users[/\\][^/\\]+[/\\](?:Desktop|Downloads)|AppData[/\\]Local[/\\]Temp")
+    r"Users[/\\][^/\\]+[/\\](?:Desktop|Downloads)|AppData[/\\]Local[/\\]Temp",
+    re.IGNORECASE)
 
 
 def _norm(text: str) -> str:

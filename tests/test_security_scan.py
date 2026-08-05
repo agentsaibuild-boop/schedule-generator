@@ -202,3 +202,14 @@ def test_staged_key_pattern_caught_from_index(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ss.subprocess, "run", fake_run)
     assert main(["security_scan.py", "--staged", dl]) == 2   # намерен ключ
+
+
+def test_machine_path_lowercase_is_also_blocked():
+    """Одит 2026-08 т.4: машинен път с малки букви заобикаляше блокирането;
+    сега IGNORECASE го лови.  Пътищата се сглобяват от парчета, за да НЕ стои
+    съвпадащ литерал в source-а (иначе скенерът флагва самия тест файл)."""
+    from tools.security_scan import _scan_value
+    u, d = "users", "desktop"
+    assert _scan_value(f"{u}/alice/{d}/plan.md", [])
+    assert _scan_value("app" + "data/local/temp/x", [])
+    assert not _scan_value("src/normal/file.py", [])

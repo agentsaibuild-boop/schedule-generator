@@ -97,3 +97,17 @@ def test_no_unit_based_false_coverage(tmp_path):
     cov = analyze_boq_coverage([laying_task], [cable])
     assert cov["covered"] == []                    # НЕ е фалшиво покрит
     assert cable.ref in cov["ambiguous"]           # чака човешки преглед
+
+
+def test_synthetic_kss_coverage_is_reproducible():
+    """Одит 2026-08 т.7: независимо възпроизводим before/after артефакт.
+
+    Синтетичният КСС (генерична нотация, без клиентски данни) трябва да дава
+    стабилно покритие — доказва, че детекцията+нормите работят на реалистична
+    българска нотация (Ф-диаметри, PP, 'брой', кв.м), проверимо от пакета."""
+    from tools.kss_coverage_demo import run
+    out = run()
+    assert out["proven"] == 13, out
+    assert out["total"] == 16
+    assert not out["mismatches"], out["mismatches"]
+    assert out["codes"]["CALCULATED"] == 13

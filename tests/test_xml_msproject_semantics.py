@@ -203,3 +203,40 @@ def test_dependencies_survive_integer_task_ids():
     assert len(links) == 2, "зависимостите трябва да оцелеят при int ID-та"
     puids = {l.findtext(f"{NS}PredecessorUID") for l in links}
     assert puids == {"1", "2"}
+
+
+# ===================================================================
+# Одит 2026-08: дробна продължителност, milestone Start=Finish, int parent
+# ===================================================================
+
+def _g(el, tag):
+    x = el.find(f"{NS}{tag}")
+    return x.text if x is not None else None
+
+
+def test_fractional_duration_is_integer_hours():
+    """duration=1.5 → 'PT12H0M0S' (не 'PT12.0H0M0S', което importer четеше 0)."""
+    xml = _xml([{"id": 1, "name": "半", "duration": 1.5, "start_day": 1,
+                 "dependencies": []}])
+    t = _tasks(xml)[-1]
+    assert _g(t, "Duration") == "PT12H0M0S"
+    assert ".0" not in _g(t, "Duration")
+
+
+def test_milestone_start_equals_finish():
+    """Milestone е точка → Start == Finish (одит т.6)."""
+    xml = _xml([{"id": 1, "name": "M", "duration": 0, "start_day": 5,
+                 "milestone": True, "dependencies": []}])
+    t = _tasks(xml)[-1]
+    assert _g(t, "Start") == _g(t, "Finish")
+
+
+def test_outline_hierarchy_survives_integer_parent_id():
+    """Числов parent_id → OutlineNumber '1.1' (не '1'), йерархията се пази (т.3)."""
+    xml = _xml([
+        {"id": 1, "name": "Родител", "duration": 10, "start_day": 1, "dependencies": []},
+        {"id": 2, "name": "Дете", "duration": 5, "start_day": 1, "parent_id": 1,
+         "dependencies": []},
+    ])
+    child = next(t for t in _tasks(xml) if _g(t, "Name") == "Дете")
+    assert _g(child, "OutlineNumber") == "1.1"

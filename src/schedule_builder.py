@@ -119,6 +119,19 @@ def dependency_ids(task: dict) -> list[str]:
     return ids
 
 
+def _task_key(task: dict) -> str:
+    """ID на задачата като СТРИНГ — за ключове и сравнения със зависимости.
+
+    `dependency_ids` връща низове, а `task['id']` може да е int (DeepSeek
+    генерира числови ID).  Без тази нормализация всяко търсене
+    `dep_id in task_by_id` / `new_end[dep_id]` се проваля и ВАЛИДЕН график
+    изглежда счупен — валидаторът рапортуваше „зависи от несъществуващо ID"
+    за реални предшественици (одит 2026-08, точка 2: числовите ID даваха
+    false-positive „фантомни зависимости").
+    """
+    return str(task.get("id", "")).strip()
+
+
 class ScheduleBuilder:
     """Builds and validates schedule data structures."""
 
@@ -199,7 +212,7 @@ class ScheduleBuilder:
         old_total = self._total_duration(updated)
 
         for task in updated:
-            tid = task.get("id", "?")
+            tid = _task_key(task) or "?"
             name = task.get("name", "?")
 
             try:
@@ -336,7 +349,7 @@ class ScheduleBuilder:
             return {"schedule": [], "warnings": [], "shifted": []}
 
         updated = copy.deepcopy(schedule)
-        task_by_id: dict[str, dict] = {t.get("id", ""): t for t in updated}
+        task_by_id: dict[str, dict] = {_task_key(t): t for t in updated}
 
         cycle = self._detect_cycle(updated, task_by_id)
         if cycle:
@@ -352,7 +365,7 @@ class ScheduleBuilder:
         orig_start: dict[str, int] = {}
         orig_end: dict[str, int] = {}
         for task in updated:
-            tid = task.get("id", "")
+            tid = _task_key(task)
             start = self._as_int(task.get("start_day"), 1)
             orig_start[tid] = start
             end = task.get("end_day")
@@ -378,7 +391,7 @@ class ScheduleBuilder:
         # находка (#2), не се пипа тук.
         edges: dict[tuple[str, str], tuple[str, int]] = {}
         for task in updated:
-            tid = task.get("id", "")
+            tid = _task_key(task)
             for link in dependency_links(task):
                 dep_id = link.predecessor_id
                 if dep_id not in orig_end:
@@ -467,11 +480,11 @@ class ScheduleBuilder:
         schedule: list[dict], task_by_id: dict[str, dict]
     ) -> list[str] | None:
         """Kahn topological sort over dependencies. None if not sortable."""
-        indegree: dict[str, int] = {t.get("id", ""): 0 for t in schedule}
+        indegree: dict[str, int] = {_task_key(t): 0 for t in schedule}
         successors: dict[str, list[str]] = defaultdict(list)
 
         for task in schedule:
-            tid = task.get("id", "")
+            tid = _task_key(task)
             for dep_id in dependency_ids(task):
                 if dep_id in indegree:
                     successors[dep_id].append(tid)
@@ -559,7 +572,7 @@ class ScheduleBuilder:
             if not task.get("name"):
                 errors.append(f"Задача #{i + 1} няма име.")
 
-            tid = task.get("id", "")
+            tid = _task_key(task)
             if tid in ids_seen:
                 errors.append(f"Дублирано ID: {tid}")
             ids_seen.add(tid)
@@ -627,7 +640,7 @@ class ScheduleBuilder:
 
         # --- Dependency existence ---
         for task in schedule:
-            tid = task.get("id", "")
+            tid = _task_key(task)
             for dep_id in dependency_ids(task):
                 if dep_id not in task_by_id:
                     errors.append(
@@ -663,7 +676,7 @@ class ScheduleBuilder:
         # повредени данни в различно инженерно решение.  Тук се хваща изрично:
         # повреденият вход прави графика невалиден, а не друг график.
         for task in schedule:
-            tid = task.get("id", "")
+            tid = _task_key(task)
             for dep in task.get("dependencies") or []:
                 if not isinstance(dep, dict):
                     continue
@@ -695,7 +708,7 @@ class ScheduleBuilder:
         # SS връзка (изкоп и полагане тръгват заедно — урок #15) се обявяваше
         # за грешка, а нарушения на SS/FF/SF минаваха незабелязано.
         for task in schedule:
-            tid = task.get("id", "")
+            tid = _task_key(task)
             start = self._as_int(task.get("start_day"), 0)
             end = self._task_end(task)
 
@@ -740,7 +753,7 @@ class ScheduleBuilder:
 
         # --- Sub-activity bounds ---
         for task in schedule:
-            tid = task.get("id", "")
+            tid = _task_key(task)
             parent_start = task.get("start_day", 0)
             parent_end = task.get("end_day")
             if parent_end is None:
@@ -793,7 +806,7 @@ class ScheduleBuilder:
         # ===============================================================
 
         for task in schedule:
-            tid = task.get("id", "")
+            tid = _task_key(task)
             name = task.get("name", "?")
             duration = self._as_int(task.get("duration"), 0)
 
@@ -832,7 +845,7 @@ class ScheduleBuilder:
             if e is None:
                 dur = task.get("duration", 0)
                 e = s + max(dur, 1) - 1
-            team_intervals[team].append((s, e, task.get("id", "?")))
+            team_intervals[team].append((s, e, _task_key(task) or "?"))
 
         for team, intervals in team_intervals.items():
             intervals.sort()
@@ -858,7 +871,7 @@ class ScheduleBuilder:
 
         # --- Large gap between predecessor and successor ---
         for task in schedule:
-            tid = task.get("id", "")
+            tid = _task_key(task)
             start = task.get("start_day", 0)
             for dep_id in dependency_ids(task):
                 pred = task_by_id.get(dep_id)
@@ -945,7 +958,7 @@ class ScheduleBuilder:
         # валиден над него.  Итеративна реализация с явен стек няма това
         # ограничение и позволява fail-closed при голям график.
         WHITE, GRAY, BLACK = 0, 1, 2
-        color: dict[str, int] = {t.get("id", ""): WHITE for t in schedule}
+        color: dict[str, int] = {_task_key(t): WHITE for t in schedule}
         parent: dict[str, str | None] = {}
 
         def _cycle_path(start: str, back_to: str) -> list[str]:
@@ -1027,9 +1040,9 @@ class ScheduleBuilder:
         # Build lookup
         task_by_id: dict[str, dict] = {}
         for task in updated:
-            task_by_id[task.get("id", "")] = task
+            task_by_id[_task_key(task)] = task
 
-        target = task_by_id.get(task_id)
+        target = task_by_id.get(str(task_id).strip() if task_id is not None else "")
         if target is None:
             return {
                 "schedule": schedule,
@@ -1115,7 +1128,7 @@ class ScheduleBuilder:
         # Build reverse dependency map: task_id → list of successors
         successors: dict[str, list[str]] = defaultdict(list)
         for task in schedule:
-            tid = task.get("id", "")
+            tid = _task_key(task)
             for dep_id in dependency_ids(task):
                 successors[dep_id].append(tid)
 
@@ -1249,7 +1262,7 @@ class ScheduleBuilder:
         """Expand allowed_ids to include all transitive dependents (cascade successors)."""
         successors: dict[str, list[str]] = defaultdict(list)
         for task in schedule:
-            tid = task.get("id", "")
+            tid = _task_key(task)
             for dep_id in dependency_ids(task):
                 successors[dep_id].append(tid)
 

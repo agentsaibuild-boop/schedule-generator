@@ -310,3 +310,31 @@ def test_restore_is_a_noop_when_correction_returned_nothing():
     updated, report = processor._restore_determinism_after_ai(original, "{}")
     assert report["applied"] is False
     assert updated is original
+
+
+# ===================================================================
+# int-ID валидатор (одит 2026-08, т.2) — валиден график НЕ бива да пада
+# ===================================================================
+
+def test_valid_schedule_with_integer_ids_is_not_falsely_rejected():
+    """Регресия: A.id=1, B.id=2, B.deps=[1] се отхвърляше с 'несъществуващо
+    ID', защото task_by_id беше с int ключ, а dependency_ids връща str.
+    Това правеше реални предшественици да изглеждат фантомни."""
+    from src.schedule_builder import ScheduleBuilder
+    schedule = [
+        {"id": 1, "name": "A", "duration": 5, "start_day": 1, "dependencies": []},
+        {"id": 2, "name": "B", "duration": 5, "start_day": 6, "dependencies": [1]},
+    ]
+    result = ScheduleBuilder().validate_schedule(schedule)
+    assert not any("несъществуващо" in e for e in result["errors"]), result["errors"]
+
+
+def test_circular_dependency_with_integer_ids_is_caught():
+    """Цикъл при числови ID трябва да се хване (иначе fail-open)."""
+    from src.schedule_builder import ScheduleBuilder
+    schedule = [
+        {"id": 1, "name": "A", "duration": 5, "start_day": 1, "dependencies": [2]},
+        {"id": 2, "name": "B", "duration": 5, "start_day": 6, "dependencies": [1]},
+    ]
+    result = ScheduleBuilder().validate_schedule(schedule)
+    assert any("ръгова завис" in e or "цикъл" in e.lower() for e in result["errors"]), result["errors"]

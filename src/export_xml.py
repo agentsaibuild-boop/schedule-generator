@@ -330,8 +330,12 @@ def _build_tasks(
         outline = _get_outline_level(task)
         ET.SubElement(task_elem, "OutlineLevel").text = str(outline)
 
-        # OutlineNumber (e.g. "1", "1.1", "1.1.2") — required for WBS hierarchy in MS Project
-        parent_id = task.get("parent_id")
+        # OutlineNumber (e.g. "1", "1.1", "1.1.2") — required for WBS hierarchy in MS Project.
+        # parent_id се нормализира към str: _outline_nums е с str ключове
+        # (task_id), а числов parent_id (DeepSeek) не съвпадаше → OutlineNumber
+        # ставаше "1" вместо "1.1" и йерархията се разваляше (одит 2026-08, т.3).
+        _raw_parent = task.get("parent_id")
+        parent_id = str(_raw_parent).strip() if _raw_parent is not None and str(_raw_parent).strip() else ""
         parent_num = _outline_nums.get(parent_id, "") if parent_id else ""
         counter_key = (outline, parent_id or "")
         _outline_counters[counter_key] = _outline_counters.get(counter_key, 0) + 1
@@ -355,16 +359,23 @@ def _build_tasks(
         task_start = _working_day_to_date(start_dt, start_day, calendar_type)
         task_finish = _working_day_to_date(start_dt, end_day, calendar_type)
 
+        is_milestone = duration == 0 or bool(task.get("milestone") or task.get("is_milestone"))
+
         start_str = task_start.strftime("%Y-%m-%dT08:00:00")
-        finish_str = task_finish.strftime("%Y-%m-%dT17:00:00")
+        # Milestone е ТОЧКА във времето → Finish == Start (същият timestamp).
+        # Досега milestone получаваше Start 08:00 / Finish 17:00, което е
+        # вътрешно противоречиво за нулева продължителност (одит 2026-08, т.6).
+        if is_milestone:
+            finish_str = start_str
+        else:
+            finish_str = task_finish.strftime("%Y-%m-%dT17:00:00")
         ET.SubElement(task_elem, "Start").text = start_str
         ET.SubElement(task_elem, "Finish").text = finish_str
 
-        # Duration: days × 8 hours.  Milestone-ът е ТОЧКА във времето и
-        # трябва да е PT0H0M0S — досега получаваше 8 часа и едновременно
-        # <Milestone>1</Milestone>, което е вътрешно противоречиво (одит).
-        is_milestone = duration == 0
-        hours = 0 if is_milestone else max(duration, 1) * 8
+        # Duration: дни × 8 часа, ЦЯЛО ЧИСЛО часове.  Дробни дни чупеха XML:
+        # duration=1.5 → 'PT12.0H0M0S' → importer-ът я четеше като 0 (одит
+        # 2026-08, т.5).  Закръгляме до цял час.
+        hours = 0 if is_milestone else int(round(max(duration, 1) * 8))
         ET.SubElement(task_elem, "Duration").text = f"PT{hours}H0M0S"
         ET.SubElement(task_elem, "DurationFormat").text = "5"  # days
 
