@@ -395,6 +395,42 @@ class AIRouter:
             "error": True,
         }
 
+    def _openai_request(self, client: Any, kwargs: dict, max_tokens: int):
+        """OpenAI-съвместима заявка — STREAMING при голям изход.
+
+        При max_tokens ≥ _STREAM_MIN_TOKENS non-streaming рискува HTTP timeout за
+        дълъг генериращ отговор (наблюдавано със Sonnet през OpenRouter, 2026-08:
+        пълен график надхвърля 8192 и 120с таван).  Стриймингът събира отговора на
+        части и връща (content, tokens_in, tokens_out, finish_reason).
+        """
+        if max_tokens >= _STREAM_MIN_TOKENS:
+            kw = {**kwargs, "stream": True,
+                  "stream_options": {"include_usage": True},
+                  "timeout": max(_API_TIMEOUT_SECONDS, 600)}
+            parts: list[str] = []
+            tin = tout = 0
+            finish = None
+            for chunk in client.chat.completions.create(**kw):
+                if getattr(chunk, "choices", None):
+                    ch0 = chunk.choices[0]
+                    delta = getattr(ch0, "delta", None)
+                    if delta and getattr(delta, "content", None):
+                        parts.append(delta.content)
+                    if getattr(ch0, "finish_reason", None):
+                        finish = ch0.finish_reason
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                    tin = usage.prompt_tokens or tin
+                    tout = usage.completion_tokens or tout
+            return "".join(parts), tin, tout, finish
+        # Малък изход — обикновена (не-streaming) заявка.
+        resp = client.chat.completions.create(**kwargs, timeout=_API_TIMEOUT_SECONDS)
+        ch = resp.choices[0]
+        u = resp.usage
+        return (ch.message.content or "",
+                u.prompt_tokens if u else 0, u.completion_tokens if u else 0,
+                getattr(ch, "finish_reason", None))
+
     def _chat_deepseek(self, messages: list[dict], system_prompt: str,
                        max_tokens: int = _MAX_TOKENS_CHAT,
                        response_schema: dict | None = None) -> dict:
@@ -408,20 +444,23 @@ class AIRouter:
         full_messages = [{"role": "system", "content": system_prompt}] + messages
         base_kwargs = dict(
             model=MODEL_WORKER, messages=full_messages,
-            max_tokens=max_tokens, temperature=0.3, timeout=_API_TIMEOUT_SECONDS,
+            max_tokens=max_tokens, temperature=0.3,
         )
+        # JSON MODE вместо строга json_schema (жив тест Sonnet/OpenRouter,
+        # 2026-08): строгата schema или ИЗТРИВАШЕ недекларирани полета, или се
+        # отхвърляше (union-type лимит на Anthropic).  `{"type":"json_object"}`
+        # гарантира ВАЛИДЕН JSON без да ограничава полетата и работи при всички
+        # provider-и.  Материалният enum се налага през промпта.
         attempts: list[dict] = []
         if response_schema is not None:
-            attempts.append({**base_kwargs, "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "schedule", "schema": response_schema,
-                                "strict": False}}})
+            attempts.append({**base_kwargs,
+                             "response_format": {"type": "json_object"}})
         attempts.append(base_kwargs)
 
-        response = None
+        result = None
         for i, kw in enumerate(attempts):
             try:
-                response = client.chat.completions.create(**kw)
+                result = self._openai_request(client, kw, max_tokens)
                 break
             except Exception as exc:
                 if i < len(attempts) - 1:
@@ -429,26 +468,18 @@ class AIRouter:
                         "DeepSeek structured output отказан (%s) → без schema.", exc)
                 else:
                     raise
-
-        choice = response.choices[0]
-        content = choice.message.content or ""
-        usage = response.usage
-        tokens_in = usage.prompt_tokens if usage else 0
-        tokens_out = usage.completion_tokens if usage else 0
+        content, tokens_in, tokens_out, finish_reason = result
 
         self._log_usage(MODEL_WORKER, tokens_in, tokens_out, "chat")
 
         # Отрязан отговор досега минаваше тихо: JSON-ът излиза невалиден и
         # проблемът се появяваше чак при парсването, като „моделът се обърка".
-        # Измерено 2026-07-22: reasoning модел изразходва 4990 знака за
-        # разсъждение преди JSON-а и опира в тавана от 4096 токена.
-        truncated = getattr(choice, "finish_reason", None) == "length"
+        truncated = finish_reason == "length"
         if truncated:
             logger.warning(
                 "Отговорът на %s е ОТРЯЗАН (finish_reason=length, %d изходни "
-                "токена при таван %d). Ако това е reasoning модел, вдигни "
-                "_MAX_TOKENS_CHAT — разсъждението изяжда бюджета преди JSON-а.",
-                MODEL_WORKER, tokens_out, _MAX_TOKENS_CHAT,
+                "токена при таван %d). Вдигни WORKER_MAX_TOKENS/GEN_MAX_TOKENS.",
+                MODEL_WORKER, tokens_out, max_tokens,
             )
 
         return {
@@ -489,32 +520,19 @@ class AIRouter:
         моделът пишеше PE).  BEST-EFFORT: ако SDK/моделът не приема structured
         output → повтаряме заявката БЕЗ schema (никога не чупим генерацията).
         """
+        # `response_schema` СЪЗНАТЕЛНО не се подава като structured output тук
+        # (жив тест 2026-08): строгата schema или трие полета, или удря union-лимит
+        # на провайдъра.  Материалният enum се налага през промпта, а валидният
+        # JSON — чрез инструкция.  Streaming при голям max_tokens (виж по-долу).
+        _ = response_schema  # (запазено за съвместимост на подписа)
         client = self._get_anthropic()
-        base_kwargs = dict(
+        kwargs = dict(
             model=model, max_tokens=max_tokens,
             thinking={"type": "disabled"},
             system=system_prompt, messages=messages,
             timeout=max(_API_TIMEOUT_SECONDS, 300),
         )
-        # Варианти по ред на предпочитание: първо със structured output, после без.
-        attempts: list[dict] = []
-        if response_schema is not None:
-            attempts.append({**base_kwargs, "output_config": {
-                "format": {"type": "json_schema", "schema": response_schema}}})
-        attempts.append(base_kwargs)
-
-        response = None
-        for i, kw in enumerate(attempts):
-            try:
-                response = self._anthropic_worker_request(client, kw, max_tokens)
-                break
-            except Exception as exc:
-                if i < len(attempts) - 1:
-                    logger.warning(
-                        "Claude worker structured output отказан (%s) → "
-                        "повтарям без schema.", exc)
-                else:
-                    raise
+        response = self._anthropic_worker_request(client, kwargs, max_tokens)
         content = next((getattr(b, "text", "") for b in (response.content or [])
                         if getattr(b, "type", None) == "text"), "")
         tokens_in = response.usage.input_tokens

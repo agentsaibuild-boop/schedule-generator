@@ -29,17 +29,42 @@ logger = logging.getLogger(__name__)
 
 
 def build_schedule_response_schema() -> dict:
-    """JSON schema за изхода на worker-а със `material` като enum (2026-08).
+    """ПЪЛНА JSON schema за изхода на worker-а, с `material` като enum (2026-08).
 
-    Ограничава САМО материала до позволените стойности (SUPPORTED_MATERIALS +
-    празно/null за „неясен материал").  Останалата форма е нарочно свободна
-    (`additionalProperties` по подразбиране разрешено) — не искаме да чупим
-    структурата, само да спрем невалидни материали (напр. моделът да измисли
-    „HDPE" или да сложи „PE" там, където КСС казва PP).
-
-    Референтната цялост на графа (фантомни ID) НЕ се гарантира тук — това
-    остава работа на детерминистичния гейт (правилно разделение)."""
+    ⚠️ КРИТИЧНО (жив тест Sonnet/OpenRouter 2026-08): строгите provider-и
+    (Anthropic през OpenRouter) при structured output изхвърлят полетата, които
+    НЕ са декларирани в schema-та — `additionalProperties: true` не помага.
+    Предишната версия деклараше само `material` → Sonnet върна
+    `{"tasks":[{"material":"PE"}]}` (id/name/duration ИЗТРИТИ) → цялата генерация
+    се чупеше.  Затова тук декларираме ВСИЧКИ полета на задачата (лениентни
+    типове), а `material` носи enum-а.  Референтната цялост на графа остава на
+    детерминистичния гейт."""
     materials: list = list(SUPPORTED_MATERIALS) + ["", None]
+    num = {"type": ["number", "integer", "null"]}
+    s_or_n = {"type": ["string", "null"]}
+    id_t = {"type": ["string", "integer"]}
+    task_props = {
+        "id": id_t,
+        "name": {"type": "string"},
+        "type": s_or_n,
+        "duration": num,
+        "start_day": num,
+        "end_day": num,
+        "dependencies": {"type": "array"},
+        "dn": {"type": ["string", "integer", "null"]},
+        "material": {"enum": materials},
+        "method": s_or_n,
+        "length_m": num,
+        "quantity": num,
+        "team": s_or_n,
+        "unit": s_or_n,
+        "alignment_id": s_or_n,
+        "start_chainage": num,
+        "end_chainage": num,
+        "crew_id": s_or_n,
+        "source_ref": s_or_n,
+        "milestone": {"type": ["boolean", "null"]},
+    }
     return {
         "type": "object",
         "properties": {
@@ -47,13 +72,17 @@ def build_schedule_response_schema() -> dict:
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "properties": {
-                        "material": {"enum": materials},
-                    },
+                    "properties": task_props,
+                    "required": ["id", "name", "duration", "start_day"],
+                    "additionalProperties": True,
                 },
             },
+            "total_duration": num,
+            "teams": {"type": "array"},
+            "notes": s_or_n,
         },
         "required": ["tasks"],
+        "additionalProperties": True,
     }
 
 
@@ -650,7 +679,8 @@ class AIProcessor:
         # (8192, колкото и корекцията).  При много голям проект (>1000 задачи)
         # truncation детекторът пак ще подскаже разделяне на етапи.
         gen_result = self.router.chat(
-            messages, system_prompt, max_tokens=8192,
+            messages, system_prompt,
+            max_tokens=int(os.getenv("GEN_MAX_TOKENS", "8192")),
             response_schema=build_schedule_response_schema())
 
         if gen_result.get("error"):

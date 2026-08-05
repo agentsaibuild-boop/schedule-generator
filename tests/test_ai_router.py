@@ -461,15 +461,15 @@ def test_worker_claude_creates_for_small_max_tokens(monkeypatch):
     assert client.messages.create_calls and not client.messages.stream_calls
 
 
-def test_worker_claude_falls_back_when_schema_rejected(monkeypatch):
-    """Structured output отказан → повтаря БЕЗ schema, не гърми генерацията."""
+def test_worker_claude_does_not_send_structured_output(monkeypatch):
+    """Жив тест 2026-08: строгата schema триеше полета / удряше union-лимит.
+    Затова Claude worker-ът НЕ праща output_config — само 1 заявка, без него
+    (валидният JSON и материалният enum се налагат през промпта)."""
     r, client = _worker_router(monkeypatch)
     schema = {"type": "object", "properties": {"tasks": {"type": "array"}}}
     out = r._chat_worker_claude([{"role": "user", "content": "hi"}], "sys",
                                 model="claude-sonnet-5", max_tokens=4000,
                                 response_schema=schema)
-    # Първи опит с output_config гръмна, втори (без) успя.
-    assert len(client.messages.create_calls) == 2
-    assert "output_config" in client.messages.create_calls[0]
-    assert "output_config" not in client.messages.create_calls[1]
+    assert len(client.messages.create_calls) == 1
+    assert "output_config" not in client.messages.create_calls[0]
     assert out["content"] == '{"tasks": []}'
