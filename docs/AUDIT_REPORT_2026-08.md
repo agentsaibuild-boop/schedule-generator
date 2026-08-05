@@ -9,13 +9,13 @@
 ```
 Audit target branch      : feat/structured-output-streaming   (PR #2)
 Branch tip (жив)         : прочетете с `git rev-parse HEAD` (докладът е върхът)
-Последна ЛОГИЧЕСКА промяна: dd11109f566398a917120ef946615241c806f1e6
-                           (commit-ите над него — доклад + _provenance metadata —
-                            НЕ променят логика/тестове; 1794 passed важи и за двете)
+Последна ЛОГИЧЕСКА промяна: 827efb889421044f88ac300d37636fdf96641ec9
+                           (MSPDI dependency int-ID fix, §6; commit-ите над него —
+                            доклад — НЕ променят логика; 1795 passed важи за tip-а)
 Base main SHA            : 44302a9d3a5e7a34575b4a38d71d22222f25d0dc
 Working tree             : clean
-Archive SHA-256 @dd11109 : 4a165e95216ef14a245e1aeda5b385e0fcca3dfde1e8dd511bb513c4535a953d
-                           (git archive --format=tar dd11109 | sha256sum)
+Archive SHA-256 @827efb8 : 02447726c7f0bba0f1d38af6a734c95d6ebde6fad9f07a55c648b2a845b9bd72
+                           (git archive --format=tar 827efb8 | sha256sum)
 ```
 
 **Важно за обхвата:** PR #1 е **merge-нат в main**; PR #2 (този HEAD) е **отворен,
@@ -23,7 +23,7 @@ Archive SHA-256 @dd11109 : 4a165e95216ef14a245e1aeda5b385e0fcca3dfde1e8dd511bb51
 проверка ползвайте горния HEAD (или чист ZIP от него). Твърденията по-долу,
 маркирани „(PR #2)", НЕ са в main.
 
-**Статус на тестовете:** **1794 unit/integration теста преминават, 1 пропуснат
+**Статус на тестовете:** **1795 unit/integration теста преминават, 1 пропуснат
 (skip); директорията `tests/e2e` е ИЗКЛЮЧЕНА изцяло → 0 E2E теста изпълнени.**
 (виж раздел 9 за какво това НЕ доказва.)
 
@@ -147,11 +147,28 @@ run** (за предпочитане Sonnet) и все още НЕ е напра
 
 ---
 
-## 6. Bug fix (намерен от реалния тест)
+## 6. Bug fixes + MSPDI структурна валидация (намерени от тестване)
 
-`src/schedule_builder.py` — `validate_schedule` хвърляше `TypeError` при
-спатиален екип-конфликт, когато ID-тата са `int`. Поправено + регресионен тест
+**6а. int-ID crash** (`src/schedule_builder.py`) — `validate_schedule` хвърляше
+`TypeError` при спатиален екип-конфликт, когато ID-тата са `int`. Поправено +
 `tests/test_spatial.py::test_team_overlap_warning_survives_integer_task_ids`.
+
+**6б. MSPDI зависимости изпускани при int ID** (`src/export_xml.py`) —
+структурната валидация на експорта (одит §10.4) разкри втори int/string бъг:
+`uid_map` се пълнеше със суровия `task['id']` (int при DeepSeek), а търсенето
+беше `str(dep)` → миссмач → **зависимостите тихо изчезваха от MS Project XML**
+(графикът губеше логиката си). Поправено (нормализация към `str()` от двете
+страни) + `tests/test_xml_msproject_semantics.py::test_dependencies_survive_integer_task_ids`.
+
+**6в. MSPDI структурни гаранции (потвърдени детерминистично, без реален MS
+Project):** експортът на валиден график дава: `DurationFormat=5` (дни);
+`ConstraintType=2` (Must Start On) + `ConstraintDate` = сметнатата дата → **датите
+на детерминистичния гейт се ЗАКОВАВАТ** и MS Project не ги преизчислява;
+milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `PredecessorLink`.
+Бележка: кодът ползва `Manual=0` + `ConstraintType=2` (режим 'pinned'), НЕ
+`Manual=1` както казва CLAUDE.md — двата подхода заковават датите; CLAUDE.md е
+опростен спрямо реалния (audit-референтен) подход. **НЕ е доказано:** отваряне в
+реален Microsoft Project (§10.4 остава частично).
 
 ---
 
@@ -176,7 +193,7 @@ run** (за предпочитане Sonnet) и все още НЕ е напра
 
 ## 8. Тестове — какво доказват и какво НЕ
 
-- Изпълнено: `pytest tests/ --ignore=tests/e2e` → **1794 passed, 1 skipped**.
+- Изпълнено: `pytest tests/ --ignore=tests/e2e` → **1795 passed, 1 skipped**.
 - **0 E2E теста изпълнени** (`tests/e2e` изключена).
 - Следователно НЕ са доказани от този резултат: реалните provider SDK пътища,
   structured output срещу жив модел, streaming срещу жив модел, UI, MSPDI
@@ -210,7 +227,9 @@ run** (за предпочитане Sonnet) и все още НЕ е напра
 1. Реален **Sonnet run** (чака Anthropic кредити) — worker пътят непроверен.
 2. **Before/after на самите 59** от AI-генериран график (§4 е детерминистичен проксѝ).
 3. **Live structured-output** и при двата provider пътя (Claude/DeepSeek).
-4. **MSPDI round-trip** през Microsoft Project (експорт → отваряне → проверка).
+4. **MSPDI round-trip** — структурата е валидирана детерминистично (§6в:
+   DurationFormat=5, дати заковани, зависимости запазени след §6б); ОСТАВА
+   отваряне в реален Microsoft Project (експорт → отваряне → визуална проверка).
 5. **E2E / UI** прогон (0 изпълнени).
 6. **История на Git** за клиентски данни (§9) — history rewrite, ако репото се споделя.
 7. **Лабораторно потвърждение** на полевите норми + обхват на операциите (§2).
@@ -231,7 +250,7 @@ git status --short           # трябва: празно (clean)
 
 # 1. Всички unit теста (0 E2E)
 uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e
-#   Очаквано: 1794 passed, 1 skipped
+#   Очаквано: 1795 passed, 1 skipped
 
 # 2. Норм-стойности + структуриран произход
 python -c "import json;d=json.load(open('config/productivities.json',encoding='utf-8'));print(d['version']);import pprint;pprint.pprint(d['_provenance_v0_5'])"
