@@ -214,13 +214,31 @@ def _g(el, tag):
     return x.text if x is not None else None
 
 
-def test_fractional_duration_is_integer_hours():
-    """duration=1.5 → 'PT12H0M0S' (не 'PT12.0H0M0S', което importer четеше 0)."""
+def test_fractional_duration_ceils_to_whole_days_consistently():
+    """Договор (одит v28 т.1): дробна дурация → цели работни дни.  1.5д → 2д:
+    Duration=PT16H и Finish обхваща 2 дни → Start/Finish/Duration съвпадат
+    (старият PT12.0H даваше 8ч span vs 12ч Duration, round-trip 1.5→2)."""
     xml = _xml([{"id": 1, "name": "半", "duration": 1.5, "start_day": 1,
                  "dependencies": []}])
     t = _tasks(xml)[-1]
-    assert _g(t, "Duration") == "PT12H0M0S"
+    assert _g(t, "Duration") == "PT16H0M0S"
     assert ".0" not in _g(t, "Duration")
+    # Start ден 1, Finish ден 2 → 2 работни дни, консистентно с PT16H.
+    assert _g(t, "Start")[:10] != _g(t, "Finish")[:10]
+
+
+def test_outline_hierarchy_is_order_independent():
+    """Дете ПРЕДИ родител в списъка → йерархията пак е коректна (одит v28 т.2):
+    дете Level=2 Num=1.1, родител Level=1 Num=1, без дублирани номера."""
+    xml = _xml([
+        {"id": 2, "name": "Дете", "duration": 5, "start_day": 1, "parent_id": 1,
+         "dependencies": []},
+        {"id": 1, "name": "Родител", "duration": 10, "start_day": 1, "dependencies": []},
+    ])
+    ch = next(t for t in _tasks(xml) if _g(t, "Name") == "Дете")
+    par = next(t for t in _tasks(xml) if _g(t, "Name") == "Родител")
+    assert _g(ch, "OutlineLevel") == "2" and _g(ch, "OutlineNumber") == "1.1"
+    assert _g(par, "OutlineLevel") == "1" and _g(par, "OutlineNumber") == "1"
 
 
 def test_milestone_start_equals_finish():

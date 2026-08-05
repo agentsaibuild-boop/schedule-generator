@@ -23,7 +23,7 @@ CLI:
     python tools/security_scan.py --names-only <denylist> <str> [<str> ...]
         → сканира подадените НИЗОВЕ (pathname-и)
     python tools/security_scan.py --staged <denylist>
-        → сканира STAGED промените ДИРЕКТНО ОТ GIT INDEX (bypass-proof, одит v23):
+        → сканира STAGED промените ДИРЕКТНО ОТ GIT INDEX (чете от git индекса, одит v23):
           чете `git show :path`, не работното дърво, затова staged-но-после-изтрит
           от worktree файл ПАК се сканира.  Проверява и pathname, и съдържание.
 Изход: 0 = чисто; 2 = намерен термин; 3 = ОПЕРАЦИОННА грешка (липсващ/нечетим
@@ -40,7 +40,7 @@ from pathlib import Path
 OPERATIONAL_ERROR = 3   # одит v23: „не можах да прочета" ≠ „чисто"
 
 # Секрет-шаблони (одит v23: сканирани заедно с denylist-а в `--staged`, за да е
-# ЕДИН bypass-proof път).  Не са тайни — форматите са публични.
+# ЕДИН чете от git индекса път).  Не са тайни — форматите са публични.
 _KEY_RE = re.compile(
     r"sk-ant-api[0-9]|sk-or-v1-[A-Za-z0-9]{20}|sk-proj-[A-Za-z0-9_-]{20}"
     r"|sk-[a-f0-9]{32}|gsk_[A-Za-z0-9]{20}|AIza[A-Za-z0-9_-]{30}"
@@ -98,7 +98,7 @@ def scan_file(path: str | Path, terms: list[str]) -> list[str]:
 
 
 def scan_staged(terms: list[str]) -> tuple[list[tuple[str, str, str]], bool] | None:
-    """Сканирай STAGED промените ДИРЕКТНО ОТ GIT INDEX (bypass-proof, одит v23).
+    """Сканирай STAGED промените ДИРЕКТНО ОТ GIT INDEX (чете от git индекса, одит v23).
 
     Чете `git show :path` (staged blob), НЕ работното дърво — затова файл, който
     е `git add`-нат и после ИЗТРИТ от worktree, ПАК се сканира (staged версията

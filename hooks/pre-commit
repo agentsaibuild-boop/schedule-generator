@@ -38,7 +38,7 @@ for f in "${STAGED[@]}"; do
   esac
 done
 
-# 2) Ключове / машинни пътища / клиентски denylist — в ЕДИН bypass-proof път
+# 2) Ключове / машинни пътища / клиентски denylist — в ЕДИН чете от git индекса път
 #    (одит v23).  `security_scan.py --staged` чете STAGED blob-овете ДИРЕКТНО ОТ
 #    GIT INDEX (`git show :path`), НЕ работното дърво — затова staged-но-после-
 #    изтрит файл ПАК се сканира.  Grешка при четене на staged blob = rc 3

@@ -615,6 +615,17 @@ class ScheduleBuilder:
                         f"Задача '{task.get('name')}' ({tid}) има отрицателна "
                         f"продължителност ({duration})."
                     )
+                # Договор (одит 2026-08 v28, т.1): моделът работи с ЦЕЛИ работни
+                # дни.  Дробна дурация е неопределена (Start/Finish/Duration се
+                # разминаваха при XML round-trip) → предупреждение + при експорт
+                # се закръгля НАГОРЕ.
+                elif isinstance(duration, float) and duration != int(duration):
+                    import math as _m
+                    warnings.append(
+                        f"Задача '{task.get('name')}' ({tid}) има дробна "
+                        f"продължителност ({duration}) — моделът работи с цели "
+                        f"работни дни; при експорт се закръгля до {_m.ceil(duration)}."
+                    )
             elif duration is not None:
                 errors.append(
                     f"Задача '{task.get('name')}' ({tid}) има продължителност "

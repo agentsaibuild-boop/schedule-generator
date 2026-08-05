@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -310,9 +312,9 @@ def _build_tasks(
             uid_map[task_id] = uid_counter
         uid_counter += 1
 
-    # Outline number tracking: (level, parent_id) → current count
-    _outline_counters: dict[tuple, int] = {}
-    _outline_nums: dict[str, str] = {}  # task_id → "1.2.3"
+    # Order-INDEPENDENT WBS йерархия (одит v28): task_id → (level, "1.2.3").
+    # Смята се ПРЕДИ прохода, за да е коректна дори при child-преди-parent.
+    hierarchy = _compute_hierarchy(flat_tasks)
 
     # ------------------------------------------------------------------
     # ПРОХОД 2: изгради задачите и връзките с вече пълна карта на UID.
@@ -326,56 +328,38 @@ def _build_tasks(
         ET.SubElement(task_elem, "ID").text = str(uid_counter)
         ET.SubElement(task_elem, "Name").text = task.get("name", "")
 
-        # Outline level
-        outline = _get_outline_level(task)
+        # OutlineLevel + OutlineNumber от order-independent hierarchy pass
+        # (одит v28): нивото се извежда от дълбочината на parent-веригата
+        # (дете = 2, не 1), а номерът е коректен независимо от реда на задачите.
+        outline, outline_num = hierarchy.get(task_id, (1, str(uid_counter)))
         ET.SubElement(task_elem, "OutlineLevel").text = str(outline)
-
-        # OutlineNumber (e.g. "1", "1.1", "1.1.2") — required for WBS hierarchy in MS Project.
-        # parent_id се нормализира към str: _outline_nums е с str ключове
-        # (task_id), а числов parent_id (DeepSeek) не съвпадаше → OutlineNumber
-        # ставаше "1" вместо "1.1" и йерархията се разваляше (одит 2026-08, т.3).
-        _raw_parent = task.get("parent_id")
-        parent_id = str(_raw_parent).strip() if _raw_parent is not None and str(_raw_parent).strip() else ""
-        parent_num = _outline_nums.get(parent_id, "") if parent_id else ""
-        counter_key = (outline, parent_id or "")
-        _outline_counters[counter_key] = _outline_counters.get(counter_key, 0) + 1
-        outline_num = (
-            f"{parent_num}.{_outline_counters[counter_key]}" if parent_num
-            else str(_outline_counters[counter_key])
-        )
-        _outline_nums[task_id] = outline_num
         ET.SubElement(task_elem, "OutlineNumber").text = outline_num
 
-        # Dates
-        start_day = task.get("start_day", 1)
-        duration = task.get("duration", 0)
-        end_day = task.get("end_day", start_day + max(duration, 1) - 1)
+        # Dates + продължителност — ДОГОВОР: ЦЕЛИ работни дни (одит v28, т.1).
+        # Дробна дурация (1.5д) даваше Duration=12ч, но Start 08:00 / Finish
+        # 17:00 в ЕДИН ден = 8ч → вътрешно противоречие и round-trip 1.5→2.
+        # Затова закръгляме НАГОРЕ до цял ден и извеждаме end_day от него, за да
+        # съвпаднат Start/Finish/Duration.  `_duration_days` (по-долу) е чист
+        # инвариант, който валидаторът също проверява.
+        start_day = int(task.get("start_day", 1) or 1)
+        raw_duration = task.get("duration", 0) or 0
+        is_milestone = raw_duration == 0 or bool(task.get("milestone") or task.get("is_milestone"))
+        dur_days = 0 if is_milestone else max(1, math.ceil(raw_duration))
+        end_day = start_day if is_milestone else start_day + dur_days - 1
 
-        # Одит 2026-07-23: датите се смятаха с `timedelta(days=...)`, тоест
-        # КАЛЕНДАРНИ дни, докато продължителността се подава като РАБОТНИ
-        # часове.  При 5-дневен календар двете се разминават около уикендите
-        # и MS Project премества задачите при отваряне.  Индексите start_day
-        # и end_day са работни дни — превръщането трябва да прескача почивните.
+        # Одит 2026-07-23: индексите start_day/end_day са РАБОТНИ дни —
+        # превръщането прескача почивните, иначе MS Project мести задачите.
         task_start = _working_day_to_date(start_dt, start_day, calendar_type)
         task_finish = _working_day_to_date(start_dt, end_day, calendar_type)
 
-        is_milestone = duration == 0 or bool(task.get("milestone") or task.get("is_milestone"))
-
         start_str = task_start.strftime("%Y-%m-%dT08:00:00")
-        # Milestone е ТОЧКА във времето → Finish == Start (същият timestamp).
-        # Досега milestone получаваше Start 08:00 / Finish 17:00, което е
-        # вътрешно противоречиво за нулева продължителност (одит 2026-08, т.6).
-        if is_milestone:
-            finish_str = start_str
-        else:
-            finish_str = task_finish.strftime("%Y-%m-%dT17:00:00")
+        # Milestone е ТОЧКА → Finish == Start (одит т.6).
+        finish_str = start_str if is_milestone else task_finish.strftime("%Y-%m-%dT17:00:00")
         ET.SubElement(task_elem, "Start").text = start_str
         ET.SubElement(task_elem, "Finish").text = finish_str
 
-        # Duration: дни × 8 часа, ЦЯЛО ЧИСЛО часове.  Дробни дни чупеха XML:
-        # duration=1.5 → 'PT12.0H0M0S' → importer-ът я четеше като 0 (одит
-        # 2026-08, т.5).  Закръгляме до цял час.
-        hours = 0 if is_milestone else int(round(max(duration, 1) * 8))
+        # Duration = цели дни × 8 часа (цяло число → 'PT16H0M0S', не 'PT12.0H').
+        hours = dur_days * 8
         ET.SubElement(task_elem, "Duration").text = f"PT{hours}H0M0S"
         ET.SubElement(task_elem, "DurationFormat").text = "5"  # days
 
@@ -621,6 +605,65 @@ def _flatten_schedule(
                 _flatten_schedule(subs, _parent_id=task.get("id"), _depth=_depth + 1)
             )
 
+    return result
+
+
+def _sid(task: dict) -> str:
+    """ID на задачата като str (числовите ID на DeepSeek чупеха съвпаденията)."""
+    return str(task.get("id", "")).strip()
+
+
+def _compute_hierarchy(flat_tasks: list[dict]) -> dict[str, tuple[int, str]]:
+    """Order-INDEPENDENT WBS йерархия: task_id → (OutlineLevel, OutlineNumber).
+
+    Одит 2026-08 т.3 (частично) → т.2 (v28): предишният подход смяташе номера в
+    същия проход, в който строеше задачите, тоест:
+      * OutlineLevel на детето оставаше 1 (не 2) — `_get_outline_level` връщаше
+        константа;
+      * при child-ПРЕДИ-parent йерархията се губеше и номерата се дублираха.
+    Тук строим дърво по `parent_id` (нормализиран към str), после DFS от
+    корените дава ниво = дълбочина+1 и номер „1", „1.1", „1.2", независимо от
+    реда на AI задачите.  Липсващ/самопрепращащ parent → коренно ниво.  Цикли и
+    осиротели възли се поемат защитно (visited set + опашка от неспигнатите).
+    """
+    by_id: dict[str, dict] = {}
+    order: list[str] = []
+    for t in flat_tasks:
+        tid = _sid(t)
+        if tid and tid not in by_id:
+            by_id[tid] = t
+            order.append(tid)
+
+    def parent_of(tid: str) -> str | None:
+        raw = by_id[tid].get("parent_id")
+        pid = str(raw).strip() if raw is not None and str(raw).strip() else ""
+        return pid if (pid and pid in by_id and pid != tid) else None
+
+    children: dict[str | None, list[str]] = defaultdict(list)
+    for tid in order:
+        children[parent_of(tid)].append(tid)
+
+    result: dict[str, tuple[int, str]] = {}
+    seen: set[str] = set()
+
+    def assign(tid_list: list[str], prefix: str, level: int) -> None:
+        for i, tid in enumerate(tid_list, 1):
+            if tid in seen:
+                continue
+            seen.add(tid)
+            num = f"{prefix}.{i}" if prefix else str(i)
+            result[tid] = (level, num)
+            assign(children.get(tid, []), num, level + 1)
+
+    assign(children.get(None, []), "", 1)
+
+    # Осиротели (напр. в цикъл, недостижими от корен) → продължи номерирането
+    # като корени, за да не останат без OutlineNumber.
+    next_root = len(children.get(None, [])) + 1
+    for tid in order:
+        if tid not in result:
+            result[tid] = (1, str(next_root))
+            next_root += 1
     return result
 
 
