@@ -7,12 +7,15 @@
 ## 0. Одитирана ревизия (за възпроизводимост)
 
 ```
-Audit target branch : feat/structured-output-streaming   (PR #2)
-Audit target HEAD    : dd11109f566398a917120ef946615241c806f1e6
-Base main SHA        : 44302a9d3a5e7a34575b4a38d71d22222f25d0dc
-Working tree         : clean
-Archive SHA-256      : 4a165e95216ef14a245e1aeda5b385e0fcca3dfde1e8dd511bb513c4535a953d
-                       (git archive --format=tar HEAD | sha256sum)
+Audit target branch      : feat/structured-output-streaming   (PR #2)
+Branch tip (жив)         : прочетете с `git rev-parse HEAD` (докладът е върхът)
+Последна ЛОГИЧЕСКА промяна: dd11109f566398a917120ef946615241c806f1e6
+                           (commit-ите над него — доклад + _provenance metadata —
+                            НЕ променят логика/тестове; 1794 passed важи и за двете)
+Base main SHA            : 44302a9d3a5e7a34575b4a38d71d22222f25d0dc
+Working tree             : clean
+Archive SHA-256 @dd11109 : 4a165e95216ef14a245e1aeda5b385e0fcca3dfde1e8dd511bb513c4535a953d
+                           (git archive --format=tar dd11109 | sha256sum)
 ```
 
 **Важно за обхвата:** PR #1 е **merge-нат в main**; PR #2 (този HEAD) е **отворен,
@@ -222,8 +225,9 @@ run** (за предпочитане Sonnet) и все още НЕ е напра
 
 ```bash
 # 0. Точна ревизия
-git rev-parse HEAD            # трябва: dd11109...
-git status --short            # трябва: празно (clean)
+git rev-parse HEAD           # запишете SHA-то (branch tip)
+git rev-parse dd11109        # последна логическа промяна (кодът под одит)
+git status --short           # трябва: празно (clean)
 
 # 1. Всички unit теста (0 E2E)
 uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e
