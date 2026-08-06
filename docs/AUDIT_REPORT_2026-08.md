@@ -9,13 +9,13 @@
 ```
 Audit target branch      : feat/structured-output-streaming   (PR #2)
 Branch tip (жив)         : прочетете с `git rev-parse HEAD` (докладът е върхът)
-Последна ЛОГИЧЕСКА промяна: 8123dd5c4ff85042aa8bd8e4c17a10d421bf39cc
-                           (dep-парсер §6е; commit-ите над него — доклад —
-                            НЕ променят логика; 1812 passed (Win))
+Последна ЛОГИЧЕСКА промяна: fa263045d4ababe5a4918d8eb69a282d6f9ec51d
+                           (одит v29 фиксове §6ж; commit-ите над него — доклад —
+                            НЕ променят логика; 1818 passed (Win))
 Base main SHA            : 44302a9d3a5e7a34575b4a38d71d22222f25d0dc
 Working tree             : clean
-Archive SHA-256 @8123dd5 : 50213e7e3238be5cf37bd8df1876ae65274245aa68e5858f57581b3fca1be46e
-                           (git archive --format=tar 8123dd5 | sha256sum)
+Archive SHA-256 @fa26304 : 3122c648345d1c782f01af14eda03c1edfa923ccffe19bd4b8542e54dd72b5b2
+                           (git archive --format=tar fa26304 | sha256sum)
 ```
 
 **Важно за обхвата:** PR #1 е **merge-нат в main**; PR #2 (този HEAD) е **отворен,
@@ -23,7 +23,7 @@ Archive SHA-256 @8123dd5 : 50213e7e3238be5cf37bd8df1876ae65274245aa68e5858f57581
 проверка ползвайте горния HEAD (или чист ZIP от него). Твърденията по-долу,
 маркирани „(PR #2)", НЕ са в main.
 
-**Статус на тестовете:** **1812 unit/integration теста преминават, 1 пропуснат
+**Статус на тестовете:** **1818 unit/integration теста преминават, 1 пропуснат
 (skip); директорията `tests/e2e` е ИЗКЛЮЧЕНА изцяло → 0 E2E теста изпълнени.**
 (виж раздел 9 за какво това НЕ доказва.)
 
@@ -48,7 +48,7 @@ Archive SHA-256 @8123dd5 : 50213e7e3238be5cf37bd8df1876ae65274245aa68e5858f57581
 | BOQ coverage / provenance | `3335079` | да |
 | int-ID crash fix | `16c898c` | да |
 | CI actions v7 | `d99c1a3` | да |
-| **material enum + streaming + одит v27 фиксове + доклад** | `1e9763e`…`8123dd5` | **НЕ (PR #2)** |
+| **material enum + streaming + одит v27 фиксове + доклад** | `1e9763e`…`fa26304` | **НЕ (PR #2)** |
 
 ---
 
@@ -264,37 +264,69 @@ milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `Predeces
 коректно лови. Плюс: тестът разкри критичен schema бъг, който щеше да счупи всеки
 силен provider. (Пълно КСС покритие остава — Sonnet под-покри; отделен въпрос.)
 
-**За постоянна употреба (`.env`):** `DEEPSEEK_MODEL=anthropic/claude-sonnet-5`
-+ `GEN_MAX_TOKENS=32000` + `MAX_ROWS_PER_PART=50` (или `deepseek/deepseek-v4-flash`
-за ~10× по-евтино).
+**За постоянна употреба (`.env`) — ПЪЛНАТА конфигурация:**
+```
+DEEPSEEK_BASE_URL=https://openrouter.ai/api/v1   # ЗАДЪЛЖИТЕЛНО — иначе кодът
+                                                 # праща модела към api.deepseek.com
+DEEPSEEK_MODEL=anthropic/claude-sonnet-5         # (или deepseek/deepseek-v4-flash)
+GEN_MAX_TOKENS=32000
+ANALYSIS_MAX_TOKENS=16000
+```
+`.env` НЕ е в пакета (клиентски/тайни) → live конфигурацията не е независимо
+проверима от ZIP-а; горното е декларацията.
+
+### 6ж. Одит v29 — четвъртият кръг (538a1e5), кодовите находки затворени
+
+| # | Находка | Фикс | Тест |
+|---|---------|------|------|
+| 1 | Sonnet през OpenRouter се третираше като DeepSeek (worker_is_claude=false; цена $0.70/2M вместо ~$12) | `worker_is_claude` гледа и `MODEL_WORKER`; `_calculate_cost` разпознава sonnet/opus по име | `test_cost_sonnet_via_openrouter_*` |
+| 2 | fractional дурация: canonical (1.5) ≠ експортиран XML (2) | recompute **закръгля НАГОРЕ преди validation**; валидаторът прави дробна **ТВЪРДА ГРЕШКА** | `test_recompute_ceils_fractional_*`, `test_validate_rejects_fractional_*` |
+| 3 | нов XML дефект: Project FinishDate (календарен timedelta) < последна задача (работен календар) | header ползва СЪЩИЯ работен календар + формула като задачите | `test_project_finishdate_matches_last_task_finish_5day` |
+
+**Структуриран изход — точно описание (одит):** строгата json_schema беше
+**изоставена** (триеше полета / union-лимит), НЕ успешно имплементирана. Реалният
+код ползва `response_format={"type":"json_object"}` (JSON mode) за OpenRouter, НЕ
+праща schema към директния Claude worker, а материалният enum се налага **само
+през промпта**. Виж §7.
+
+⚠️ **Reproducibility на Sonnet run (честно, одит):** пакетът съдържа кодовите
+промени, произлизащи от live run-а, но НЕ съдържа анонимизиран вход/изход,
+input/output hashes, usage receipt, validation report, точните колизии или run ID
+(реалният вход е клиентски). Затова числата „~$2.30" и „само spatial конфликти"
+са **правдоподобни, но не bit-for-bit одиторски възпроизводими**. Възпроизводимото
+е `python tools/kss_coverage_demo.py` (synthetic, детерминистично) — то НЕ ползва
+модел, а само детекцията+нормите.
 
 ---
 
 ## 7. Structured output + streaming (PR #2 — НЕ в main)
 
-- **`build_schedule_response_schema()`** — JSON schema с `material` като enum.
-  Отказът на structured-output режима **не прекратява автоматично** генерацията;
-  системата прави повторен опит БЕЗ schema. Повторният provider call все пак
-  може да се провали (мрежа, quota, authentication, model грешка).
-- **Streaming** при `max_tokens ≥ 8000` — **намалява** риска от client-side
-  timeout при дълги отговори; НЕ премахва provider/proxy/network/SDK timeout.
-- **Разделение:** schema пази формата и валидните материали; референтната цялост
-  на графа (фантомни ID) остава на детерминистичния гейт.
-- **⚠️ Не е валидирано срещу жив модел** — API пътищата (`output_config` /
-  `response_format`) са best-effort с fallback, но НЕ са изпълнявани срещу
-  реален provider (чака Anthropic кредити).
+**Актуализирано (одит v29):** строгата json_schema беше **изоставена** — при
+строги provider-и (Anthropic/OpenRouter) тя или триеше недекларираните полета,
+или удряше union-type лимита. Реалният код сега:
+- **`response_format={"type":"json_object"}`** (JSON mode) за OpenRouter пътя —
+  гарантира ВАЛИДЕН JSON без да ограничава полетата; работи при всички provider-и.
+- **НЕ праща** structured output към директния Claude worker (Anthropic SDK).
+- **Материалният enum се налага САМО през промпта** (не през schema).
+- Т.е. строгият schema проблем е **заобиколен чрез премахване на strict
+  enforcement**, НЕ чрез успешна пълна schema.
+- **Streaming** при `max_tokens ≥ 8000` (OpenRouter `_openai_request` + директен
+  Claude) — **намалява** риска от client-side timeout; НЕ премахва
+  provider/proxy/network/SDK timeout.
+- **Валидирано срещу жив модел:** ДА — Sonnet 5 през OpenRouter (§6е). Точно този
+  live тест разкри schema-strip бъга. `worker_is_claude`/cost поправени (§6ж).
 
-**Тестове:** `tests/test_ai_router.py` (mock streaming/fallback),
+**Тестове:** `tests/test_ai_router.py` (mock streaming/fallback/cost),
 `tests/test_ai_processor_pure.py` (enum синхрон).
 
 ---
 
 ## 8. Тестове — какво доказват и какво НЕ
 
-- Изпълнено: `pytest tests/ --ignore=tests/e2e` → **1812 passed, 1 skipped** (Windows).
+- Изпълнено: `pytest tests/ --ignore=tests/e2e` → **1818 passed, 1 skipped** (Windows).
 - **Платформена разлика (одит):** 1 тест (tab/newline в име на файл) се пропуска
-  на Windows, но се изпълнява на Linux → там резултатът е **1813 passed, 0 skipped**.
-  Collection total = 1813. Затова манифест-числото зависи от платформата.
+  на Windows, но се изпълнява на Linux → там резултатът е **1819 passed, 0 skipped**.
+  Collection total = 1819. Затова манифест-числото зависи от платформата.
 - **0 E2E теста изпълнени** (`tests/e2e` изключена).
 - Следователно НЕ са доказани от този резултат: реалните provider SDK пътища,
   structured output срещу жив модел, streaming срещу жив модел, UI, MSPDI
@@ -330,13 +362,14 @@ milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `Predeces
 > Одит v27 (§6г) поправи 5 кодови находки (int-ID валидатор, MSPDI outline,
 > scanner lowercase, дробни дурации, milestone). Остатъкът по-долу е реален.
 
-1. Реален **Sonnet run** (чака Anthropic кредити) — worker пътят непроверен.
-   ⚠️ Заедно с §5: **пре-пусни таблицата** — int-ID false-positives (т.2) са
-   надували „счупените графи", затова текущата §5 НЕ е чисто доказателство за
-   слаб модел.
+1. Реален **Sonnet run** — **НАПРАВЕН** през OpenRouter (§6е/§6ж); worker пътят е
+   проверен. Остава: (а) **bit-for-bit възпроизводим артефакт** (input/output
+   hashes, usage receipt — реалният вход е клиентски); (б) **пълно КСС покритие**
+   (Sonnet под-покри).
 2. **Before/after на самите 59** от AI-генериран график. Детерминистичният
    проксѝ вече е независимо възпроизводим (§4: synthetic fixture, 0→13).
-3. **Live structured-output** и при двата provider пътя (Claude/DeepSeek).
+3. **Live structured-output** — направено (§6е, Sonnet/OpenRouter); директният
+   Claude worker (Anthropic SDK) път не е тестван (няма Anthropic кредити).
 4. **MSPDI round-trip** — структурата е валидирана детерминистично (§6в:
    DurationFormat=5, дати заковани, зависимости запазени след §6б); ОСТАВА
    отваряне в реален Microsoft Project (експорт → отваряне → визуална проверка).
@@ -355,12 +388,12 @@ milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `Predeces
 ```bash
 # 0. Точна ревизия
 git rev-parse HEAD           # запишете SHA-то (branch tip)
-git rev-parse 8123dd5        # последна логическа промяна (кодът под одит)
+git rev-parse fa26304        # последна логическа промяна (кодът под одит)
 git status --short           # трябва: празно (clean)
 
 # 1. Всички unit теста (0 E2E)
 uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e
-#   Очаквано: 1812 passed, 1 skipped
+#   Очаквано: 1818 passed, 1 skipped
 
 # 2. Норм-стойности + структуриран произход
 python -c "import json;d=json.load(open('config/productivities.json',encoding='utf-8'));print(d['version']);import pprint;pprint.pprint(d['_provenance_v0_5'])"
@@ -384,6 +417,6 @@ git log --oneline 44302a9..HEAD    # PR #2 delta спрямо main
 synthetic fixture; реалният КСС даде 0→14 от 24, но иска Git история), структуриран произход на
 нормите, fail-closed артефакт и ясно разделяне unit↔E2E и HEAD↔история.
 Абсолютните твърдения („never breaks", „removes timeout risk", „bypass-proof")
-са смекчени. За пълна проверка е нужен чист audit ZIP от HEAD `8123dd5` и
+са смекчени. За пълна проверка е нужен чист audit ZIP от HEAD `fa26304` и
 изпълнение на остатъка от раздел 10 (Sonnet run, MSPDI round-trip, live
 structured output, E2E, history scan).
