@@ -596,6 +596,49 @@ class ChatHandler:
         return lines
 
     @staticmethod
+    def _format_generation_repairs(gen_result: dict) -> list[str]:
+        """Покажи какво КОДЪТ е поправил след генерацията.
+
+        И двата ремонта (допокриване на непокрити КСС редове, разделяне на
+        застъпени бригади) променят резултата на модела.  Тиха промяна е
+        недопустима: инженерът трябва да види, че задача е преместена във
+        времето, за да прецени дали така е приемливо на терен.
+        """
+        lines: list[str] = []
+
+        rounds = gen_result.get("repair_rounds") or 0
+        if rounds:
+            lines.append(
+                f"\n🔁 **Допокриване:** {rounds} допълнителн(и) опит(а) за "
+                f"позиции от КСС, останали без своя дейност в първия проход."
+            )
+
+        repair = gen_result.get("spatial_repair") or {}
+        added = repair.get("added_links") or []
+        unresolved = repair.get("unresolved") or []
+        if added:
+            lines.append(
+                f"\n🔀 **Пространствен ремонт:** {len(added)} застъпвания на "
+                f"бригади са разделени във времето (добавена е връзка "
+                f"край→начало). Проверете дали така е приемливо:"
+            )
+            for link in added[:5]:
+                lines.append(
+                    f"  - {link['predecessor']} → {link['successor']} по "
+                    f"'{link.get('alignment', '?')}' "
+                    f"({link.get('overlap_m', 0):.0f}м застъпване)"
+                )
+            if len(added) > 5:
+                lines.append(f"  ... и още {len(added) - 5}")
+        if unresolved:
+            lines.append(
+                f"\n⚠️ **{len(unresolved)} застъпвания НЕ можаха да се разделят "
+                f"автоматично** (връзката би затворила цикъл или е между "
+                f"обобщаваща задача и подзадача) — остават като грешка."
+            )
+        return lines
+
+    @staticmethod
     def _format_validation_report(gen_result: dict) -> list[str]:
         """Покажи резултата от детерминистичната валидация на графика.
 
@@ -986,11 +1029,18 @@ class ChatHandler:
         _sheets = {(getattr(getattr(r, "source", None), "document", ""),
                     getattr(getattr(r, "source", None), "sheet", ""))
                    for r in _boq if getattr(r, "quantity", None) is not None}
-        if len([s for s in _sheets if s[1]]) >= 2:
-            _progress(f"Голям проект ({len(_sheets)} части) — генерирам по части (staging)...")
+        # 2026-08: прагът беше „≥2 листа".  Реалният търг е ЕДИН лист с 28
+        # позиции — минаваше по правия път, където няма нито допокриване на
+        # непокрити редове, нито пространствен ремонт → 6 от 28 позиции и
+        # застъпени екипи.  Сега всеки график С КОЛИЧЕСТВА минава през staging;
+        # при един лист това е една част, плюс двата ремонта.
+        if [s for s in _sheets if s[1]]:
+            _progress(f"Генерирам по части (staging) — {len(_sheets)} част(и) от КСС...")
             gen_result = self.ai.generate_schedule_staged(
                 analysis, project_type, _progress,
                 all_text=all_text, boq_index=_boq,
+                extra_locations=situation_locations or None,
+                sequence_constraints=project_context.get("sequence_constraints") if project_context else None,
             )
         else:
             gen_result = self.ai.generate_schedule(
@@ -1074,6 +1124,7 @@ class ChatHandler:
         response_parts.extend(
             self._format_quantity_provenance(self._verify_quantities(gen_result))
         )
+        response_parts.extend(self._format_generation_repairs(gen_result))
         response_parts.extend(self._format_duration_report(gen_result))
         response_parts.extend(self._format_validation_report(gen_result))
         response_parts.extend(
@@ -2191,11 +2242,13 @@ class ChatHandler:
         _sheets = {(getattr(getattr(r, "source", None), "document", ""),
                     getattr(getattr(r, "source", None), "sheet", ""))
                    for r in _boq if getattr(r, "quantity", None) is not None}
-        if len([s for s in _sheets if s[1]]) >= 2:
-            _progress(f"Голям проект ({len(_sheets)} части) — генерирам по части (staging)...")
+        if [s for s in _sheets if s[1]]:
+            _progress(f"Генерирам по части (staging) — {len(_sheets)} част(и) от КСС...")
             gen_result = self.ai.generate_schedule_staged(
                 analysis, project_type, _progress,
                 all_text=all_text, boq_index=_boq, num_teams=num_teams,
+                extra_locations=situation_locations or None,
+                sequence_constraints=sequence_constraints,
             )
         else:
             gen_result = self.ai.generate_schedule(
@@ -2248,6 +2301,7 @@ class ChatHandler:
         response_parts.extend(
             self._format_quantity_provenance(self._verify_quantities(gen_result))
         )
+        response_parts.extend(self._format_generation_repairs(gen_result))
         response_parts.extend(self._format_duration_report(gen_result))
         response_parts.extend(self._format_validation_report(gen_result))
         response_parts.extend(

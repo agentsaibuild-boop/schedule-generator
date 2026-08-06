@@ -954,6 +954,29 @@ class AIProcessor:
             out.append(nt)
         return out
 
+    @staticmethod
+    def _uncovered_rows(tasks: list[dict], rows: list) -> list:
+        """Кои от `rows` още нямат ДОКАЗАН покривач сред `tasks`.
+
+        Ползва същия домейн модел като гейта (`analyze_boq_coverage`), за да не
+        се получи повторно питане за ред, който гейтът смята за покрит, или
+        обратно.  ДВУСМИСЛЕНИТЕ редове (неопределим клас-покривач) НЕ се питат
+        пак — там липсва не задача, а човешко решение.
+
+        Returns:
+            Подсписък от `rows` (същите обекти), в оригиналния ред.
+        """
+        if not rows:
+            return []
+        try:
+            from src.provenance import analyze_boq_coverage
+            missing = set(analyze_boq_coverage(tasks, rows)["uncovered"])
+        except Exception as exc:                       # pragma: no cover - защита
+            logger.warning("Проверката за допокриване се провали: %s", exc)
+            return []
+        return [r for r in rows
+                if getattr(r, "quantity", None) is not None and r.ref in missing]
+
     def generate_schedule_staged(
         self,
         analysis: dict,
@@ -962,6 +985,8 @@ class AIProcessor:
         all_text: str = "",
         boq_index: list | None = None,
         num_teams: int = 1,
+        extra_locations: list[str] | None = None,
+        sequence_constraints: dict | None = None,
     ) -> dict:
         """Генерирай ГОЛЯМ проект на ЧАСТИ и слей в един график.
 
@@ -999,7 +1024,9 @@ class AIProcessor:
             # Няма количествени части — падни към обикновеното генериране.
             return self.generate_schedule(
                 analysis, project_type, progress_callback,
-                all_text=all_text, boq_index=boq_index)
+                all_text=all_text, boq_index=boq_index, num_teams=num_teams,
+                extra_locations=extra_locations,
+                sequence_constraints=sequence_constraints)
 
         # Под-разбиване на голям лист на ПАРТИДИ (проба 2026-08-04): при мандат за
         # пълно покритие ~15 реда × вериги надхвърлят 8192-токенния таван на
@@ -1009,60 +1036,119 @@ class AIProcessor:
         # работник (128K) може цял лист наведнъж → авто 50.  Env го надделява.
         _rows_default = "50" if getattr(self.router, "worker_is_claude", False) else "5"
         MAX_ROWS_PER_PART = int(os.getenv("MAX_ROWS_PER_PART", _rows_default))
-        plan: list[tuple[str, str, list, int, int]] = []
+        # Кръгове на ДОПОКРИВАНЕ (2026-08, реален прогон): моделът върна 6 задачи
+        # за 28 КСС реда — под-покритие → графикът е непълен → няма изход.
+        # „Покрий всички редове" в промпта не е проверимо; ПОВТОРНОТО питане САМО
+        # за непокритите редове е.  След всяка част се смята кои от нейните редове
+        # още нямат доказан покривач и те се пускат като нова, по-малка част.
+        MAX_COVERAGE_ROUNDS = max(0, int(os.getenv("COVERAGE_REPAIR_ROUNDS", "2")))
+        queue: list[dict] = []
         for (doc, sheet), rows in groups.items():
             n_batches = (len(rows) + MAX_ROWS_PER_PART - 1) // MAX_ROWS_PER_PART
             for bi in range(n_batches):
                 chunk = rows[bi * MAX_ROWS_PER_PART:(bi + 1) * MAX_ROWS_PER_PART]
-                plan.append((doc, sheet, chunk, bi + 1, n_batches))
+                queue.append({"doc": doc, "sheet": sheet, "rows": chunk,
+                              "batch": bi + 1, "batches": n_batches, "round": 0})
 
-        _prog(f"Генериране на {len(plan)} части (партиди) поотделно...")
+        _prog(f"Генериране на {len(queue)} части (партиди) поотделно...")
 
         merged_tasks: list[dict] = []
         parts_info: list[dict] = []
         used_prefixes: dict[str, int] = {}
         total_cost = 0.0
         gen_model = ""
-        for (doc, sheet, rows, bi, n_batches) in plan:
+        repair_rounds = 0
+        cursor = 0
+        while cursor < len(queue):
+            item = queue[cursor]
+            cursor += 1
+            sheet, rows = item["sheet"], item["rows"]
+            bi, n_batches, rnd = item["batch"], item["batches"], item["round"]
             # Уникална представка (одит v11 #3.1): два „Водопровод" листа НЕ бива
             # да получат еднакво „В-"; също и партидите на един лист.
             base = self._prefix_for_sheet(sheet)
             used_prefixes[base] = used_prefixes.get(base, 0) + 1
             prefix = base if used_prefixes[base] == 1 else f"{base}{used_prefixes[base]}"
             batch_txt = f" — партида {bi}/{n_batches}" if n_batches > 1 else ""
+            if rnd:
+                batch_txt += f" — допокриване {rnd}"
             _prog(f"  Част '{sheet}'{batch_txt} ({len(rows)} позиции) → '{prefix}-'")
             # Корекция на всяка част — само ако контрольорът (Anthropic) е
             # наличен.  Без него тя само гърми/бави (пада на DeepSeek), затова
             # се пропуска — детерминистичният gate остава авторитетът.
             _skip = not (self.router and getattr(self.router, "anthropic_available", False))
+            _scope = f"Част «{sheet}»{batch_txt} ({len(rows)} позиции)."
+            if rnd:
+                _scope += (" Това са позиции, ОСТАНАЛИ без своя производствена "
+                           "дейност в предишния опит — направи задача за ВСЯКА "
+                           "от тях и НЕ повтаряй вече направени дейности.")
             part = self.generate_schedule(
                 analysis, project_type, progress_callback,
                 all_text=all_text, boq_index=rows, num_teams=num_teams,
-                scope_note=f"Част «{sheet}»{batch_txt} ({len(rows)} позиции).",
+                extra_locations=extra_locations,
+                sequence_constraints=sequence_constraints,
+                scope_note=_scope,
                 skip_correction=_skip)
             total_cost += part.get("total_cost", 0.0)
             gen_model = part.get("gen_model") or gen_model
             ptasks = self._tasks_from(part.get("schedule"))
+            if rnd:
+                # Допокриващата част е питана САМО за липсващите редове.  Ако
+                # върне дейност, цитираща друг ред, тя най-вероятно дублира вече
+                # направена работа → ДУБЛИРАН покривач (твърд блокер).  Такава
+                # задача се изхвърля: ремонтът не бива да чупи графика.
+                _asked = {r.ref for r in rows}
+                ptasks = [t for t in ptasks
+                          if not str(t.get("source_ref") or "").strip()
+                          or str(t.get("source_ref")).strip() in _asked]
             ptasks = self._prefix_part_tasks(ptasks, prefix)
+            # Триене на AI provenance ВЕДНАГА (trust boundary): проверката за
+            # покритие по-долу решава дали да се пита пак — тя не бива да гледа
+            # полета, които моделът си е сложил сам.
+            from src.provenance import strip_ai_provenance
+            strip_ai_provenance(ptasks)
             merged_tasks.extend(ptasks)
             parts_info.append({
                 "sheet": f"{sheet}{batch_txt}", "prefix": prefix,
                 "tasks": len(ptasks),
                 "part_status": part.get("status"),
                 "truncated": part.get("truncated"),
+                "round": rnd,
             })
+
+            # --- Допокриване: кои редове на тази част още нямат покривач? ---
+            if rnd < MAX_COVERAGE_ROUNDS and rows:
+                missing = self._uncovered_rows(merged_tasks, rows)
+                if missing:
+                    repair_rounds += 1
+                    _prog(f"    {len(missing)} непокрити позиции → нов опит "
+                          f"({rnd + 1}/{MAX_COVERAGE_ROUNDS})")
+                    queue.append({**item, "rows": missing, "round": rnd + 1})
 
         _prog("Сливане и детерминистична проверка на целия график...")
 
-        # ЕДИН детерминистичен цикъл върху слетия график: продължителности → gate.
+        # ЕДИН детерминистичен цикъл върху слетия график: продължителности →
+        # пространствен ремонт → gate.
+        builder = ScheduleBuilder()
         merged: dict = {"tasks": merged_tasks}
-        recomputed = ScheduleBuilder().recompute_durations(merged_tasks)
+        recomputed = builder.recompute_durations(merged_tasks)
         merged["tasks"] = recomputed["schedule"]
         merged_duration_report = {
             "applied": True, "final": True,
             "changes": recomputed["changes"], "skipped": recomputed["skipped"],
             "warnings": recomputed["warnings"], "summary": recomputed["summary"],
         }
+
+        # Пространствен ремонт (2026-08): частите се генерират независимо и
+        # всяка започва от ден 1 → два екипа на едни и същи метри в едни и същи
+        # дни → гейтът (правилно) обявява графика за невалиден и няма изход.
+        # Тук сблъсъците се СЕРИАЛИЗИРАТ детерминистично (FS връзка), а всяка
+        # добавена връзка се докладва — не е тиха промяна на AI графика.
+        spatial_fix = builder.resolve_spatial_conflicts(merged["tasks"])
+        merged["tasks"] = spatial_fix["schedule"]
+        if spatial_fix["added_links"]:
+            _prog(f"Пространствен ремонт: {len(spatial_fix['added_links'])} "
+                  f"застъпвания разделени във времето.")
 
         validation = self._validate_final_schedule(merged)
 
@@ -1158,6 +1244,12 @@ class AIProcessor:
             "ai_status": status,
             "staged": True,
             "parts": parts_info,
+            "repair_rounds": repair_rounds,
+            "spatial_repair": {
+                "added_links": spatial_fix["added_links"],
+                "unresolved": spatial_fix["unresolved"],
+                "rounds": spatial_fix["rounds"],
+            },
             "failed_parts": [p["sheet"] for p in failed_parts],
             "coverage": {
                 "required": len({r.ref for r in boq_index

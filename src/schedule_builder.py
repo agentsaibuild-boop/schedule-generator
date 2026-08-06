@@ -17,7 +17,11 @@ from src.duration_calculator import (
     calculate_task_duration,
 )
 from src.gantt_chart import day_to_date, generate_demo_schedule, get_type_label
-from src.spatial import spatial_report
+from src.spatial import (
+    DEFAULT_CREW_BUFFER_M,
+    find_crew_collisions,
+    spatial_report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -509,6 +513,163 @@ class ScheduleBuilder:
             new_end[tid] = end
 
         return {"schedule": updated, "warnings": [], "shifted": shifted}
+
+    # ------------------------------------------------------------------
+    # Пространствен ремонт (2026-08) — сериализирай РЕАЛНИТЕ сблъсъци
+    # ------------------------------------------------------------------
+
+    def resolve_spatial_conflicts(
+        self,
+        schedule: list[dict],
+        *,
+        buffer_m: float = DEFAULT_CREW_BUFFER_M,
+        max_rounds: int = 6,
+    ) -> dict[str, Any]:
+        """Разреши пространствените сблъсъци, вместо само да ги обявиш за грешка.
+
+        ЗАЩО (2026-08, реален прогон): генерацията слагаше два екипа на едни и
+        същи метри в застъпващи се дни.  Гейтът го хващаше правилно → графикът
+        е `invalid` → няма изход.  Молбата към модела „не се застъпвай" не е
+        проверима; преместването във времето е.
+
+        Ремонтът е ДЕТЕРМИНИСТИЧЕН и КОНСЕРВАТИВЕН: за всяка двойка задачи,
+        които реално делят метри в едни и същи дни, се добавя FS връзка
+        (по-ранната → по-късната) и датите се преизчисляват.  Тоест втората
+        бригада ИЗЧАКВА първата на същия участък — най-безобидното решение.
+
+        Какво НЕ прави:
+          - не пипа нарушения на БУФЕРА (`kind == "buffer"`) — те са
+            технологично изискване, не физически сблъсък, и остават warning;
+          - не свързва задача с неин родител/потомък (йерархия, не бригади);
+          - не добавя връзка, която затваря цикъл — такава двойка се връща
+            като `unresolved` и гейтът пак я обявява за грешка.
+
+        Всяка добавена връзка се връща в `added_links` — промяната е авторска
+        намеса в AI графика и трябва да се ПОКАЗВА, не да се случва тихо.
+
+        Args:
+            schedule: Списък задачи (не се мутира).
+            buffer_m: Буферът за откриване (само за докладване на сблъсъка).
+            max_rounds: Таван на итерациите — след преместване може да се
+                появи нов сблъсък надолу по оста.
+
+        Returns:
+            {schedule, added_links, unresolved, rounds}
+        """
+        if not schedule:
+            return {"schedule": [], "added_links": [], "unresolved": [], "rounds": 0}
+
+        updated = copy.deepcopy(schedule)
+        added_links: list[dict[str, Any]] = []
+        handled: set[tuple[str, str]] = set()
+        rounds = 0
+
+        for _ in range(max_rounds):
+            collisions = [c for c in find_crew_collisions(updated, buffer_m)
+                          if c.get("kind") == "overlap"]
+            if not collisions:
+                break
+            rounds += 1
+            by_id = {_task_key(t): t for t in updated}
+            progress = False
+
+            for collision in collisions:
+                first, second = self._serialization_order(
+                    by_id.get(str(collision["task_a"])),
+                    by_id.get(str(collision["task_b"])),
+                )
+                if first is None or second is None:
+                    continue
+                fid, sid = _task_key(first), _task_key(second)
+                pair = (fid, sid)
+                if pair in handled or (sid, fid) in handled:
+                    continue
+                if self._is_hierarchy_pair(first, second, by_id):
+                    handled.add(pair)
+                    continue
+                if fid in dependency_ids(second):
+                    # Вече са свързани и пак се застъпват — връзката е SS/FF
+                    # или лагът е отрицателен.  Не я пренаписваме: това е
+                    # умисъл на модела, гейтът ще го каже.
+                    handled.add(pair)
+                    continue
+
+                deps = list(second.get("dependencies") or [])
+                second["dependencies"] = deps + [
+                    {"predecessor_id": fid, "type": "FS", "lag_days": 0}
+                ]
+                if self._detect_cycle(updated, {_task_key(t): t for t in updated}):
+                    second["dependencies"] = deps
+                    handled.add(pair)
+                    continue
+
+                handled.add(pair)
+                progress = True
+                added_links.append({
+                    "predecessor": fid, "successor": sid,
+                    "alignment": collision.get("alignment", ""),
+                    "overlap_m": collision.get("overlap_m", 0.0),
+                    "days": collision.get("days"),
+                    "reason": "spatial_overlap",
+                })
+
+            if not progress:
+                break
+
+            result = self.reschedule(updated)
+            if result["warnings"]:
+                # Не могат да се преизчислят датите (цикъл/топология) — спираме
+                # тук и оставяме гейта да се произнесе върху каквото има.
+                break
+            updated = result["schedule"]
+
+        unresolved = [c for c in find_crew_collisions(updated, buffer_m)
+                      if c.get("kind") == "overlap"]
+        return {
+            "schedule": updated,
+            "added_links": added_links,
+            "unresolved": unresolved,
+            "rounds": rounds,
+        }
+
+    @classmethod
+    def _serialization_order(
+        cls, a: dict | None, b: dict | None
+    ) -> tuple[dict | None, dict | None]:
+        """Коя от двете задачи минава първа — детерминистично, без гадаене.
+
+        По-ранното начало води; при равно начало — по-ранният край; при
+        пълно равенство — по ID, за да е повторяемо.
+        """
+        if a is None or b is None:
+            return (None, None)
+
+        def key(task: dict) -> tuple[int, int, str]:
+            return (cls._as_int(task.get("start_day"), 1),
+                    cls._task_end(task), _task_key(task))
+
+        return (a, b) if key(a) <= key(b) else (b, a)
+
+    @staticmethod
+    def _is_hierarchy_pair(a: dict, b: dict, by_id: dict[str, dict]) -> bool:
+        """Дали двете задачи са в отношение родител↔потомък (по `parent_id`).
+
+        Обобщаваща задача и нейна подзадача естествено делят метри и дни —
+        това не е сблъсък на бригади и не бива да се сериализира.
+        """
+        def ancestors(task: dict) -> set[str]:
+            seen: set[str] = set()
+            current = task
+            for _ in range(20):        # таван срещу счупена йерархия
+                pid = current.get("parent_id")
+                pid = str(pid).strip() if pid is not None else ""
+                if not pid or pid in seen:
+                    break
+                seen.add(pid)
+                current = by_id.get(pid, {})
+            return seen
+
+        return _task_key(a) in ancestors(b) or _task_key(b) in ancestors(a)
 
     # ------------------------------------------------------------------
     # Helpers for deterministic durations

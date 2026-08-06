@@ -36,7 +36,8 @@ def _proc_with_parts(part_results: dict) -> AIProcessor:
     proc = AIProcessor(router=None, knowledge_manager=None)
 
     def fake_generate(analysis, project_type, cb=None, *, all_text="",
-                      boq_index=None, num_teams=1, scope_note="",
+                      boq_index=None, num_teams=1, extra_locations=None,
+                      sequence_constraints=None, scope_note="",
                       skip_correction=False):
         # разпознай коя част се иска по листа на първия ред
         sheet = boq_index[0].source.sheet if boq_index else "?"

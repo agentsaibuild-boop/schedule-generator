@@ -30,7 +30,8 @@ src/
 - config/productivities.json — производителности v0.4, верифицирани.
   Това е ЕДИНСТВЕНИЯТ източник за продължителности — чете се от
   duration_calculator.py. НЕ връщай аритметика (ceil, тарифи) в промптовете.
-- XML експорт ЗАДЪЛЖИТЕЛНО с DurationFormat=5 и Manual=1
+- XML експорт ЗАДЪЛЖИТЕЛНО с DurationFormat=5; режим 'pinned' (по подразбиране)
+  дава Manual=0 + ConstraintType=2 (заковано начало), 'flexible' → ConstraintType=0
 - Кирилица в PDF изисква DejaVu Sans от fonts/
 - .env файловете НЕ са в git
 
@@ -38,7 +39,7 @@ src/
 start.bat  ← стартира app на localhost:8501
 
 ## Тестове
-uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e   ← unit тестове (1597 теста в 56 файла)
+uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e   ← unit тестове (1852 теста в 63 файла)
 pytest tests/e2e/ -v               ← E2E Playwright тестове (10 теста)
 
 - Unit тестовете не изискват стартирано приложение, но изискват пълния Python стек (.env не е нужен)
