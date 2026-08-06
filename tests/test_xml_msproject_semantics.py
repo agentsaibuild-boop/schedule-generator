@@ -258,3 +258,15 @@ def test_outline_hierarchy_survives_integer_parent_id():
     ])
     child = next(t for t in _tasks(xml) if _g(t, "Name") == "Дете")
     assert _g(child, "OutlineNumber") == "1.1"
+
+
+def test_project_finishdate_matches_last_task_finish_5day():
+    """Одит 2026-08: Project FinishDate ползваше календарен timedelta, а
+    задачите — работния календар → header свършваше преди последната задача.
+    Сега съвпадат (петък старт, 2 работни дни, 5-дневен календар)."""
+    xml = _xml([{"id": 1, "name": "T", "duration": 2, "start_day": 1,
+                 "dependencies": []}], start="2026-08-07", calendar_type="5-day")
+    root = ET.fromstring(xml)
+    pf = root.findtext(f"{NS}FinishDate")
+    task = _tasks(xml)[-1]
+    assert pf[:10] == _g(task, "Finish")[:10]

@@ -142,13 +142,22 @@ def _build_xml(
     """Build the full MSPDI XML tree."""
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
 
-    # Calculate project end date
-    max_end_day = max(
-        (t.get("end_day", t.get("start_day", 0) + t.get("duration", 0))
-         for t in schedule_data),
-        default=1,
-    )
-    finish_dt = start_dt + timedelta(days=max_end_day - 1)
+    # Calculate project end date — със СЪЩАТА формула като задачите (одит 2026-08):
+    #   end_day = start_day + ceil(duration) - 1  (или явен end_day, закръглен).
+    # Преди: default беше start_day+duration (без -1) → header с 1 ден повече;
+    # плюс FinishDate ползваше ОБИКНОВЕН timedelta (календарни), докато задачите
+    # ползват РАБОТНИЯ календар → при 5-дневен календар header-ът свършваше
+    # ПРЕДИ последната задача.  Сега и двете съвпадат.
+    def _end_day(t: dict) -> int:
+        ed = t.get("end_day")
+        if isinstance(ed, (int, float)) and not isinstance(ed, bool):
+            return int(math.ceil(ed))
+        sd = int(t.get("start_day", 1) or 1)
+        dur = t.get("duration", 0) or 0
+        return sd + max(1, int(math.ceil(dur))) - 1
+
+    max_end_day = max((_end_day(t) for t in schedule_data), default=1)
+    finish_dt = _working_day_to_date(start_dt, max_end_day, calendar_type)
 
     # Root element
     root = ET.Element("Project")

@@ -184,7 +184,14 @@ class AIRouter:
         # Проба 2026-08-04: работникът е силен Claude модел (Sonnet 5 / Opus).
         # Тогава вторият AI корекционен цикъл е излишен и е бутилково гърло
         # (отряза се на голям график) — пропуска се, gate-ът остава авторитет.
-        self.worker_is_claude: bool = WORKER_MODEL_OVERRIDE.startswith("claude")
+        # Claude работник — и през директния WORKER_MODEL, И през OpenRouter
+        # (DEEPSEEK_MODEL=anthropic/claude-…).  Одит 2026-08: досега се гледаше
+        # само WORKER_MODEL → Sonnet през OpenRouter се третираше като DeepSeek
+        # (грешно batching/skip + грешна цена).
+        self.worker_is_claude: bool = (
+            WORKER_MODEL_OVERRIDE.startswith("claude")
+            or "claude" in MODEL_WORKER.lower()
+        )
 
         self.usage_log: list[dict] = []
 
@@ -1314,8 +1321,26 @@ class AIRouter:
 
     @staticmethod
     def _calculate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-        """Calculate cost for a specific API call."""
-        rate = PRICING.get(model, PRICING[MODEL_WORKER])
+        """Изчисли цена за извикване.
+
+        Одит 2026-08: при `DEEPSEEK_MODEL=anthropic/claude-sonnet-5` точен ключ в
+        PRICING няма → падаше към DeepSeek тарифата ($0.70/2M вместо ~$12/2M).
+        Затова при липса на точен ключ разпознаваме семейството по име (sonnet/
+        opus/claude).  NB: през OpenRouter реалната цена може да се различава
+        (markup) — това е приблизителна оценка; OpenRouter е авторитетът за billing.
+        """
+        # Семейството се проверява ПРЕДИ точния ключ: PRICING[MODEL_WORKER] може
+        # да е самият slug „anthropic/claude-sonnet-5" с DeepSeek тарифа (създаден
+        # при import), затова точен match би дал грешна цена.
+        m = (model or "").lower()
+        if "sonnet" in m:
+            rate = PRICING["claude-sonnet-5"]
+        elif "opus" in m:
+            rate = PRICING["claude-opus-5"]
+        elif "claude" in m:
+            rate = PRICING["claude-opus-5"]
+        else:
+            rate = PRICING.get(model, PRICING[MODEL_WORKER])
         return tokens_in * rate["input"] + tokens_out * rate["output"]
 
     # ------------------------------------------------------------------

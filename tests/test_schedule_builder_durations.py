@@ -365,3 +365,22 @@ def test_reschedule_output_passes_validation():
     validation = builder.validate_schedule(result["schedule"])
 
     assert validation["valid"], validation["errors"]
+
+
+def test_recompute_ceils_fractional_duration_to_whole_days():
+    """Договор (одит 2026-08): canonical моделът е с цели работни дни.
+    recompute закръгля дробна AI-стойност НАГОРЕ преди validation/export."""
+    from src.schedule_builder import ScheduleBuilder
+    res = ScheduleBuilder().recompute_durations(
+        [{"id": 1, "name": "Изкоп", "duration": 1.5, "start_day": 1, "dependencies": []}])
+    assert res["schedule"][0]["duration"] == 2
+
+
+def test_validate_rejects_fractional_duration_as_error():
+    """Ако дробна дурация стигне валидацията (некалкулиран график) → ТВЪРДА
+    грешка (fail-closed), не warning — иначе canonical ≠ експортиран XML."""
+    from src.schedule_builder import ScheduleBuilder
+    v = ScheduleBuilder().validate_schedule(
+        [{"id": 1, "name": "X", "duration": 1.5, "start_day": 1, "dependencies": []}])
+    assert any("дробна" in e for e in v["errors"])
+    assert v["valid"] is False

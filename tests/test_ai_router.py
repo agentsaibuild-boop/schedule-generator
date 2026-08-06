@@ -473,3 +473,27 @@ def test_worker_claude_does_not_send_structured_output(monkeypatch):
     assert len(client.messages.create_calls) == 1
     assert "output_config" not in client.messages.create_calls[0]
     assert out["content"] == '{"tasks": []}'
+
+
+# ===================================================================
+# Cost accounting при Claude през OpenRouter (одит 2026-08)
+# ===================================================================
+
+def test_cost_sonnet_via_openrouter_not_priced_as_deepseek():
+    """DEEPSEEK_MODEL=anthropic/claude-sonnet-5 → Sonnet тарифа (~$12/2M),
+    НЕ DeepSeek ($0.70/2M).  Семейството се разпознава по име."""
+    r = make_router()
+    c = r._calculate_cost("anthropic/claude-sonnet-5", 1_000_000, 1_000_000)
+    assert abs(c - 12.0) < 0.01, c
+
+
+def test_cost_opus_recognized():
+    r = make_router()
+    c = r._calculate_cost("anthropic/claude-opus-5", 1_000_000, 1_000_000)
+    assert abs(c - 30.0) < 0.01, c
+
+
+def test_cost_deepseek_still_cheap():
+    r = make_router()
+    c = r._calculate_cost("deepseek-chat", 1_000_000, 1_000_000)
+    assert abs(c - 0.70) < 0.01, c

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 import re
 from collections import defaultdict
 from typing import Any, NamedTuple
@@ -275,6 +276,16 @@ class ScheduleBuilder:
                 if old_duration is not None:
                     task["suggested_duration"] = old_duration
                 task.pop("calculated_duration", None)
+                # ДОГОВОР (одит 2026-08): canonical моделът е с ЦЕЛИ работни дни.
+                # Дробната AI-стойност се закръгля НАГОРЕ ТУК (преди validation/
+                # hash/UI/export), за да не се разминава валидираният график с
+                # експортирания (XML вече закръгляше мълчаливо).
+                if (isinstance(old_duration, float) and not isinstance(old_duration, bool)
+                        and old_duration != int(old_duration)):
+                    task["duration"] = math.ceil(old_duration)
+                    warnings.append(
+                        f"Задача '{name}' ({tid}): дробна продължителност "
+                        f"{old_duration} → {task['duration']} (цели работни дни).")
 
                 skipped.append({
                     "id": tid, "name": name,
@@ -653,16 +664,16 @@ class ScheduleBuilder:
                         f"Задача '{task.get('name')}' ({tid}) има отрицателна "
                         f"продължителност ({duration})."
                     )
-                # Договор (одит 2026-08 v28, т.1): моделът работи с ЦЕЛИ работни
-                # дни.  Дробна дурация е неопределена (Start/Finish/Duration се
-                # разминаваха при XML round-trip) → предупреждение + при експорт
-                # се закръгля НАГОРЕ.
+                # Договор (одит 2026-08 v28→v29, т.1): моделът работи с ЦЕЛИ
+                # работни дни.  recompute_durations закръгля дробните ПРЕДИ тук.
+                # Ако дробна стойност все пак стигне валидацията (некалкулиран
+                # график), тя е ТВЪРДА ГРЕШКА (fail-closed) — иначе валидираният
+                # canonical график се разминава с експортирания (XML закръгля).
                 elif isinstance(duration, float) and duration != int(duration):
-                    import math as _m
-                    warnings.append(
+                    errors.append(
                         f"Задача '{task.get('name')}' ({tid}) има дробна "
-                        f"продължителност ({duration}) — моделът работи с цели "
-                        f"работни дни; при експорт се закръгля до {_m.ceil(duration)}."
+                        f"продължителност ({duration}); моделът приема само цели "
+                        f"работни дни (пусни recompute_durations преди валидация)."
                     )
             elif duration is not None:
                 errors.append(
