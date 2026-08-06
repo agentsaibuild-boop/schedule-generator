@@ -9,13 +9,13 @@
 ```
 Audit target branch      : feat/structured-output-streaming   (PR #2)
 Branch tip (жив)         : прочетете с `git rev-parse HEAD` (докладът е върхът)
-Последна ЛОГИЧЕСКА промяна: cc5b913eaf0ec07f12583be788fa8f0c625db696
-                           (Sonnet §5 re-run фиксове §6е; commit-ите над него —
-                            доклад — НЕ променят логика; 1803 passed (Win))
+Последна ЛОГИЧЕСКА промяна: 8123dd5c4ff85042aa8bd8e4c17a10d421bf39cc
+                           (dep-парсер §6е; commit-ите над него — доклад —
+                            НЕ променят логика; 1812 passed (Win))
 Base main SHA            : 44302a9d3a5e7a34575b4a38d71d22222f25d0dc
 Working tree             : clean
-Archive SHA-256 @cc5b913 : ce9fa2fb4a3a6e1b03807201f66c11ff82e35d7281f53dc2baad1950afc42f54
-                           (git archive --format=tar cc5b913 | sha256sum)
+Archive SHA-256 @8123dd5 : 50213e7e3238be5cf37bd8df1876ae65274245aa68e5858f57581b3fca1be46e
+                           (git archive --format=tar 8123dd5 | sha256sum)
 ```
 
 **Важно за обхвата:** PR #1 е **merge-нат в main**; PR #2 (този HEAD) е **отворен,
@@ -23,7 +23,7 @@ Archive SHA-256 @cc5b913 : ce9fa2fb4a3a6e1b03807201f66c11ff82e35d7281f53dc2baad1
 проверка ползвайте горния HEAD (или чист ZIP от него). Твърденията по-долу,
 маркирани „(PR #2)", НЕ са в main.
 
-**Статус на тестовете:** **1803 unit/integration теста преминават, 1 пропуснат
+**Статус на тестовете:** **1812 unit/integration теста преминават, 1 пропуснат
 (skip); директорията `tests/e2e` е ИЗКЛЮЧЕНА изцяло → 0 E2E теста изпълнени.**
 (виж раздел 9 за какво това НЕ доказва.)
 
@@ -48,7 +48,7 @@ Archive SHA-256 @cc5b913 : ce9fa2fb4a3a6e1b03807201f66c11ff82e35d7281f53dc2baad1
 | BOQ coverage / provenance | `3335079` | да |
 | int-ID crash fix | `16c898c` | да |
 | CI actions v7 | `d99c1a3` | да |
-| **material enum + streaming + одит v27 фиксове + доклад** | `1e9763e`…`cc5b913` | **НЕ (PR #2)** |
+| **material enum + streaming + одит v27 фиксове + доклад** | `1e9763e`…`8123dd5` | **НЕ (PR #2)** |
 
 ---
 
@@ -247,15 +247,22 @@ milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `Predeces
 - 🐛→✅ **OpenRouter worker пътят:** твърд таван 8192, без streaming → truncation.
   Добавени streaming (`_openai_request`) + `GEN_MAX_TOKENS`/`ANALYSIS_MAX_TOKENS`
   (commits `912bbf9`, `cc5b913`).
-- ⚠️ **Ново реално наблюдение (НЕ false-positive):** Sonnet понякога пише
-  зависимостите като `"V03 (SS+30)"` — вгражда тип/лаг В ID-то. Валидаторът
-  правилно ги отхвърля (няма задача с това ID) → **коректно fail-closed на реална
-  грешка на модела**. Подобрение (парсване на този формат / промпт) = бъдеща работа.
+- 🐛→✅ **Sonnet пише deps като `"V03 (SS+30)"`** (тип/лаг вградени в ID-то) →
+  валидаторът търсеше несъществуващо ID. **Поправено:** `parse_dependency_token`
+  разбива низа на (base_id, type, lag); ползва се в validator, reschedule и
+  export (commit `8123dd5`).
+- ✅ **След парсването — финален re-run:** „несъществуващо ID" грешките
+  ИЗЧЕЗНАХА. Остатъчните рехекции са **РЕАЛНИ ПРОСТРАНСТВЕНИ КОНФЛИКТИ**: изкоп,
+  полагане и настилка за същия Ф225 водопровод работят на **същите 960м в
+  застъпващи се дни** (T-A/T-B/T-C). Гейтът ги хваща — точно за това е направен.
 
-**Извод:** дефинитивният §5 re-run **засилва доверието в гейта** (реалните
-рехекции са реални, false-positive-ите ги няма) и разкри критичен бъг, който щеше
-да счупи всеки силен provider. Пълно чисто покритие остава да се докара (анализ/
-генерация тавани + дефолт-конфиг за Sonnet).
+**Извод (силен):** след поправката на ВСИЧКИ валидаторски false-positives (int-ID
++ анотирани deps), гейтът отхвърля графика на Sonnet **само по реални причини**
+(пространствени конфликти — реална scheduling грешка на модела). Това е
+**най-силната демонстрация на fail-closed архитектурата**: реалните рехекции са
+реални, а Sonnet — макар силен — прави реални грешки, които детерминистиката
+коректно лови. Плюс: тестът разкри критичен schema бъг, който щеше да счупи всеки
+силен provider. (Пълно КСС покритие остава — Sonnet под-покри; отделен въпрос.)
 
 **За постоянна употреба (`.env`):** `DEEPSEEK_MODEL=anthropic/claude-sonnet-5`
 + `GEN_MAX_TOKENS=32000` + `MAX_ROWS_PER_PART=50` (или `deepseek/deepseek-v4-flash`
@@ -284,10 +291,10 @@ milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `Predeces
 
 ## 8. Тестове — какво доказват и какво НЕ
 
-- Изпълнено: `pytest tests/ --ignore=tests/e2e` → **1803 passed, 1 skipped** (Windows).
+- Изпълнено: `pytest tests/ --ignore=tests/e2e` → **1812 passed, 1 skipped** (Windows).
 - **Платформена разлика (одит):** 1 тест (tab/newline в име на файл) се пропуска
-  на Windows, но се изпълнява на Linux → там резултатът е **1804 passed, 0 skipped**.
-  Collection total = 1804. Затова манифест-числото зависи от платформата.
+  на Windows, но се изпълнява на Linux → там резултатът е **1813 passed, 0 skipped**.
+  Collection total = 1813. Затова манифест-числото зависи от платформата.
 - **0 E2E теста изпълнени** (`tests/e2e` изключена).
 - Следователно НЕ са доказани от този резултат: реалните provider SDK пътища,
   structured output срещу жив модел, streaming срещу жив модел, UI, MSPDI
@@ -348,12 +355,12 @@ milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `Predeces
 ```bash
 # 0. Точна ревизия
 git rev-parse HEAD           # запишете SHA-то (branch tip)
-git rev-parse cc5b913        # последна логическа промяна (кодът под одит)
+git rev-parse 8123dd5        # последна логическа промяна (кодът под одит)
 git status --short           # трябва: празно (clean)
 
 # 1. Всички unit теста (0 E2E)
 uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e
-#   Очаквано: 1803 passed, 1 skipped
+#   Очаквано: 1812 passed, 1 skipped
 
 # 2. Норм-стойности + структуриран произход
 python -c "import json;d=json.load(open('config/productivities.json',encoding='utf-8'));print(d['version']);import pprint;pprint.pprint(d['_provenance_v0_5'])"
@@ -377,6 +384,6 @@ git log --oneline 44302a9..HEAD    # PR #2 delta спрямо main
 synthetic fixture; реалният КСС даде 0→14 от 24, но иска Git история), структуриран произход на
 нормите, fail-closed артефакт и ясно разделяне unit↔E2E и HEAD↔история.
 Абсолютните твърдения („never breaks", „removes timeout risk", „bypass-proof")
-са смекчени. За пълна проверка е нужен чист audit ZIP от HEAD `cc5b913` и
+са смекчени. За пълна проверка е нужен чист audit ZIP от HEAD `8123dd5` и
 изпълнение на остатъка от раздел 10 (Sonnet run, MSPDI round-trip, live
 structured output, E2E, history scan).
