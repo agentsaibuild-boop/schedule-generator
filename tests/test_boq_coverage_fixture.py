@@ -81,22 +81,62 @@ def test_class_distribution_matches_expectation(tmp_path):
         "Възстановяване на асфалтова настилка": "pavement",     # обект бие глагол
         "Доставка и полагане на бетонови бордюри": "pavement",  # бордюр, не laying
         "Индивидуална монолитна РШ": "manhole",                 # абревиатура РШ
-        "Подземни ЕЛ кабели": None,                             # не-ВиК → ambiguous
+        # Кабелът има СВОЙ клас (жив прогон 2026-08-06).  Преди беше None
+        # („ambiguous"), тоест редът не можеше да бъде покрит от НИЩО и всеки
+        # реален проект с ЕЛ/ТТ част оставаше блокиран.  Защитата от одит v18 е
+        # запазена по друг начин: полагане на ВОДОПРОВОД е 'laying' ≠ 'cable',
+        # затова пак не покрива кабелен ред — виж теста по-долу.
+        "Подземни ЕЛ кабели": "cable",
     }
     for desc, cls in expect.items():
         assert got.get(desc) == cls, f"{desc!r}: очаквано {cls}, получено {got.get(desc)}"
 
 
 def test_no_unit_based_false_coverage(tmp_path):
-    """Одит v18: единичен ред (кабел, м) НЕ се покрива фалшиво от laying само
-    защото мярката е „м" — остава ambiguous, не covered."""
+    """Одит v18: кабелен ред (м) НЕ се покрива фалшиво от полагане на водопровод
+    само защото мярката е „м" и числото съвпада.
+
+    2026-08-06: редът вече има свой клас-покривач ('cable'), затова остава в
+    `uncovered`, а не в `ambiguous`.  И двете блокират експорта — важното
+    (никакво фалшиво покритие) не се е променило."""
     idx = _index(tmp_path)
     cable = next(r for r in idx if "кабел" in r.description)
     laying_task = {"id": "T", "name": "Полагане водопровод DN110 PE",
                    "length_m": 500.0, "unit": "м", "source_ref": cable.ref}
     cov = analyze_boq_coverage([laying_task], [cable])
     assert cov["covered"] == []                    # НЕ е фалшиво покрит
-    assert cable.ref in cov["ambiguous"]           # чака човешки преглед
+    assert cable.ref in cov["uncovered"]           # блокира експорта
+    assert any(d["ref"] == cable.ref for d in cov["derived"])   # видяно, но не покрива
+
+
+def test_cable_row_is_covered_by_cable_laying(tmp_path):
+    """Обратната страна: полагане на КАБЕЛ покрива кабелния ред."""
+    idx = _index(tmp_path)
+    cable = next(r for r in idx if "кабел" in r.description)
+    task = {"id": "T", "name": "Доставка и полагане на подземен ЕЛ кабел",
+            "length_m": cable.quantity, "unit": "м", "source_ref": cable.ref}
+    cov = analyze_boq_coverage([task], [cable])
+    assert cov["covered"] == [cable.ref]
+
+
+def test_cable_trench_works_do_not_double_cover(tmp_path):
+    """Изкоп/засипване по кабела НЕ са покривачи — иначе сборът би препокрил."""
+    idx = _index(tmp_path)
+    cable = next(r for r in idx if "кабел" in r.description)
+    half = (cable.quantity or 0) / 2
+    tasks = [
+        {"id": "L1", "name": "Полагане на ЕЛ кабел — Фронт 1",
+         "length_m": half, "unit": "м", "source_ref": cable.ref},
+        {"id": "L2", "name": "Полагане на ЕЛ кабел — Фронт 2",
+         "length_m": half, "unit": "м", "source_ref": cable.ref},
+        {"id": "E1", "name": "Изкоп за кабелна траншея — ЕЛ кабел",
+         "length_m": half, "unit": "м", "source_ref": cable.ref},
+        {"id": "B1", "name": "Засипване на траншея — ЕЛ кабел",
+         "length_m": half, "unit": "м", "source_ref": cable.ref},
+    ]
+    cov = analyze_boq_coverage(tasks, [cable])
+    assert cov["covered"] == [cable.ref]
+    assert cov["over_covered"] == {}
 
 
 def test_synthetic_kss_coverage_is_reproducible():

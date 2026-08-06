@@ -407,6 +407,35 @@ class ChatHandler:
         )}
 
     @staticmethod
+    def _parsed_analysis(analysis: dict) -> dict:
+        """Анализът като dict — независимо как моделът е форматирал отговора.
+
+        ЖИВ ПРОГОН 2026-08-06 (Sonnet през OpenRouter): анализът се върна
+        ограден с ```json … ``` и всяко място тук ползваше гол `json.loads`,
+        който гърми на оградата.  Провалът беше ТИХ и събаряше наведнъж:
+        project_type (→ празен, тоест и защитата „out_of_scope" мъртва),
+        conflicts (моделът НАМЕРИ противоречие и то не стигна до човека),
+        specifics, списъка с участъци и въпросника за последователността
+        (проект с водопровод И канализация не питаше нищо).
+
+        `parse_json_strict` маха оградата и, ако трябва, изкопава обекта от
+        заобикалящ текст.  При невъзможност — празен dict, както досега.
+        """
+        raw = analysis.get("analysis", "")
+        if isinstance(raw, dict):
+            return raw
+        if not isinstance(raw, str) or not raw.strip():
+            return {}
+        from src.json_contract import parse_json_strict
+        parsed = parse_json_strict(raw)
+        if parsed.data is None:
+            logger.warning("Анализът не е валиден JSON: %s", parsed.error)
+            return {}
+        if parsed.recovered:
+            logger.info("Анализът беше ограден с текст — JSON-ът е изкопан.")
+        return parsed.data
+
+    @staticmethod
     def _extract_project_type(analysis: dict, project_context: dict | None = None) -> str:
         """Extract project_type from AI analysis result with fallback to manual selection.
 
@@ -418,15 +447,7 @@ class ChatHandler:
         Returns:
             project_type string, or "" if not determinable.
         """
-        project_type = ""
-        raw = analysis.get("analysis", "")
-        if isinstance(raw, str):
-            try:
-                project_type = json.loads(raw).get("project_type", "")
-            except Exception:
-                pass
-        elif isinstance(raw, dict):
-            project_type = raw.get("project_type", "")
+        project_type = ChatHandler._parsed_analysis(analysis).get("project_type", "")
 
         if not project_type and project_context:
             project_type = project_context.get("type", "")
@@ -916,16 +937,7 @@ class ChatHandler:
             }
 
         # Step 1a: Surface conflicts found during cross-document analysis
-        conflicts: list[str] = []
-        raw_analysis = analysis.get("analysis", "")
-        if isinstance(raw_analysis, str):
-            try:
-                parsed_a = json.loads(raw_analysis)
-                conflicts = parsed_a.get("conflicts", [])
-            except Exception:
-                pass
-        elif isinstance(raw_analysis, dict):
-            conflicts = raw_analysis.get("conflicts", [])
+        conflicts: list[str] = self._parsed_analysis(analysis).get("conflicts", []) or []
 
         if conflicts:
             conflict_lines = "\n".join(f"  - {c}" for c in conflicts)
@@ -980,15 +992,7 @@ class ChatHandler:
 
         # C2 fix: refuse to generate when classifier returns out_of_scope
         if project_type == "out_of_scope":
-            raw_analysis = analysis.get("analysis", "")
-            specifics = ""
-            if isinstance(raw_analysis, str):
-                try:
-                    specifics = json.loads(raw_analysis).get("specifics", "")
-                except Exception:
-                    pass
-            elif isinstance(raw_analysis, dict):
-                specifics = raw_analysis.get("specifics", "")
+            specifics = self._parsed_analysis(analysis).get("specifics", "")
             reason = f"\n\n**Причина:** {specifics}" if specifics else ""
             return {
                 "response": (
@@ -1918,15 +1922,8 @@ class ChatHandler:
         ["Клон 1", "Клон 2", "ул. Витоша", ...].
         Empty list if no sections found.
         """
-        raw = analysis.get("analysis", "")
-        if isinstance(raw, str):
-            try:
-                parsed = json.loads(raw)
-            except Exception:
-                return []
-        elif isinstance(raw, dict):
-            parsed = raw
-        else:
+        parsed = ChatHandler._parsed_analysis(analysis)
+        if not parsed:
             return []
 
         quantities = parsed.get("quantities", {})
@@ -1952,15 +1949,7 @@ class ChatHandler:
         Returns a pending_sequence state dict with the first question,
         or None if the questionnaire is not needed (e.g. water-only project).
         """
-        raw = analysis.get("analysis", "")
-        parsed: dict = {}
-        if isinstance(raw, str):
-            try:
-                parsed = json.loads(raw)
-            except Exception:
-                pass
-        elif isinstance(raw, dict):
-            parsed = raw
+        parsed: dict = self._parsed_analysis(analysis)
 
         # Check scope + project_type + quantities keys for network presence
         scope = str(parsed.get("scope", "")).lower()

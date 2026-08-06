@@ -302,6 +302,20 @@ _UNIT_ALIASES = {
 _RATE_RE = re.compile(r"/|\bна\b|\bза\b|\bper\b|\bна\s*\d", re.IGNORECASE)
 
 
+def _looks_like_unit(raw: str) -> bool:
+    """Дали текстът изобщо е МЯРКА, а не описание, попаднало в колоната.
+
+    ЖИВ ПРОГОН 2026-08-06: в реалния КСС колоната за мярка на пътните редове
+    съдържа цялото описание („Доставка и полагане на средни бетонови бордюри
+    С18 15/25/50 см, БДС EN 1340:2005/NA : 2013").  Наклонените черти в него
+    го правеха „съставна мярка" и ВСЯКА задача за този ред се обвиняваше в
+    разминаване на размерността — редът не можеше да бъде покрит по никакъв
+    начин.  Мярка е нещо кратко; описание не е мярка и не бива да обвинява.
+    """
+    s = str(raw or "").strip()
+    return 0 < len(s) <= 12
+
+
 def _is_composite_unit(raw: str) -> bool:
     """Дали суровата мярка е съставна/размерностна (m3/m', „m3 на m", „kg per m").
 
@@ -309,7 +323,7 @@ def _is_composite_unit(raw: str) -> bool:
     („m3 на m", „м3 за л.м") минаваха за проста единица.
     """
     s = str(raw or "").strip().lower()
-    if not s:
+    if not s or not _looks_like_unit(s):
         return False
     if "/" in s:
         return True
@@ -436,7 +450,7 @@ _ACTIVITY_CLASSES = (
 # Класове, които представляват реална ФИЗИЧЕСКА работа (доказват BOQ количество).
 _PRODUCTION_CLASSES = frozenset({
     "excavation", "demolition", "laying", "backfill", "pavement",
-    "testing", "disinfection", "manhole", "transport",
+    "testing", "disinfection", "manhole", "transport", "cable",
 })
 # Класове/типове, които НЕ доказват количество (агрегат/точка/администрация).
 _NON_PRODUCTION_CLASSES = frozenset({
@@ -472,6 +486,12 @@ def activity_class(task_or_text: Any) -> str | None:
         return "laying"
     for cls, keywords in _ACTIVITY_CLASSES:
         if any(k in low for k in keywords):
+            # Кабелът е СВОЙ клас, но само когато дейността е ПОЛАГАНЕ (жив
+            # прогон 2026-08-06).  Изкопът за кабелна траншея си остава изкоп,
+            # засипването — засипване; иначе всички дейности по кабела биха
+            # минали за покривачи и сборът им би „препокрил" реда четирикратно.
+            if cls == "laying" and "кабел" in low:
+                return "cable"
             return cls
     # 3-буквени кодове за сградни отклонения (СРС/СВО/СКО) — матчват се като ЦЯЛА
     # ДУМА и с НАЙ-НИСЪК приоритет (одит v18): голият подниз „ско"/„сво" лъжливо
@@ -668,15 +688,32 @@ def _coverer_class(row: QuantityRow) -> str | None:
             or "хидрант" in desc or "спирател" in desc
             or re.search(r"\b(срс|сво|ско|рш)\b", desc)):   # кодове = цяла дума
         return "manhole"
+    # Кабели (ЕЛ/ТТ) — ЖИВ ПРОГОН 2026-08-06: редовете „Подземни ТТ кабели" и
+    # „Подземни ЕЛ кабели" нямаха клас-покривач, тоест не можеха да бъдат
+    # покрити от НИЩО.  Кабелът има СВОЙ клас, не „laying": иначе полагане на
+    # водопровод, цитиращо кабелен ред, би го покрило фалшиво (одит v18).
+    if "кабел" in desc:
+        return "cable"
     return None                  # неразпознато описание → ДВУСМИСЛЕНО (не по мярка)
 
 
 def analyze_boq_coverage(schedule: list[dict], index: list[QuantityRow]) -> dict:
     """Кои BOQ позиции са ДОКАЗАНО покрити от правилната производствена дейност.
 
-    За всяка позиция се търси дейност, която: (1) е производствена; (2) цитира
-    реда; (3) количеството/мярката/материалът съвпадат; (4) класът ѝ съвпада с
-    класа-покривач на реда.  Ако такава има точно една → покрит.  Две → дублиране.
+    За всяка позиция се събират дейностите, които: (1) са производствени;
+    (2) цитират реда; (3) минават кръстосаната проверка (мярка/материал);
+    (4) са от класа-покривач на реда.  Редът е ПОКРИТ, когато СБОРЪТ на
+    количествата им е равен на количеството в КСС (с допуск).
+
+    ЗАЩО СБОР, а не една дейност (жив прогон 2026-08-06): реалният график
+    разделя работата между ЕКИПИ/ФРОНТОВЕ — 174 бр. СВО стават 87 + 87,
+    10 824 м² асфалт стават 5 412 + 5 412.  Старото правило искаше ЕДНА
+    дейност с ЦЯЛОТО количество, тоест наказваше точно разпределението на
+    работата, което искаме от графика: 23 от 28 позиции излизаха „непокрити"
+    при напълно покрит обект.  Сега:
+      - сбор < количество (извън допуска) → НЕПОКРИТ (липсва работа);
+      - сбор > количество → ПРЕПОКРИТ (дублиране — остава нарушение);
+      - сбор ≈ количество → покрит, независимо на колко фронта е разделен.
     Дейност от друг клас, цитираща реда, е ПРОИЗВОДНА (не покрива, не е нарушение).
 
     Returns:
@@ -685,6 +722,7 @@ def analyze_boq_coverage(schedule: list[dict], index: list[QuantityRow]) -> dict
     by_ref = {row.ref: row for row in index}
     required = {r.ref for r in index if r.quantity is not None}
     coverers: dict[str, list[str]] = defaultdict(list)
+    totals: dict[str, float] = defaultdict(float)
     ambiguous: set = set()          # ред с неопределим клас, но има производна задача
     derived: list[dict] = []
 
@@ -698,9 +736,8 @@ def analyze_boq_coverage(schedule: list[dict], index: list[QuantityRow]) -> dict
         qty = _number(task.get("length_m") or task.get("quantity"))
         if qty is None:
             continue
-        # Количеството и мярката/материалът трябва да пасват на реда.
-        if abs(row.quantity - qty) / max(abs(row.quantity), 1e-9) > _QUANTITY_TOLERANCE:
-            continue
+        # Мярката/материалът трябва да пасват на реда.  Количеството вече НЕ се
+        # мери тук — то се сумира и се проверява за реда като цяло.
         if _cross_check(task, row):
             continue
         want = _coverer_class(row)
@@ -712,12 +749,23 @@ def analyze_boq_coverage(schedule: list[dict], index: list[QuantityRow]) -> dict
                 ambiguous.add(ref)          # редът иска човешки преглед
         elif got == want and got in _PRODUCTION_CLASSES:
             coverers[ref].append(str(task.get("id")))
+            totals[ref] += qty
         else:
             derived.append({"id": task.get("id"), "ref": ref,
                             "task_class": got, "coverer_class": want})
 
-    covered = {ref for ref, ts in coverers.items() if len(ts) >= 1}
-    over_covered = {ref: ts for ref, ts in coverers.items() if len(ts) >= 2}
+    covered: set = set()
+    over_covered: dict = {}
+    for ref, ids in coverers.items():
+        want_qty = by_ref[ref].quantity or 0.0
+        got_qty = totals[ref]
+        slack = abs(want_qty) * _QUANTITY_TOLERANCE
+        if got_qty > want_qty + slack:
+            over_covered[ref] = ids       # дублирана работа — нарушение
+        elif got_qty >= want_qty - slack:
+            covered.add(ref)              # покрит, на колкото и фронта да е
+        # по-малко от количеството → редът просто остава непокрит
+
     ambiguous -= covered
     uncovered = sorted(required - covered - ambiguous)
     return {
@@ -727,6 +775,9 @@ def analyze_boq_coverage(schedule: list[dict], index: list[QuantityRow]) -> dict
         "ambiguous": sorted(ambiguous),
         "over_covered": over_covered,
         "derived": derived,
+        "quantities": {ref: {"required": by_ref[ref].quantity, "planned": totals[ref],
+                             "tasks": ids}
+                       for ref, ids in coverers.items()},
     }
 
 

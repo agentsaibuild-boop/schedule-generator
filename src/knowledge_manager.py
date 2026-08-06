@@ -362,11 +362,41 @@ class KnowledgeManager:
     # Methodology
     # ------------------------------------------------------------------
 
+    # Типът, който АНАЛИЗЪТ връща, е на БЪЛГАРСКИ — точно както промптът го
+    # иска ('разпределителна мрежа', 'довеждащ', 'единичен', 'инженеринг').
+    # Файловете с методологии са с английски ключове.  ЖИВ ПРОГОН 2026-08-06:
+    # реалният търг се класифицира като 'инженеринг' и в промпта влизаше
+    # „Unknown project type: инженеринг" ВМЕСТО методологията — тихо, без
+    # никакво съобщение.  Тук двата речника се срещат.
+    _TYPE_ALIASES = {
+        "разпределителна мрежа": "distribution",
+        "разпределителна": "distribution",
+        "distribution": "distribution",
+        "довеждащ": "supply",
+        "довеждащ водопровод": "supply",
+        "supply": "supply",
+        "supply_pipeline": "supply",
+        "единичен": "single",
+        "единичен участък": "single",
+        "single": "single",
+        "single_section": "single",
+        "инженеринг": "engineering",
+        "engineering": "engineering",
+    }
+
+    @classmethod
+    def canonical_type(cls, project_type: str | None) -> str:
+        """Каноничният ключ на типа проект, или „" ако е непознат."""
+        key = str(project_type or "").strip().lower()
+        return cls._TYPE_ALIASES.get(key, "")
+
     def get_methodology(self, project_type: str) -> str:
         """Get methodology content for a project type.
 
         Args:
-            project_type: One of 'engineering', 'distribution', 'supply', 'single'.
+            project_type: Каноничен ключ ('engineering', 'distribution',
+                'supply', 'single') ИЛИ българското име от анализа
+                ('инженеринг', 'разпределителна мрежа', 'довеждащ', 'единичен').
 
         Returns:
             Methodology content as string.
@@ -378,7 +408,7 @@ class KnowledgeManager:
             "single": "single_section.md",
         }
 
-        filename = type_map.get(project_type)
+        filename = type_map.get(self.canonical_type(project_type))
         if not filename:
             return f"Unknown project type: {project_type}"
 
@@ -614,10 +644,21 @@ class KnowledgeManager:
                     parts.append(ref_content)
 
         # Tier 2: Methodology for specific project type
+        #
+        # Непознат тип НЕ влиза в промпта (одит на живия прогон 2026-08-06):
+        # досега там отиваше низът „Unknown project type: X" и моделът четеше
+        # СОБСТВЕНАТА си грешка като методология.  По-добре секцията да липсва,
+        # а логът да каже, че методология не е приложена.
         if project_type:
-            methodology = self.get_methodology(project_type)
-            parts.append(f"\n=== METHODOLOGY ({project_type}) ===")
-            parts.append(methodology)
+            canonical = self.canonical_type(project_type)
+            if canonical:
+                parts.append(f"\n=== METHODOLOGY ({canonical}) ===")
+                parts.append(self.get_methodology(canonical))
+            else:
+                logger.warning(
+                    "Непознат тип проект '%s' — промптът остава БЕЗ методология.",
+                    project_type,
+                )
 
         # Tier 3: Lessons learned — пълни блокове, подбрани по релевантност
         parts.extend(self._lessons_section(f"{project_type or ''} {query}"))
@@ -659,11 +700,17 @@ class KnowledgeManager:
                     parts.append(f"\n--- {ref_file.stem} ---")
                     parts.append(ref_content)
 
-        # Methodology
+        # Methodology — непознат тип не влиза (виж `_build_full_prompt`).
         if project_type:
-            methodology = self.get_methodology(project_type)
-            parts.append(f"\n=== METHODOLOGY ({project_type}) ===")
-            parts.append(methodology)
+            canonical = self.canonical_type(project_type)
+            if canonical:
+                parts.append(f"\n=== METHODOLOGY ({canonical}) ===")
+                parts.append(self.get_methodology(canonical))
+            else:
+                logger.warning(
+                    "Непознат тип проект '%s' — проверката остава БЕЗ методология.",
+                    project_type,
+                )
 
         # ALL lessons — с телата им, не само заглавията
         blocks = self.get_lesson_blocks()

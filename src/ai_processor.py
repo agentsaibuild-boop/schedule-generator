@@ -27,6 +27,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Колко пъти една отрязана част може да се разполови, преди да се обяви за
+# провалена.  4 деления стигат от 50 реда до 3 — под всеки реален лимит.
+_MAX_SPLIT_DEPTH = 4
+# Общ таван на разделянията за ЕДНО генериране.  Модел, който се отрязва при
+# всякакъв размер, иначе би направил двоично дърво от извиквания и би изял
+# бюджета, вместо да се предаде.
+_MAX_SPLITS_PER_RUN = 12
+
 
 def build_schedule_response_schema() -> dict:
     """ПЪЛНА JSON schema за изхода на worker-а, с `material` като enum (2026-08).
@@ -1034,7 +1042,11 @@ class AIProcessor:
         # MAX_ROWS_PER_PART реда — всяка партида е отделно AI извикване под тавана.
         # Конфигурируем (проба 2026-08-04): DeepSeek (8K изход) иска ≤5; Claude
         # работник (128K) може цял лист наведнъж → авто 50.  Env го надделява.
-        _rows_default = "50" if getattr(self.router, "worker_is_claude", False) else "5"
+        # ЖИВ ПРОГОН 2026-08-06: 50 реда за Claude работник беше сметнато по
+        # РАЗМЕРА НА КОНТЕКСТА, а лимитът е ИЗХОДЪТ — един ред ражда 7-10
+        # дейности по 2 фронта.  17 реда се отрязаха и трите пъти.  По-нисък
+        # таван + автоматично разделяне при отрязване (по-долу).
+        _rows_default = "6" if getattr(self.router, "worker_is_claude", False) else "5"
         MAX_ROWS_PER_PART = int(os.getenv("MAX_ROWS_PER_PART", _rows_default))
         # Кръгове на ДОПОКРИВАНЕ (2026-08, реален прогон): моделът върна 6 задачи
         # за 28 КСС реда — под-покритие → графикът е непълен → няма изход.
@@ -1058,6 +1070,7 @@ class AIProcessor:
         total_cost = 0.0
         gen_model = ""
         repair_rounds = 0
+        splits_done = 0
         cursor = 0
         while cursor < len(queue):
             item = queue[cursor]
@@ -1092,6 +1105,34 @@ class AIProcessor:
             total_cost += part.get("total_cost", 0.0)
             gen_model = part.get("gen_model") or gen_model
             ptasks = self._tasks_from(part.get("schedule"))
+
+            # --- ОТРЯЗАН изход → РАЗДЕЛИ частта, не се предавай ---
+            #
+            # ЖИВ ПРОГОН 2026-08-06: листът „Канализация" (17 позиции) се
+            # отряза и в ТРИТЕ опита → 0 задачи, тоест цяла мрежа изчезна от
+            # графика.  Причината е таванът за партида (50 реда при Claude
+            # работник): 17 реда × вериги × 2 фронта не се събират в един JSON.
+            # Вместо да гадаем правилното число, при отрязване частта се дели
+            # на две и всяка половина се пуска пак — така размерът се напасва
+            # към реалния лимит на модела, какъвто и да е той.
+            _truncated = bool(part.get("truncated")) or not ptasks
+            if (_truncated and len(rows) > 1
+                    and item.get("split_depth", 0) < _MAX_SPLIT_DEPTH
+                    and splits_done < _MAX_SPLITS_PER_RUN):
+                splits_done += 1
+                half = len(rows) // 2
+                _prog(f"    отрязан изход → разделям на {half} + {len(rows) - half} "
+                      f"позиции и опитвам пак")
+                for chunk in (rows[:half], rows[half:]):
+                    queue.append({**item, "rows": chunk,
+                                  "split_depth": item.get("split_depth", 0) + 1})
+                parts_info.append({
+                    "sheet": f"{sheet}{batch_txt}", "prefix": prefix, "tasks": 0,
+                    "part_status": part.get("status"), "truncated": True,
+                    "round": rnd, "split": True,
+                })
+                continue
+
             if rnd:
                 # Допокриващата част е питана САМО за липсващите редове.  Ако
                 # върне дейност, цитираща друг ред, тя най-вероятно дублира вече
@@ -1187,10 +1228,14 @@ class AIProcessor:
                 logger.warning("verify_citations (staged) се провали: %s", exc)
                 citation_report = {"checked": False, "reason": "exception"}
 
+        # Разделената част НЕ е провалена — работата ѝ е поета от половините ѝ,
+        # които се оценяват сами.  Ако и те се провалят, те ще влязат тук, а
+        # непокритите редове пак ще блокират експорта: fail-closed се пази.
         failed_parts = [
             p for p in parts_info
-            if p["part_status"] not in AIProcessor.ACCEPTED_STATUSES
-            or p["truncated"] or p["tasks"] == 0
+            if not p.get("split")
+            and (p["part_status"] not in AIProcessor.ACCEPTED_STATUSES
+                 or p["truncated"] or p["tasks"] == 0)
         ]
 
         staging_blockers: list[str] = []
