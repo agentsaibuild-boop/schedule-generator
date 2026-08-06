@@ -9,13 +9,13 @@
 ```
 Audit target branch      : feat/structured-output-streaming   (PR #2)
 Branch tip (жив)         : прочетете с `git rev-parse HEAD` (докладът е върхът)
-Последна ЛОГИЧЕСКА промяна: fa263045d4ababe5a4918d8eb69a282d6f9ec51d
-                           (одит v29 фиксове §6ж; commit-ите над него — доклад —
-                            НЕ променят логика; 1818 passed (Win))
+Последна ЛОГИЧЕСКА промяна: db43357ce57aba715249374d2169e453844794ce
+                           (одит v30 фиксове §6з; commit-ите над него — доклад —
+                            НЕ променят логика; 1828 passed (Win))
 Base main SHA            : 44302a9d3a5e7a34575b4a38d71d22222f25d0dc
 Working tree             : clean
-Archive SHA-256 @fa26304 : 3122c648345d1c782f01af14eda03c1edfa923ccffe19bd4b8542e54dd72b5b2
-                           (git archive --format=tar fa26304 | sha256sum)
+Archive SHA-256 @db43357 : 696c0b16bd904e999fbfa40eafde77068cc7c92bbe498a902bd85222bcd677a6
+                           (git archive --format=tar db43357 | sha256sum)
 ```
 
 **Важно за обхвата:** PR #1 е **merge-нат в main**; PR #2 (този HEAD) е **отворен,
@@ -23,7 +23,7 @@ Archive SHA-256 @fa26304 : 3122c648345d1c782f01af14eda03c1edfa923ccffe19bd4b8542
 проверка ползвайте горния HEAD (или чист ZIP от него). Твърденията по-долу,
 маркирани „(PR #2)", НЕ са в main.
 
-**Статус на тестовете:** **1818 unit/integration теста преминават, 1 пропуснат
+**Статус на тестовете:** **1828 unit/integration теста преминават, 1 пропуснат
 (skip); директорията `tests/e2e` е ИЗКЛЮЧЕНА изцяло → 0 E2E теста изпълнени.**
 (виж раздел 9 за какво това НЕ доказва.)
 
@@ -48,7 +48,7 @@ Archive SHA-256 @fa26304 : 3122c648345d1c782f01af14eda03c1edfa923ccffe19bd4b8542
 | BOQ coverage / provenance | `3335079` | да |
 | int-ID crash fix | `16c898c` | да |
 | CI actions v7 | `d99c1a3` | да |
-| **material enum + streaming + одит v27 фиксове + доклад** | `1e9763e`…`fa26304` | **НЕ (PR #2)** |
+| **material enum + streaming + одит v27 фиксове + доклад** | `1e9763e`…`db43357` | **НЕ (PR #2)** |
 
 ---
 
@@ -214,8 +214,9 @@ milestone = `PT0H0M0S` + `Milestone=1`; зависимостите → `Predeces
 **⚠️ Важно следствие от т.2:** валидаторът е давал **false-positive** „фантомни
 зависимости" за числови ID. Затова „гейтът отхвърли всяка част" в §5 частично се
 дължи на този бъг, НЕ само на слаб модел. След фикса частите с валидни числови
-зависимости вече не се отхвърлят фалшиво — §5 таблицата трябва да се пре-пусне
-със Sonnet (чака кредити), преди да се твърди „моделът дава счупени графи".
+зависимости вече не се отхвърлят фалшиво. §5 таблицата е **пре-пусната със
+Sonnet** (§6е, през OpenRouter): „несъществуващо ID" грешките изчезнаха, остават
+само реални пространствени конфликти.
 
 ### 6д. Одит v28 — двете незатворени находки от третия одит (5e345cf), затворени
 
@@ -297,6 +298,24 @@ input/output hashes, usage receipt, validation report, точните колиз
 е `python tools/kss_coverage_demo.py` (synthetic, детерминистично) — то НЕ ползва
 модел, а само детекцията+нормите.
 
+### 6з. Одит v30 — петият кръг (9ddfefe), кодовите находки затворени
+
+| # | Находка | Фикс | Тест |
+|---|---------|------|------|
+| крит. | `duration=-0.5` → recompute го закръгляше на **0** → минаваше gate-а като milestone | recompute закръгля само **положителни крайни** дробни; -0.5 остава → validator го отхвърля | `test_bad_numeric_duration_is_invalid_and_never_coerced` |
+| — | **NaN/Infinity** хвърляха exception във validator/recompute | всички `int()` места (`_as_int`, `_task_end`, `_total_duration`, reschedule) са `math.isfinite`-guarded → връщат INVALID, не гърмят | `test_bad_numeric_*` |
+| — | валидаторът приемаше **дробни start_day/end_day** (exporter ги `int()`-ваше) | дробни start/end → **ТВЪРДА ГРЕШКА** | `test_bad_numeric_start_end_is_invalid` |
+| — | Project FinishDate игнорираше **вложените sub_activities** | FinishDate се смята по **flattened** задачи | `test_project_finishdate_covers_nested_sub_activities` |
+| — | `.env.example` без пълния Sonnet/OpenRouter блок | добавен (с ЗАДЪЛЖИТЕЛНИЯ `DEEPSEEK_BASE_URL`) | — |
+| — | UI показваше Sonnet под колона „DeepSeek" | UI показва РЕАЛНИЯ работник | — |
+
+**5-дневен XML round-trip (одит):** `_working_day_to_date` е **коректна**
+работни-дни→дата функция (работен ден 6 при петъчен старт = следващ понеделник).
+Разминаването „6→8" е защото външен importer брои **календарни** дни, а
+експортът — **работни**. В кода **НЯМА** importer — MSPDI изходът е **еднопосочен**
+(за MS Project, който е календарно-осведомен); двупосочен round-trip иска importer
+със същата календарна логика.
+
 ---
 
 ## 7. Structured output + streaming (PR #2 — НЕ в main)
@@ -323,10 +342,10 @@ input/output hashes, usage receipt, validation report, точните колиз
 
 ## 8. Тестове — какво доказват и какво НЕ
 
-- Изпълнено: `pytest tests/ --ignore=tests/e2e` → **1818 passed, 1 skipped** (Windows).
+- Изпълнено: `pytest tests/ --ignore=tests/e2e` → **1828 passed, 1 skipped** (Windows).
 - **Платформена разлика (одит):** 1 тест (tab/newline в име на файл) се пропуска
-  на Windows, но се изпълнява на Linux → там резултатът е **1819 passed, 0 skipped**.
-  Collection total = 1819. Затова манифест-числото зависи от платформата.
+  на Windows, но се изпълнява на Linux → там резултатът е **1829 passed, 0 skipped**.
+  Collection total = 1829. Затова манифест-числото зависи от платформата.
 - **0 E2E теста изпълнени** (`tests/e2e` изключена).
 - Следователно НЕ са доказани от този резултат: реалните provider SDK пътища,
   structured output срещу жив модел, streaming срещу жив модел, UI, MSPDI
@@ -388,12 +407,12 @@ input/output hashes, usage receipt, validation report, точните колиз
 ```bash
 # 0. Точна ревизия
 git rev-parse HEAD           # запишете SHA-то (branch tip)
-git rev-parse fa26304        # последна логическа промяна (кодът под одит)
+git rev-parse db43357        # последна логическа промяна (кодът под одит)
 git status --short           # трябва: празно (clean)
 
 # 1. Всички unit теста (0 E2E)
 uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e
-#   Очаквано: 1818 passed, 1 skipped
+#   Очаквано: 1828 passed, 1 skipped
 
 # 2. Норм-стойности + структуриран произход
 python -c "import json;d=json.load(open('config/productivities.json',encoding='utf-8'));print(d['version']);import pprint;pprint.pprint(d['_provenance_v0_5'])"
@@ -417,6 +436,7 @@ git log --oneline 44302a9..HEAD    # PR #2 delta спрямо main
 synthetic fixture; реалният КСС даде 0→14 от 24, но иска Git история), структуриран произход на
 нормите, fail-closed артефакт и ясно разделяне unit↔E2E и HEAD↔история.
 Абсолютните твърдения („never breaks", „removes timeout risk", „bypass-proof")
-са смекчени. За пълна проверка е нужен чист audit ZIP от HEAD `fa26304` и
-изпълнение на остатъка от раздел 10 (Sonnet run, MSPDI round-trip, live
-structured output, E2E, history scan).
+са смекчени. Sonnet §5 re-run и live structured-output са **направени** (§6е).
+За пълна проверка остава раздел 10: **bit-възпроизводим** Sonnet артефакт
+(клиентски вход), пълно КСС покритие, реален MS Project round-trip, E2E,
+history scan.
