@@ -634,6 +634,22 @@ class ChatHandler:
                 f"позиции от КСС, останали без своя дейност в първия проход."
             )
 
+        unproductive = [p for p in (gen_result.get("parts") or [])
+                        if p.get("unproductive")]
+        if unproductive:
+            lines.append(
+                f"\n🚫 **{len(unproductive)} допълнителни опита не доказаха нито "
+                f"един ред** — задачите им НЕ са добавени, за да не се брои една "
+                f"и съща работа два пъти. Липсващите позиции остават блокер."
+            )
+
+        nets = (gen_result.get("network_links") or {}).get("added") or []
+        if nets:
+            lines.append(
+                f"\n🌊 **Ред на мрежите:** {len(nets)} връзки — вода → канал → "
+                f"пътни (Правило #74/#75). Частите вече не тръгват всички в ден 1."
+            )
+
         repair = gen_result.get("spatial_repair") or {}
         added = repair.get("added_links") or []
         unresolved = repair.get("unresolved") or []

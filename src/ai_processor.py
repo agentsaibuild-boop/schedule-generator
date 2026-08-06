@@ -1148,6 +1148,30 @@ class AIProcessor:
             # полета, които моделът си е сложил сам.
             from src.provenance import strip_ai_provenance
             strip_ai_provenance(ptasks)
+
+            # --- Безплодно допокриване НЕ влиза в графика ---
+            #
+            # ЖИВ ПРОГОН 2026-08-06: кръг 1 и кръг 2 направиха ЕДНИ И СЪЩИ
+            # бетонови кожуси и едни и същи улични оттоци — реална работа,
+            # преброена два пъти — защото нито един от двата не цитира
+            # исканите редове, тоест покритието не мръдна и редовете се
+            # поискаха пак.  Допокриване, което НЕ доказва нито един ред, не
+            # добавя стойност, а само дублира работа: не се слива и не се
+            # опитва пак.  Липсващите редове остават блокер, както трябва.
+            if rnd:
+                before = {r.ref for r in self._uncovered_rows(merged_tasks, rows)}
+                after = {r.ref for r in self._uncovered_rows(merged_tasks + ptasks, rows)}
+                if not (before - after):
+                    _prog(f"    допокриването не доказа нито един ред — "
+                          f"{len(ptasks)} задачи не се добавят (дублират работа)")
+                    parts_info.append({
+                        "sheet": f"{sheet}{batch_txt}", "prefix": prefix,
+                        "tasks": 0, "part_status": part.get("status"),
+                        "truncated": part.get("truncated"), "round": rnd,
+                        "unproductive": True,
+                    })
+                    continue
+
             merged_tasks.extend(ptasks)
             parts_info.append({
                 "sheet": f"{sheet}{batch_txt}", "prefix": prefix,
@@ -1179,6 +1203,24 @@ class AIProcessor:
             "changes": recomputed["changes"], "skipped": recomputed["skipped"],
             "warnings": recomputed["warnings"], "summary": recomputed["summary"],
         }
+
+        # Свързване на МРЕЖИТЕ (2026-08-06, жив прогон): частите се генерират
+        # независимо и всяка тръгва от ден 1 — водопровод, канализация и пътна
+        # в един ден, тоест настилката се възстановява преди изкопа под нея.
+        # Правило #74/#75 (урок #11): вода → канал → пътни с 10-12 дни lag.
+        _networks: dict[str, list[str]] = {}
+        for task in merged["tasks"]:
+            tid = str(task.get("id", ""))
+            key = tid.split("-", 1)[0].rstrip("0123456789") if "-" in tid else ""
+            if key:
+                _networks.setdefault(key, []).append(tid)
+        linked = builder.link_networks(
+            merged["tasks"], _networks,
+            lag_days=int(os.getenv("ROLLING_WAVE_LAG_DAYS", "12")))
+        merged["tasks"] = linked["schedule"]
+        if linked["added_links"]:
+            _prog(f"Ред на мрежите (вода→канал→пътни): "
+                  f"{len(linked['added_links'])} връзки.")
 
         # Пространствен ремонт (2026-08): частите се генерират независимо и
         # всяка започва от ден 1 → два екипа на едни и същи метри в едни и същи
@@ -1231,9 +1273,13 @@ class AIProcessor:
         # Разделената част НЕ е провалена — работата ѝ е поета от половините ѝ,
         # които се оценяват сами.  Ако и те се провалят, те ще влязат тук, а
         # непокритите редове пак ще блокират експорта: fail-closed се пази.
+        # Безплодното допокриване също не е „провалена част" — то е ДОПЪЛНИТЕЛЕН
+        # опит върху вече обработени редове.  Непокритите редове си остават
+        # блокер сами по себе си; двойно наказание би обявило за невалиден и
+        # график, чиято основна част е наред.
         failed_parts = [
             p for p in parts_info
-            if not p.get("split")
+            if not p.get("split") and not p.get("unproductive")
             and (p["part_status"] not in AIProcessor.ACCEPTED_STATUSES
                  or p["truncated"] or p["tasks"] == 0)
         ]
@@ -1290,6 +1336,10 @@ class AIProcessor:
             "staged": True,
             "parts": parts_info,
             "repair_rounds": repair_rounds,
+            "network_links": {
+                "added": linked["added_links"],
+                "skipped": linked["skipped"],
+            },
             "spatial_repair": {
                 "added_links": spatial_fix["added_links"],
                 "unresolved": spatial_fix["unresolved"],

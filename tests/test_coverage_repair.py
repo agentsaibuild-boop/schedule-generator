@@ -105,17 +105,40 @@ def test_repair_tasks_do_not_collide_with_original_ids():
     assert len(ids) == len(set(ids)), f"дублирани ID-та: {ids}"
 
 
-def test_repair_stops_at_the_configured_cap(monkeypatch):
-    """Модел, който упорито не покрива, не води до безкрайно питане."""
+def test_repair_stops_when_it_proves_nothing(monkeypatch):
+    """Модел, който упорито не покрива, не води до безкрайно питане.
+
+    2026-08-06 (жив прогон): допокриване, което не доказа нито един ред, вече
+    спира веригата — иначе следващият кръг прави СЪЩАТА работа втори път
+    (наблюдавано: два комплекта бетонови кожуси и два комплекта улични оттоци).
+    """
     monkeypatch.setenv("COVERAGE_REPAIR_ROUNDS", "2")
     boq = [_boq("A", 2, 100.0), _boq("A", 3, 300.0)]
     rec = _Recorder([[_task("T1", "КСС.xlsx!A!2", 100.0)]])   # винаги едно и също
 
     res = _proc(rec).generate_schedule_staged({}, "distribution", boq_index=boq)
 
-    assert len(rec.calls) == 3, "1 опит + 2 допокривания"
+    assert len(rec.calls) == 2, "1 опит + 1 безплодно допокриване, после спира"
     assert "КСС.xlsx!A!3" in res["coverage"]["uncovered"]
     assert res["exportable"] is False, "непълният график остава неекспортируем"
+
+
+def test_unproductive_repair_tasks_are_not_merged(monkeypatch):
+    """Дублиращата работа от безплодно допокриване не влиза в графика."""
+    monkeypatch.setenv("COVERAGE_REPAIR_ROUNDS", "2")
+    boq = [_boq("A", 2, 100.0), _boq("A", 3, 300.0)]
+    rec = _Recorder([
+        [_task("T1", "КСС.xlsx!A!2", 100.0)],
+        # допокриването прави работа, но НЕ цитира искания ред → не доказва нищо
+        [{"id": "X1", "name": "Кофраж за бетонов кожух", "start_day": 1,
+          "end_day": 3, "duration": 3, "dependencies": []}],
+    ])
+    res = _proc(rec).generate_schedule_staged({}, "distribution", boq_index=boq)
+
+    names = [t["name"] for t in res["schedule"]["tasks"]]
+    assert not any("Кофраж" in n for n in names), names
+    assert [p for p in res["parts"] if p.get("unproductive")]
+    assert res["failed_parts"] == [], "безплодният опит не е провалена част"
 
 
 def test_repair_can_be_switched_off(monkeypatch):

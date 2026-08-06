@@ -632,6 +632,93 @@ class ScheduleBuilder:
             "rounds": rounds,
         }
 
+    def link_networks(
+        self,
+        schedule: list[dict],
+        networks: dict[str, list[str]],
+        *,
+        order: list[str] | None = None,
+        lag_days: int = 12,
+    ) -> dict[str, Any]:
+        """Свържи ПАРАЛЕЛНИТЕ мрежи по реда „вода → канал → пътни".
+
+        ЖИВ ПРОГОН 2026-08-06: частите се генерират независимо и всяка започва
+        от ден 1 — водопровод, канализация, ЕЛ и пътна тръгват в един и същи
+        ден, а възстановяването на настилка предхожда изкопите под нея.
+        Правило #74 (урок #11) казва точно обратното: Rolling Wave — вода →
+        канал → пътни с 10-12 дни закъснение, а Правило #75 — пътните не
+        завършват преди канализацията.
+
+        Реализация (SS с лаг, не FS): следващата мрежа ТРЪГВА `lag_days` след
+        началото на предната — вълните се застъпват, както е на терен, вместо
+        да се редят една след друга.  Плюс FF връзка канал→пътни, за да не
+        приключат пътните преди канализацията.
+
+        Args:
+            schedule: Списък задачи (не се мутира).
+            networks: {ключ на мрежа: [id-та на задачи]}.
+            order: Редът на мрежите; по подразбиране ["В", "К", "П"].
+            lag_days: Закъснението на вълната в дни.
+
+        Returns:
+            {schedule, added_links, skipped}
+        """
+        order = order or ["В", "К", "П"]
+        present = [key for key in order if networks.get(key)]
+        if len(present) < 2:
+            return {"schedule": list(schedule), "added_links": [], "skipped": []}
+
+        updated = copy.deepcopy(schedule)
+        by_id = {_task_key(t): t for t in updated}
+        added: list[dict] = []
+        skipped: list[dict] = []
+
+        def _tasks_of(key: str) -> list[dict]:
+            return [by_id[tid] for tid in networks.get(key, []) if tid in by_id]
+
+        def _roots(tasks: list[dict]) -> list[dict]:
+            ids = {_task_key(t) for t in tasks}
+            return [t for t in tasks
+                    if not any(d in ids for d in dependency_ids(t))]
+
+        def _add(pred: dict, succ: dict, link_type: str, lag: int, why: str) -> None:
+            pid, sid = _task_key(pred), _task_key(succ)
+            if pid == sid or pid in dependency_ids(succ):
+                return
+            deps = list(succ.get("dependencies") or [])
+            succ["dependencies"] = deps + [
+                {"predecessor_id": pid, "type": link_type, "lag_days": lag}]
+            if self._detect_cycle(updated, {_task_key(t): t for t in updated}):
+                succ["dependencies"] = deps
+                skipped.append({"predecessor": pid, "successor": sid, "reason": "cycle"})
+                return
+            added.append({"predecessor": pid, "successor": sid,
+                          "type": link_type, "lag_days": lag, "reason": why})
+
+        for earlier, later in zip(present, present[1:]):
+            lead = _tasks_of(earlier)
+            follow = _tasks_of(later)
+            if not lead or not follow:
+                continue
+            anchor = min(lead, key=lambda t: (self._as_int(t.get("start_day"), 1),
+                                              _task_key(t)))
+            for root in _roots(follow):
+                _add(anchor, root, "SS", lag_days, "rolling_wave")
+
+        # Правило #75: пътните не завършват преди канализацията.
+        if "К" in present and "П" in present:
+            sewer, road = _tasks_of("К"), _tasks_of("П")
+            if sewer and road:
+                last_sewer = max(sewer, key=lambda t: (self._task_end(t), _task_key(t)))
+                last_road = max(road, key=lambda t: (self._task_end(t), _task_key(t)))
+                _add(last_sewer, last_road, "FF", 0, "road_not_before_sewer")
+
+        if added:
+            result = self.reschedule(updated)
+            if not result["warnings"]:
+                updated = result["schedule"]
+        return {"schedule": updated, "added_links": added, "skipped": skipped}
+
     @classmethod
     def _serialization_order(
         cls, a: dict | None, b: dict | None
