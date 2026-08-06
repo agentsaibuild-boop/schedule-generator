@@ -55,6 +55,35 @@ def _as_lag(value: Any) -> int:
     return int(value)
 
 
+# Анотирана зависимост като низ: "V03 (SS+30)", "К-1 [FS-2]", "A2(SS)" — някои
+# модели (Sonnet, 2026-08) вграждат тип/лаг В ID-то вместо в отделни полета.
+# Без парсване валидаторът търси задача с ID „V03 (SS+30)" (няма) и валиден
+# график изглежда счупен.  Хващаме ID + опционален тип (FS/SS/FF/SF) + лаг.
+_DEP_ANNOT_RE = re.compile(
+    r"^\s*(?P<id>.+?)\s*[\(\[]\s*"
+    r"(?P<type>FS|SS|FF|SF)?\s*(?P<lag>[+-]\s*\d+)?\s*[\)\]]\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_dependency_token(raw: Any) -> tuple[str, str, int]:
+    """Разбий низ-зависимост на (base_id, type, lag).
+
+    „V03" → ("V03", "", 0);  „V03 (SS+30)" → ("V03", "SS", 30);
+    „К-1 [FS-2]" → ("К-1", "FS", -2).  Без анотация типът/лагът са празни/0 и
+    извикващият ползва своите подразбирания.
+    """
+    s = str(raw).strip()
+    m = _DEP_ANNOT_RE.match(s)
+    if not m:
+        return s, "", 0
+    base = m.group("id").strip()
+    typ = (m.group("type") or "").upper()
+    lag_raw = (m.group("lag") or "").replace(" ", "")
+    lag = int(lag_raw) if lag_raw else 0
+    return base, typ, lag
+
+
 def dependency_links(task: dict) -> list[DependencyLink]:
     """Извлечи зависимостите СЪС семантиката им.
 
@@ -79,7 +108,14 @@ def dependency_links(task: dict) -> list[DependencyLink]:
             link_type = str(dep.get("type") or dep.get("dependency_type") or "FS").upper()
             lag = _as_lag(dep.get("lag_days", dep.get("lag")))
         elif isinstance(dep, str) and dep:
-            pred, link_type, lag = dep, task_type, task_lag
+            # Анотираните низове („V03 (SS+30)") носят СВОЙ тип/лаг; иначе
+            # наследяват тези на задачата.
+            base, a_type, a_lag = parse_dependency_token(dep)
+            if not base:
+                continue
+            pred = base
+            link_type = a_type or task_type
+            lag = a_lag if a_type else task_lag
         elif isinstance(dep, int) and not isinstance(dep, bool):
             pred, link_type, lag = str(dep), task_type, task_lag
         else:
@@ -107,7 +143,9 @@ def dependency_ids(task: dict) -> list[str]:
     for dep in task.get("dependencies") or []:
         if isinstance(dep, str):
             if dep:
-                ids.append(dep)
+                base = parse_dependency_token(dep)[0]
+                if base:
+                    ids.append(base)
         elif isinstance(dep, int) and not isinstance(dep, bool):
             ids.append(str(dep))
         elif isinstance(dep, dict):

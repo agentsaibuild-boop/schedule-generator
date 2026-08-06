@@ -484,9 +484,12 @@ def _add_predecessor_links(
             dep_type_str = (dep.get("type") or "FS").upper()
             lag_days = int(dep.get("lag") or dep.get("lag_days") or 0)
         else:
-            dep_id = str(dep).strip()
-            dep_type_str = (task.get("dependency_type") or "FS").upper()
-            lag_days = int(task.get("lag_days") or 0)
+            # Анотиран низ „D01 (SS+20)" → ID + тип/лаг (иначе тези на задачата).
+            from src.schedule_builder import parse_dependency_token
+            base, a_type, a_lag = parse_dependency_token(dep)
+            dep_id = base
+            dep_type_str = (a_type or task.get("dependency_type") or "FS").upper()
+            lag_days = a_lag if a_type else int(task.get("lag_days") or 0)
 
         type_code = _DEPENDENCY_TYPE_MAP.get(dep_type_str, "1")
         link_lag = str(lag_days * MINUTES_PER_DAY * LINK_LAG_FACTOR)

@@ -281,3 +281,47 @@ def test_task_level_bad_dependency_type_is_caught():
     ])
     assert result["valid"] is False
     assert any("dependency_type" in e for e in result["errors"])
+
+
+# ===================================================================
+# Анотирани низ-зависимости „V03 (SS+30)" (Sonnet формат, одит 2026-08)
+# ===================================================================
+
+import pytest as _pytest
+from src.schedule_builder import (
+    parse_dependency_token, dependency_ids, dependency_links, ScheduleBuilder,
+)
+
+
+@_pytest.mark.parametrize(("raw", "base", "typ", "lag"), [
+    ("V03", "V03", "", 0),
+    ("V03 (SS+30)", "V03", "SS", 30),
+    ("К-1 [FS-2]", "К-1", "FS", -2),
+    ("A2(SS)", "A2", "SS", 0),
+    ("B5 (FF+0)", "B5", "FF", 0),
+    ("обикновено име", "обикновено име", "", 0),
+])
+def test_parse_dependency_token(raw, base, typ, lag):
+    assert parse_dependency_token(raw) == (base, typ, lag)
+
+
+def test_annotated_dependency_id_is_base():
+    task = {"dependencies": ["V03 (SS+30)", "К-1 [FS-2]"]}
+    assert dependency_ids(task) == ["V03", "К-1"]
+
+
+def test_annotated_dependency_carries_type_and_lag():
+    task = {"dependencies": ["V03 (SS+30)"]}
+    link = dependency_links(task)[0]
+    assert (link.predecessor_id, link.type, link.lag_days) == ("V03", "SS", 30)
+
+
+def test_valid_schedule_with_annotated_deps_not_falsely_rejected():
+    """Регресия (Sonnet, 2026-08): 'V03 (SS+30)' даваше 'несъществуващо ID'."""
+    schedule = [
+        {"id": "V03", "name": "Изкоп", "duration": 5, "start_day": 1, "dependencies": []},
+        {"id": "V07", "name": "Настилка", "duration": 3, "start_day": 40,
+         "dependencies": ["V03 (SS+30)"]},
+    ]
+    result = ScheduleBuilder().validate_schedule(schedule)
+    assert not any("несъществуващо" in e for e in result["errors"]), result["errors"]
