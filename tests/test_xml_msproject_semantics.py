@@ -270,3 +270,16 @@ def test_project_finishdate_matches_last_task_finish_5day():
     pf = root.findtext(f"{NS}FinishDate")
     task = _tasks(xml)[-1]
     assert pf[:10] == _g(task, "Finish")[:10]
+
+
+def test_project_finishdate_covers_nested_sub_activities():
+    """Одит 2026-08: FinishDate игнорираше вложените sub_activities.  Дете,
+    което свършва по-късно от родителя, трябва да е в обхвата на header-а."""
+    sched = [{"id": 1, "name": "Родител", "duration": 2, "start_day": 1,
+              "sub_activities": [{"id": 2, "name": "Дете", "duration": 2,
+                                  "start_day": 10, "end_day": 11}]}]
+    root = ET.fromstring(_xml(sched, calendar_type="7-day"))
+    pf = root.findtext(f"{NS}FinishDate")[:10]
+    finishes = [_g(t, "Finish")[:10] for t in _tasks(_xml(sched, calendar_type="7-day"))
+                if _g(t, "Finish")]
+    assert pf >= max(finishes)

@@ -647,7 +647,11 @@ with st.sidebar:
 
     ds_status = "\U0001f7e2 Работи" if ai_health.get("deepseek") else "\U0001f534 Недостъпен"
     an_status = "\U0001f7e2 Работи" if ai_health.get("anthropic") else "\U0001f534 Недостъпен"
-    st.caption(f"DeepSeek (работник): {ds_status}")
+    # Показвай РЕАЛНИЯ работник (одит 2026-08): при DEEPSEEK_MODEL=anthropic/
+    # claude-sonnet-5 работникът е Sonnet през OpenRouter, не DeepSeek.
+    from src.ai_router import MODEL_WORKER as _WM
+    _worker_label = _WM.split("/")[-1] if "/" in _WM else _WM
+    st.caption(f"Работник ({_worker_label}): {ds_status}")
     st.caption(f"Anthropic (контрольор): {an_status}")
 
     if ai_health.get("fallback_active"):

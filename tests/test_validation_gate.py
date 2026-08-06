@@ -338,3 +338,32 @@ def test_circular_dependency_with_integer_ids_is_caught():
     ]
     result = ScheduleBuilder().validate_schedule(schedule)
     assert any("ръгова завис" in e or "цикъл" in e.lower() for e in result["errors"]), result["errors"]
+
+
+# ===================================================================
+# Числов fail-closed договор (одит 2026-08 v30)
+# ===================================================================
+
+import math as _math
+import pytest as _pt
+from src.schedule_builder import ScheduleBuilder as _SB
+
+
+@_pt.mark.parametrize("bad", [-0.5, -5, float("nan"), float("inf"), float("-inf")])
+def test_bad_numeric_duration_is_invalid_and_never_coerced(bad):
+    """-0.5 не бива да става 0 (milestone); NaN/Inf/отрицателна → INVALID,
+    без recompute да гърми (одит: -0.5→0 минаваше authoritative gate-а)."""
+    task = {"id": 1, "name": "X", "duration": bad, "start_day": 1, "dependencies": []}
+    r = _SB().recompute_durations([dict(task)])          # не бива да хвърля
+    assert _SB().validate_schedule([dict(task)])["valid"] is False
+
+
+@_pt.mark.parametrize("field,bad", [
+    ("start_day", float("nan")), ("start_day", 1.5),
+    ("end_day", float("inf")), ("end_day", 7.5),
+])
+def test_bad_numeric_start_end_is_invalid(field, bad):
+    task = {"id": 1, "name": "X", "duration": 2, "start_day": 1, "dependencies": []}
+    task[field] = bad
+    _SB().recompute_durations([dict(task)])              # не бива да хвърля
+    assert _SB().validate_schedule([dict(task)])["valid"] is False

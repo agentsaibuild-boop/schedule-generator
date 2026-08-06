@@ -276,11 +276,13 @@ class ScheduleBuilder:
                 if old_duration is not None:
                     task["suggested_duration"] = old_duration
                 task.pop("calculated_duration", None)
-                # ДОГОВОР (одит 2026-08): canonical моделът е с ЦЕЛИ работни дни.
-                # Дробната AI-стойност се закръгля НАГОРЕ ТУК (преди validation/
-                # hash/UI/export), за да не се разминава валидираният график с
-                # експортирания (XML вече закръгляше мълчаливо).
+                # ДОГОВОР (одит 2026-08 v30): canonical моделът е с ЦЕЛИ работни
+                # дни.  Закръгля се НАГОРЕ ТУК само ПОЛОЖИТЕЛНА КРАЙНА дробна
+                # стойност.  Отрицателна/NaN/Inf НЕ се пипат — оставят се на
+                # валидатора да ги отхвърли (иначе -0.5 → ceil → 0 → milestone,
+                # т.е. невъзможна стойност минаваше authoritative gate-а).
                 if (isinstance(old_duration, float) and not isinstance(old_duration, bool)
+                        and math.isfinite(old_duration) and old_duration > 0
                         and old_duration != int(old_duration)):
                     task["duration"] = math.ceil(old_duration)
                     warnings.append(
@@ -418,7 +420,11 @@ class ScheduleBuilder:
             start = self._as_int(task.get("start_day"), 1)
             orig_start[tid] = start
             end = task.get("end_day")
-            if isinstance(end, (int, float)) and not isinstance(end, bool):
+            # NaN/Inf НЕ бива да гърми reschedule с int() (одит 2026-08 v30) —
+            # пада към изчисление от продължителността; валидаторът после
+            # отхвърля не-крайните стойности fail-closed.
+            if (isinstance(end, (int, float)) and not isinstance(end, bool)
+                    and math.isfinite(end)):
                 orig_end[tid] = int(end)
             else:
                 orig_end[tid] = start + max(self._as_int(task.get("duration"), 0), 1) - 1
@@ -512,15 +518,26 @@ class ScheduleBuilder:
     def _task_end(cls, task: dict) -> int:
         """Краен ден на задача — от end_day, иначе изведен от start+duration."""
         end = task.get("end_day")
-        if isinstance(end, (int, float)) and not isinstance(end, bool):
+        # NaN/Inf НЕ бива да гърми с int() (одит 2026-08 v30) — пада към
+        # изчисление от продължителността; валидаторът вече е маркирал
+        # не-крайната стойност като грешка fail-closed.
+        if (isinstance(end, (int, float)) and not isinstance(end, bool)
+                and math.isfinite(end)):
             return int(end)
         start = cls._as_int(task.get("start_day"), 0)
         return start + max(cls._as_int(task.get("duration"), 0), 1) - 1
 
     @staticmethod
     def _as_int(value: Any, default: int) -> int:
-        """Cast to int, falling back to default for None/bool/non-numeric."""
+        """Cast to int; default за None/bool/нечислово/НЕ-крайно (NaN/Inf).
+
+        Одит 2026-08 v30: без isfinite проверката `int(nan)`/`int(inf)` вдигаше
+        ValueError и сваляше reschedule (а с него цялото преизчисляване) — вместо
+        да остави валидатора да отхвърли стойността fail-closed.
+        """
         if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return default
+        if not math.isfinite(value):
             return default
         return int(value)
 
@@ -562,7 +579,8 @@ class ScheduleBuilder:
         for task in schedule:
             start = cls._as_int(task.get("start_day"), 1)
             end = task.get("end_day")
-            if isinstance(end, (int, float)) and not isinstance(end, bool):
+            if (isinstance(end, (int, float)) and not isinstance(end, bool)
+                    and math.isfinite(end)):
                 end = int(end)
             else:
                 end = start + max(cls._as_int(task.get("duration"), 0), 1) - 1
@@ -634,6 +652,9 @@ class ScheduleBuilder:
             # Одит 2026-07-23: `start_day: "утре"` сваляше валидатора с
             # TypeError и с него ЦЯЛОТО генериране — вместо да върне грешка.
             # Типът се проверява ПРЕДИ всяко сравнение.
+            # Числов fail-closed договор (одит 2026-08 v30): освен типа, се
+            # отхвърлят НЕ-крайни (NaN/Inf) и ДРОБНИ start_day/end_day — иначе
+            # exporter-ът ги int()-ва тихо и canonical ≠ export.
             for field, value in (("start_day", start), ("end_day", end)):
                 if value is None:
                     continue
@@ -641,6 +662,16 @@ class ScheduleBuilder:
                     errors.append(
                         f"Задача '{task.get('name')}' ({tid}) има {field} "
                         f"от невалиден тип: {value!r}."
+                    )
+                elif not math.isfinite(value):
+                    errors.append(
+                        f"Задача '{task.get('name')}' ({tid}) има {field}, "
+                        f"което не е крайно число ({value})."
+                    )
+                elif isinstance(value, float) and value != int(value):
+                    errors.append(
+                        f"Задача '{task.get('name')}' ({tid}) има ДРОБЕН {field} "
+                        f"({value}); приемат се само цели работни дни."
                     )
 
             if isinstance(start, (int, float)) and not isinstance(start, bool):
@@ -659,16 +690,20 @@ class ScheduleBuilder:
             # предупреждение, тоест график с duration=-5 получаваше valid=True.
             # Това е невъзможна стойност, не спорна — грешка е.
             if isinstance(duration, (int, float)) and not isinstance(duration, bool):
-                if duration < 0:
+                if not math.isfinite(duration):
+                    errors.append(
+                        f"Задача '{task.get('name')}' ({tid}) има продължителност, "
+                        f"която не е крайно число ({duration})."
+                    )
+                elif duration < 0:
                     errors.append(
                         f"Задача '{task.get('name')}' ({tid}) има отрицателна "
                         f"продължителност ({duration})."
                     )
-                # Договор (одит 2026-08 v28→v29, т.1): моделът работи с ЦЕЛИ
-                # работни дни.  recompute_durations закръгля дробните ПРЕДИ тук.
-                # Ако дробна стойност все пак стигне валидацията (некалкулиран
-                # график), тя е ТВЪРДА ГРЕШКА (fail-closed) — иначе валидираният
-                # canonical график се разминава с експортирания (XML закръгля).
+                # Договор (одит 2026-08 v28→v29): моделът работи с ЦЕЛИ работни
+                # дни.  recompute_durations закръгля ПОЛОЖИТЕЛНИ дробни ПРЕДИ тук.
+                # Ако дробна стойност все пак стигне валидацията, тя е ТВЪРДА
+                # ГРЕШКА (fail-closed) — иначе canonical ≠ експортиран XML.
                 elif isinstance(duration, float) and duration != int(duration):
                     errors.append(
                         f"Задача '{task.get('name')}' ({tid}) има дробна "

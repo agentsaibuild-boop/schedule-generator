@@ -148,15 +148,25 @@ def _build_xml(
     # плюс FinishDate ползваше ОБИКНОВЕН timedelta (календарни), докато задачите
     # ползват РАБОТНИЯ календар → при 5-дневен календар header-ът свършваше
     # ПРЕДИ последната задача.  Сега и двете съвпадат.
+    def _safe_int(v: object, default: int) -> int:
+        """Цяло число или default за None/bool/нечислово/НЕ-крайно (NaN/Inf)."""
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return default
+        if not math.isfinite(v):
+            return default
+        return int(math.ceil(v))
+
     def _end_day(t: dict) -> int:
         ed = t.get("end_day")
-        if isinstance(ed, (int, float)) and not isinstance(ed, bool):
+        if isinstance(ed, (int, float)) and not isinstance(ed, bool) and math.isfinite(ed):
             return int(math.ceil(ed))
-        sd = int(t.get("start_day", 1) or 1)
-        dur = t.get("duration", 0) or 0
-        return sd + max(1, int(math.ceil(dur))) - 1
+        sd = _safe_int(t.get("start_day", 1), 1)
+        return sd + max(1, _safe_int(t.get("duration", 0), 0)) - 1
 
-    max_end_day = max((_end_day(t) for t in schedule_data), default=1)
+    # FinishDate по FLATTENED задачи (одит 2026-08 v30): header-ът игнорираше
+    # вложените sub_activities, които могат да свършват по-късно от родителя.
+    _flat_for_end = _flatten_schedule(schedule_data)
+    max_end_day = max((_end_day(t) for t in _flat_for_end), default=1)
     finish_dt = _working_day_to_date(start_dt, max_end_day, calendar_type)
 
     # Root element
