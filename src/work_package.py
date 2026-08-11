@@ -458,7 +458,20 @@ def _row_pipe_spec(row: Any) -> tuple[int | None, str]:
         if v not in (None, "") and not str(k).startswith("__")
     )
     probe = {"name": f"{getattr(row, 'description', '')} {cells}"}
-    material = detect_material(probe) or ""
+
+    # МАТЕРИАЛЪТ СЪЩО МОЖЕ ДА Е ЧОВЕШКО РЕШЕНИЕ.  Досега този канал важеше само
+    # за диаметъра, а редът „Реконструкция на Главни водопроводни клонове
+    # (Ф200 E)" носи материала като едно-единствено „Е" — низ, който не е
+    # никой от разпознаваните шаблони и НЕ бива да се отгатва (урок #35: CI и
+    # PE имат различни норми).  Проба 10.08.2026: точно този ред остави
+    # 881,45 m главен водопровод без доказана продължителност.
+    #
+    # Решението е инженерно, не програмно — затова се чете от
+    # `config/boq_resolutions.json` с `field: "material"`, автор и дата, точно
+    # както решението за диаметъра.
+    decided_material = resolved_value(row, "material")
+    material = (str(decided_material).strip() if decided_material
+                else detect_material(probe) or "")
 
     # РАЗМИНАВАНЕ МЕЖДУ ОПИСАНИЕТО И КОЛОНАТА (одит 10.08.2026, P1.4).
     #

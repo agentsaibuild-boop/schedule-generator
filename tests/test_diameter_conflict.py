@@ -248,3 +248,50 @@ def test_the_decision_records_who_and_when():
 
     assert entry.get("decided_by") and entry.get("decided_on")
     assert entry.get("conflict") and entry.get("note")
+
+
+# ---------------------------------------------------------------------------
+# МАТЕРИАЛЪТ минава по СЪЩИЯ канал (проба 10.08.2026)
+#
+# Редът „Реконструкция на Главни водопроводни клонове (Ф200 E)" носи материала
+# като едно-единствено „Е" — низ, който не е нито един от разпознаваните
+# шаблони.  `detect_material` с право мълчи (урок #35: CI и PE имат различни
+# норми), но резултатът беше 881,45 m главен водопровод без доказана
+# продължителност, без начин човек да реши въпроса.
+#
+# Диаметърът вече имаше такъв канал.  Материалът — не.
+#
+# FAILURE означава: човешко решение за материала няма къде да се запише и
+# главният водопровод остава недоказан завинаги.
+# ---------------------------------------------------------------------------
+
+
+def test_a_human_decision_can_set_the_material(monkeypatch, conflicting):
+    from src import work_package
+
+    monkeypatch.setattr(work_package, "load_boq_resolutions", lambda: [{
+        "field": "material", "value": "PE",
+        "record_ids": [conflicting.record_id],
+        "decided_by": "възложител", "decided_on": "2026-08-11",
+    }])
+
+    _dn, material = work_package._row_pipe_spec(conflicting)
+    assert material == "PE"
+
+
+def test_without_a_decision_the_material_is_still_not_guessed(conflicting):
+    """Мълчанието остава мълчание — механизмът не вкарва стойност от себе си."""
+    _dn, material = _row_pipe_spec(conflicting)
+    assert material == ""
+
+
+def test_the_material_decision_is_bound_to_the_row_content(monkeypatch, conflicting):
+    """Решение за ДРУГ ред не важи тук — ключът е record_id, не номерът."""
+    from src import work_package
+
+    monkeypatch.setattr(work_package, "load_boq_resolutions", lambda: [{
+        "field": "material", "value": "CI", "record_ids": ["друг-ред"],
+    }])
+
+    _dn, material = work_package._row_pipe_spec(conflicting)
+    assert material == ""

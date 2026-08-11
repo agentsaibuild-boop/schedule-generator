@@ -156,6 +156,14 @@ _PIPE_TASK_RE = re.compile(
 )
 _PIPE_TYPES = frozenset({"water_pipe", "sewer", "pipe", "pipeline"})
 
+#: Мерни единици, които значат ДЪЛЖИНА.  Един източник за двете места, които
+#: питат: `detect_length_m` (колко метра) и `is_pipe_task` (изобщо метри ли са).
+#: „m3/m'" НЕ е тук — съставната единица не е дължина, колкото и да ѝ прилича.
+_LENGTH_UNITS = frozenset({
+    "м", "m", "м.", "m.", "м'", "m'", "метър", "метра", "лм", "лм.",
+    "l.m", "lm",
+})
+
 _SRS_RE = re.compile(r"\bСРС\b|сградн\w*\s+ревизион", re.IGNORECASE)
 _RSH_RE = re.compile(r"\bРШ\b|ревизионн\w*\s+шахт", re.IGNORECASE)
 # Сградни отклонения (не са шахти) — водопроводни (СВО) и канализационни (СКО).
@@ -384,7 +392,17 @@ def is_pipe_task(task: dict) -> bool:
     """
     hint = str(task.get("activity_class_hint") or "").strip().lower()
     if hint:
-        return hint == "laying"
+        if hint != "laying":
+            return False
+        # Клас `laying` с количество, което НЕ Е ДЪЛЖИНА, не е полагане на
+        # тръба по метри.  „Бетонов кожух за тръба DN 500 — 1,04m3*71,64m" се
+        # класифицира като laying заради „тръба" в описанието, но се мери в
+        # `m3/m'` — обем на метър.  Сметнат по тарифа за полагане, той би дал
+        # продължителност по ОБЕМНО число (проба 10.08.2026: 12 такива задачи
+        # се отчитаха „липсва дължина", докато дължината стои в самото
+        # описание — липсва им НОРМА за бетониране, не данна).
+        unit = str(task.get("unit") or "").strip().lower()
+        return not unit or unit in _LENGTH_UNITS
     if str(task.get("type", "")).lower() in _PIPE_TYPES:
         return True
     if task.get("chain_step"):
@@ -400,7 +418,7 @@ def detect_length_m(task: dict) -> float | None:
             return float(value)
 
     unit = str(task.get("unit", "")).strip().lower()
-    if unit in {"м", "m", "м.", "метра", "лм", "l.m"}:
+    if unit in _LENGTH_UNITS:
         qty = task.get("quantity")
         if isinstance(qty, (int, float)) and not isinstance(qty, bool) and qty > 0:
             return float(qty)

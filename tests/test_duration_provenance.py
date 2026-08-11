@@ -379,3 +379,51 @@ def test_summary_rows_are_not_counted_as_unproven():
 
     assert out["summary"]["unresolved"] == 0
     assert not [s for s in out["skipped"] if s["id"] in {"WBS", "П1"}]
+
+
+# ===================================================================
+# ПРОБА 10.08.2026 — клас `laying` с количество, което не е дължина
+#
+# „Бетонов кожух за тръба DN 500 — 1,04m3*71,64m" се класифицира като `laying`
+# заради „тръба" в описанието, но се мери в `m3/m'` — обем на метър.  Сметнат
+# по тарифа за полагане, той би дал продължителност по ОБЕМНО число.
+#
+# Кодът с право отказваше, но с ГРЕШНАТА причина: отчиташе „липсва дължина",
+# докато дължината стои в самото описание (71,64 m).  Липсва му норма за
+# бетониране — това е друг разговор и води до друго действие.
+#
+# FAILURE означава: отчетът пак праща човека да търси данна, която я има.
+# ===================================================================
+
+def test_a_volume_per_metre_row_is_not_pipe_laying():
+    result = calculate_task_duration({
+        "id": "К20", "activity_class_hint": "laying", "unit": "m3/m'",
+        "quantity": 74.5056, "dn": 500,
+        "name": "Полагане — Бетонов кожух за тръба DN 500  - 1,04m3*71,64m",
+    })
+
+    assert result.code == CODE_NOT_PARAMETRIC
+    assert result.code != CODE_MISSING_LENGTH
+
+
+def test_linear_metre_notation_still_counts_as_length():
+    """`m'` е линеен метър в българските КСС — той Е дължина."""
+    result = calculate_task_duration({
+        "id": "В21", "activity_class_hint": "laying", "unit": "m'",
+        "quantity": 210.0, "dn": 110, "material": "PEHD",
+        "name": "Полагане — Доставка и полагане на тръби PEHD DN110",
+    })
+
+    assert result.code == CODE_OK
+    assert result.days
+
+
+def test_a_laying_row_without_a_unit_is_not_disqualified():
+    """Липсваща единица не е доказателство, че редът не е тръбен."""
+    result = calculate_task_duration({
+        "id": "В22", "activity_class_hint": "laying", "length_m": 210,
+        "dn": 110, "material": "PE",
+        "name": "Полагане — тръби PE DN110",
+    })
+
+    assert result.code == CODE_OK
