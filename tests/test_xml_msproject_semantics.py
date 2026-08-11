@@ -89,11 +89,53 @@ def test_one_day_task_is_not_a_milestone():
 # 2. Constraint mode
 # ===================================================================
 
-def test_pinned_is_the_default():
-    """Досегашното поведение (урок #19) остава по подразбиране."""
+def test_milestones_mode_is_the_default():
+    """СМЯНА НА ДОГОВОРА (съпоставка с еталон, 2026-08-06).
+
+    Дотук всяка задача излизаше с ConstraintType=2 (Must Start On) — всичките
+    204 в реалния прогон.  В човешкия еталон НИТО ЕДНА от 610 няма constraint.
+    Закованото начало прави зависимостите декоративни: MS Project получава
+    готови дати и не може да пренареди графика при промяна.
+
+    Причината закова да е по подразбиране (урок #19) беше синхрон с PDF-а,
+    който получава същият възложител.  PDF график вече не се доставя —
+    deliverable-ът е XML→MS Project, тоест планирането трябва да е живо.
+    """
     task = _tasks(_xml([NORMAL]))[0]
+    assert task.findtext(f"{NS}ConstraintType") == "0"      # As Soon As Possible
+    assert task.findtext(f"{NS}ConstraintDate") is None
+
+
+def test_pinned_mode_still_available():
+    """Старото поведение остава достъпно явно — не е изтрито, а вече не е default."""
+    task = _tasks(_xml([NORMAL], constraint_mode="pinned"))[0]
     assert task.findtext(f"{NS}ConstraintType") == "2"
     assert task.findtext(f"{NS}ConstraintDate")
+
+
+def test_contractual_milestone_gets_deadline_not_pin():
+    """Constraints САМО по договорни дати — и то като Deadline, не като закова.
+
+    Deadline дава на MS Project отрицателен резерв при закъснение, без да
+    зазижда мрежата.
+    """
+    milestone = {"id": "MS", "name": "Приемане", "duration": 0, "start_day": 30,
+                 "end_day": 30, "milestone": True, "contractual": True,
+                 "contract_date": "2026-09-01", "dependencies": []}
+    task = _tasks(_xml([NORMAL, milestone]))[1]
+
+    assert task.findtext(f"{NS}Deadline") == "2026-09-01T17:00:00"
+    assert task.findtext(f"{NS}ConstraintType") == "7"      # Finish No Later Than
+
+
+def test_non_contractual_milestone_stays_unconstrained():
+    milestone = {"id": "MS", "name": "Край участък", "duration": 0,
+                 "start_day": 30, "end_day": 30, "milestone": True,
+                 "dependencies": []}
+    task = _tasks(_xml([NORMAL, milestone]))[1]
+
+    assert task.findtext(f"{NS}ConstraintType") == "0"
+    assert task.findtext(f"{NS}Deadline") is None
 
 
 def test_flexible_mode_lets_msproject_schedule():
@@ -107,9 +149,9 @@ def test_flexible_mode_sets_no_constraint_date():
     assert task.findtext(f"{NS}ConstraintDate") is None
 
 
-def test_both_modes_stay_auto_scheduled():
+def test_all_modes_stay_auto_scheduled():
     """Урок #19: Manual=0 — без пин икони в Task Mode колоната."""
-    for mode in ("pinned", "flexible"):
+    for mode in ("milestones", "pinned", "flexible"):
         task = _tasks(_xml([NORMAL], constraint_mode=mode))[0]
         assert task.findtext(f"{NS}Manual") == "0"
 
@@ -283,3 +325,109 @@ def test_project_finishdate_covers_nested_sub_activities():
     finishes = [_g(t, "Finish")[:10] for t in _tasks(_xml(sched, calendar_type="7-day"))
                 if _g(t, "Finish")]
     assert pf >= max(finishes)
+
+
+# ===================================================================
+# WBS: обобщаващи задачи през `parent_id` (2026-08-06)
+# ===================================================================
+
+def test_parent_id_marks_summary_not_milestone():
+    """WBS родителят е обобщаваща ЛЕНТА, не ромбче.
+
+    Регресия, хваната чак в експортирания XML: `_flatten_schedule` слага
+    `_has_children` само за вложени `sub_activities`, а новият WBS слой строи
+    ПЛОСКА йерархия през `parent_id` (както е и в еталонния график).  Затова
+    всичките 7 обобщаващи излизаха със Summary=0 и — понеже са с нулева
+    продължителност — MS Project ги показваше като milestone-и.
+    """
+    schedule = [
+        {"id": "WBS", "name": "СТРОИТЕЛСТВО", "duration": 0, "start_day": 1,
+         "dependencies": []},
+        {"id": "A", "name": "Изкоп", "duration": 5, "start_day": 1,
+         "parent_id": "WBS", "dependencies": []},
+    ]
+    tasks = _tasks(_xml(schedule))
+    by_name = {t.findtext(f"{NS}Name"): t for t in tasks}
+
+    parent = by_name["СТРОИТЕЛСТВО"]
+    assert parent.findtext(f"{NS}Summary") == "1"
+    assert parent.findtext(f"{NS}Milestone") == "0"
+    assert by_name["Изкоп"].findtext(f"{NS}Summary") == "0"
+
+
+def test_summary_task_gets_no_resource_assignment():
+    """Ресурс на обобщаващата би броил часовете двойно — веднъж и на детето."""
+    schedule = [
+        {"id": "WBS", "name": "СТРОИТЕЛСТВО", "duration": 0, "start_day": 1,
+         "team": "Екип 1", "dependencies": []},
+        {"id": "A", "name": "Изкоп", "duration": 5, "start_day": 1,
+         "parent_id": "WBS", "team": "Екип 1", "dependencies": []},
+    ]
+    root = ET.fromstring(_xml(schedule))
+    assignments = root.findall(f".//{NS}Assignment")
+
+    assert len(assignments) == 1, "само работната задача получава ресурс"
+
+
+def test_real_milestone_still_exports_as_milestone():
+    """Поправката не бива да отнеме milestone-а на реалните точки."""
+    schedule = [
+        {"id": "MS", "name": "ФИНАЛ: Приемане", "duration": 0, "start_day": 20,
+         "milestone": True, "dependencies": []},
+    ]
+    task = _tasks(_xml(schedule))[0]
+
+    assert task.findtext(f"{NS}Milestone") == "1"
+    assert task.findtext(f"{NS}Summary") == "0"
+
+
+# ===================================================================
+# Roll-up дати на обобщаващите (одит 2026-08-07)
+# ===================================================================
+
+def test_summary_dates_span_their_children():
+    """ОДИТ: всичките 26 обобщаващи бяха с грешни дати.
+
+    „СТРОИТЕЛСТВО" приключваше на 01.06, докато негово дете течеше до 17.10.
+    Обобщаващата има нулева продължителност, затова излизаше със
+    Start = Finish = ден 1.  Тя не е работа, а СБОР.
+    """
+    schedule = [
+        {"id": "WBS", "name": "СТРОИТЕЛСТВО", "duration": 0, "start_day": 1,
+         "dependencies": [], "is_summary": True},
+        {"id": "A", "name": "Изкоп", "duration": 5, "start_day": 1,
+         "parent_id": "WBS", "dependencies": []},
+        {"id": "B", "name": "Полагане", "duration": 10, "start_day": 20,
+         "parent_id": "WBS", "dependencies": []},
+    ]
+    by_name = {t.findtext(f"{NS}Name"): t for t in _tasks(_xml(schedule, start="2026-06-01"))}
+
+    parent = by_name["СТРОИТЕЛСТВО"]
+    assert parent.findtext(f"{NS}Start")[:10] == "2026-06-01"     # с първото дете
+    assert parent.findtext(f"{NS}Finish")[:10] == "2026-06-29"    # с последното
+
+
+def test_rollup_is_recursive_through_three_levels():
+    """Участък, отложен от изравняването, разтяга и фазата над него."""
+    schedule = [
+        {"id": "PHASE", "name": "СТРОИТЕЛСТВО", "duration": 0, "start_day": 1,
+         "dependencies": [], "is_summary": True},
+        {"id": "PKG", "name": "Участък", "duration": 0, "start_day": 1,
+         "parent_id": "PHASE", "dependencies": [], "is_summary": True},
+        {"id": "T", "name": "Полагане", "duration": 4, "start_day": 30,
+         "parent_id": "PKG", "dependencies": []},
+    ]
+    by_name = {t.findtext(f"{NS}Name"): t for t in _tasks(_xml(schedule, start="2026-06-01"))}
+
+    for name in ("Участък", "СТРОИТЕЛСТВО"):
+        assert by_name[name].findtext(f"{NS}Start")[:10] == "2026-06-30"
+        assert by_name[name].findtext(f"{NS}Finish")[:10] == "2026-07-03"
+
+
+def test_leaf_task_dates_are_untouched_by_rollup():
+    schedule = [{"id": "A", "name": "Изкоп", "duration": 5, "start_day": 3,
+                 "dependencies": []}]
+    task = _tasks(_xml(schedule, start="2026-06-01"))[0]
+
+    assert task.findtext(f"{NS}Start")[:10] == "2026-06-03"
+    assert task.findtext(f"{NS}Finish")[:10] == "2026-06-07"

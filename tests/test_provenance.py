@@ -965,3 +965,60 @@ class TestV16ActivityClassTrust:
              "unit": "м", "source_ref": "КСС.xlsx!A!2"}
         cov = analyze_boq_coverage([t], self._idx())
         assert cov["covered"] == [] and cov["uncovered"] == ["КСС.xlsx!A!2"]
+
+
+# ===================================================================
+# Мярката идва от клетка, която ГОДИ за мярка
+# ===================================================================
+#
+# Одит 07.08.2026: в експортирания XML стояха „Мярка = 100" (УО единичен),
+# „Мярка = 1" (Преливна шахта) и цялото описание на дейността при пътните
+# редове.  И трите идват от едно място: колоната се избираше само по заглавие,
+# а в реалния КСС под заглавие „Ед. мярка" стои ту броят, ту описанието.
+#
+# FAILURE означава: провенансът в готовия файл пак твърди нещо, което
+# документът не казва.
+
+class TestUnitExtraction:
+
+    def _index(self, tmp_path, rows, sheet="Лист"):
+        import json as _json
+        from src.provenance import build_quantity_index
+        converted = tmp_path / "converted"
+        converted.mkdir(parents=True, exist_ok=True)
+        (converted / "КСС.json").write_text(
+            _json.dumps({"source_file": "КСС.xlsx",
+                         "sheets": [{"name": sheet, "rows": rows}]},
+                        ensure_ascii=False),
+            encoding="utf-8")
+        return [r for r in build_quantity_index(tmp_path) if r.quantity is not None]
+
+    def test_a_bare_number_is_not_a_unit(self, tmp_path):
+        """„УО единичен | Ед. мярка = 100" — 100 е броят, не мярката."""
+        rows = [{"Наименование": "УО единичен", "Ед. мярка": 100,
+                 "количество": 100, "__excel_row__": 28}]
+
+        assert self._index(tmp_path, rows)[0].unit == ""
+
+    def test_a_whole_sentence_is_not_a_unit(self, tmp_path):
+        """Разместен хедър: описанието стои под „Ед. мярка", мярката — под „ед. мярка"."""
+        rows = [{"Канализационна мрежа": 1,
+                 "Ед. мярка": "Доставка и полагане на средни бетонови бордюри "
+                              "С18 15/25/50 см, БДС EN 1340:2005/NA : 2013",
+                 "ед. мярка": "м", "количество": 7761, "__excel_row__": 9}]
+
+        assert self._index(tmp_path, rows)[0].unit == "м"
+
+    def test_a_composite_unit_survives(self, tmp_path):
+        """m3/m' съдържа цифра, но не е число — кожухът не бива да губи мярката си."""
+        rows = [{"Наименование": "Бетонов кожух за тръба DN 1000",
+                 "Ед. мярка": "m3/m'", "количество": 677.6, "__excel_row__": 18}]
+
+        assert self._index(tmp_path, rows)[0].unit == "m3/m'"
+
+    def test_a_missing_unit_stays_empty_rather_than_guessed(self, tmp_path):
+        """Празно е честният отговор — измислена мярка обвинява задачата."""
+        rows = [{"Наименование": "Подземни ТТ кабели",
+                 "количество": 500, "__excel_row__": 4}]
+
+        assert self._index(tmp_path, rows)[0].unit == ""

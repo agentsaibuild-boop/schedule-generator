@@ -98,7 +98,10 @@ def test_exports():
                 if uid_elem is None or uid_elem.text != "0":
                     errors.append("Root task UID should be 0")
 
-            # Check Manual=0 on all tasks; ConstraintType=2 on non-root tasks
+            # Check Manual=0 on all tasks; ConstraintType=0 (auto-scheduled) on
+            # non-root tasks — режим 'milestones' по подразбиране от 2026-08-06,
+            # за да може MS Project да планира по зависимостите вместо да получи
+            # заковани дати (вж. test_xml_msproject_semantics).
             for task in tasks:
                 uid_el = task.find(f"{{{NAMESPACE}}}UID")
                 is_root = uid_el is not None and uid_el.text == "0"
@@ -110,10 +113,10 @@ def test_exports():
                     break
                 if not is_root:
                     constraint = task.find(f"{{{NAMESPACE}}}ConstraintType")
-                    if constraint is None or constraint.text != "2":
+                    if constraint is None or constraint.text != "0":
                         name_elem = task.find(f"{{{NAMESPACE}}}Name")
                         name = name_elem.text if name_elem is not None else "?"
-                        errors.append(f"Task '{name}' missing ConstraintType=2")
+                        errors.append(f"Task '{name}' missing ConstraintType=0")
                         break
 
             # Check calendar

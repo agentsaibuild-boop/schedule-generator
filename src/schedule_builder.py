@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import math
 import re
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, NamedTuple
 
 import pandas as pd
@@ -24,6 +26,38 @@ from src.spatial import (
 )
 
 logger = logging.getLogger(__name__)
+
+_CAPACITY_PATH = Path(__file__).resolve().parent.parent / "config" / "resource_capacity.json"
+_capacity_cache: dict[str, Any] | None = None
+
+
+def _load_resource_capacity() -> dict[str, Any]:
+    """Наличният ресурс по вид — колко едновременни задачи може да поеме.
+
+    Числата са РАЗУМНО ПОДРАЗБИРАНЕ, не измерване (виж бележката във файла).
+    """
+    global _capacity_cache
+    if _capacity_cache is None:
+        try:
+            _capacity_cache = json.loads(_CAPACITY_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("resource_capacity.json не се чете (%s): %s",
+                           _CAPACITY_PATH, exc)
+            _capacity_cache = {"default": 1, "capacity": {}}
+    return _capacity_cache
+
+
+def _task_resources(task: dict) -> list[str]:
+    """Ресурсите, които задачата заема — съставът на бригадата плюс екипа."""
+    names: list[str] = []
+    for raw in task.get("resources") or []:
+        name = str(raw).strip()
+        if name and name not in names:
+            names.append(name)
+    team = str(task.get("team") or "").strip()
+    if team and team != "—" and team not in names:
+        names.append(team)
+    return names
 
 # Над този брой задачи DFS проверката за цикли не се изпълнява и графикът
 # се ОТХВЪРЛЯ (fail-closed).  DFS е O(V+E), затова лимитът е висок — реален
@@ -258,6 +292,15 @@ class ScheduleBuilder:
             tid = _task_key(task) or "?"
             name = task.get("name", "?")
 
+            # Обобщаващият ред НЯМА собствена продължителност — тя е сборът на
+            # децата му (`_rollup_ok`).  Досега „СТРОИТЕЛСТВО" и всеки пакетен
+            # ред влизаха в `skipped` като NOT_PARAMETRIC и надуваха отчета за
+            # недоказани продължителности с по един ред на пакет — при 38
+            # пакета това е 39 несъществуващи липси в число, което отива при
+            # одитора (проба 10.08.2026).
+            if str(task.get("type", "")).lower() == "summary":
+                continue
+
             try:
                 result = calculate_task_duration(
                     task,
@@ -275,7 +318,19 @@ class ScheduleBuilder:
                 # неразличима от изчислена.  Сега произходът се записва явно,
                 # за да може експортът и човекът да знаят кое е доказано.
                 old_duration = task.get("duration")
-                task["duration_source"] = "suggested"
+                # НЕДОКАЗАНА не значи „от AI".  При пакетния път стойността
+                # идва от `median_days` на технологичната верига, извлечена от
+                # ЕТАЛОННИЯ ЧОВЕШКИ график (46 канализационни, 23 водопроводни
+                # участъка) — това е най-силното доказателство, което имаме
+                # извън нормите, и не бива да се слива с гадаене на модел.
+                #
+                # ПРОБА 10.08.2026: тук произходът се затриваше на „suggested"
+                # за всичко и логът съобщаваше „стойност от AI" за 130–220
+                # задачи на прогон, от които нито една не беше от AI.
+                prior_source = str(task.get("duration_source") or "")
+                task["duration_source"] = (
+                    "chain_template" if prior_source == "chain_template"
+                    else "suggested")
                 task["duration_status"] = result.code
                 if old_duration is not None:
                     task["suggested_duration"] = old_duration
@@ -297,6 +352,7 @@ class ScheduleBuilder:
                     "id": tid, "name": name,
                     "reason": result.reason, "code": result.code,
                     "suggested_duration": old_duration,
+                    "duration_source": task["duration_source"],
                 })
                 continue
 
@@ -361,9 +417,16 @@ class ScheduleBuilder:
             count for code, count in by_code.items() if code in UNRESOLVED_CODES
         )
         if unresolved:
+            # Разделено по ПРОИЗХОД, а не само по код: „от еталонния график" и
+            # „от модела" не бива да се четат като едно и също число.
+            from_template = sum(
+                1 for e in skipped
+                if e.get("code") in UNRESOLVED_CODES
+                and e.get("duration_source") == "chain_template")
             logger.warning(
-                "%d задачи остават с НЕДОКАЗАНА продължителност (стойност от AI): %s",
-                unresolved,
+                "%d задачи остават с НЕДОКАЗАНА продължителност "
+                "(%d от еталонния график, %d от модела): %s",
+                unresolved, from_template, unresolved - from_template,
                 ", ".join(f"{c}={n}" for c, n in sorted(by_code.items())),
             )
 
@@ -513,6 +576,331 @@ class ScheduleBuilder:
             new_end[tid] = end
 
         return {"schedule": updated, "warnings": [], "shifted": shifted}
+
+    def roll_up_summaries(self, schedule: list[dict]) -> dict[str, Any]:
+        """Разтегни обобщаващите задачи по децата им.
+
+        ОДИТ 2026-08-07: обобщаващата има нулева продължителност и затова
+        оставаше на ден 1, докато децата ѝ течаха месеци напред.  Експортът
+        вече смята този сбор сам, но същото трябва да важи и в паметта —
+        иначе Gantt-ът, таблицата и PDF-ът показват друго от MS Project.
+
+        Returns:
+            {schedule, adjusted} — `adjusted` са поправените обобщаващи.
+        """
+        if not schedule:
+            return {"schedule": [], "adjusted": []}
+
+        updated = copy.deepcopy(schedule)
+        by_id = {_task_key(t): t for t in updated}
+        children: dict[str, list[str]] = defaultdict(list)
+        for task in updated:
+            parent = str(task.get("parent_id") or "").strip()
+            tid = _task_key(task)
+            if parent and parent in by_id and parent != tid:
+                children[parent].append(tid)
+
+        adjusted: list[dict] = []
+        seen: set[str] = set()
+
+        def span(tid: str) -> tuple[int, int]:
+            task = by_id[tid]
+            kids = children.get(tid, [])
+            if not kids or tid in seen:
+                start = self._as_int(task.get("start_day"), 1)
+                return start, self._task_end(task)
+            seen.add(tid)
+            spans = [span(k) for k in kids]
+            start, end = min(s for s, _ in spans), max(e for _, e in spans)
+            old = (self._as_int(task.get("start_day"), 1), self._task_end(task))
+            if old != (start, end):
+                adjusted.append({"id": tid, "name": task.get("name"),
+                                 "from": old, "to": (start, end)})
+                task["start_day"] = start
+                task["end_day"] = end
+                task["duration"] = max(1, end - start + 1)
+            return start, end
+
+        for tid in list(children):
+            span(tid)
+        return {"schedule": updated, "adjusted": adjusted}
+
+    # ------------------------------------------------------------------
+    # Ресурсно изравняване (2026-08-07)
+    # ------------------------------------------------------------------
+
+    def level_resources(
+        self,
+        schedule: list[dict],
+        *,
+        capacity: dict[str, int] | None = None,
+        default_capacity: int | None = None,
+        horizon_days: int = 3650,
+    ) -> dict[str, Any]:
+        """Разсрочи задачите така, че да не искат повече ресурс, отколкото има.
+
+        ОДИТ 2026-08-07: ресурсите бяха само ИМЕНА.  Един ръководител излизаше
+        назначен на 66 задачи, от които 22 стартират в един и същи ден; един
+        багер — на 16 едновременни.  Мрежата беше коректна, а графикът
+        физически неизпълним, защото нищо не ограничаваше паралелизацията.
+
+        Алгоритъмът е сериен (serial SGS): задачите се минават в топологичен
+        ред и всяка се слага на НАЙ-РАННИЯ ден, на който едновременно:
+          * всички предшественици са изпълнени (зависимостите са ненарушими);
+          * всеки от ресурсите ѝ има свободен капацитет за целия ѝ период.
+
+        Зависимостите никога не се нарушават — изравняването само ОТЛАГА.
+        Обобщаващите задачи и milestone-ите не заемат ресурс.
+
+        Args:
+            schedule: Списък задачи (не се мутира).
+            capacity: {име на ресурс: брой едновременни задачи}.
+            default_capacity: За ресурс извън таблицата.
+            horizon_days: Предпазен таван при търсене на свободен ден.
+
+        Returns:
+            {schedule, shifted, warnings, peak} — `peak` е върховото
+            натоварване по ресурс СЛЕД изравняването.
+        """
+        if not schedule:
+            return {"schedule": [], "shifted": [], "warnings": [], "peak": {}}
+
+        config = _load_resource_capacity()
+        table = dict(config.get("capacity") or {})
+        if capacity:
+            table.update(capacity)
+        fallback = (default_capacity if default_capacity is not None
+                    else int(config.get("default", 1)))
+
+        updated = copy.deepcopy(schedule)
+        by_id: dict[str, dict] = {_task_key(t): t for t in updated}
+
+        order = self._topological_order(updated, by_id)
+        if order is None:
+            return {"schedule": updated, "shifted": [],
+                    "warnings": ["Ресурсите не са изравнени — графикът не може "
+                                 "да се подреди топологично."], "peak": {}}
+
+        edges: dict[tuple[str, str], tuple[str, int]] = {}
+        for task in updated:
+            tid = _task_key(task)
+            for link in dependency_links(task):
+                edges[(link.predecessor_id, tid)] = (link.type, link.lag_days)
+
+        usage: dict[tuple[str, int], int] = defaultdict(int)
+        new_start: dict[str, int] = {}
+        new_end: dict[str, int] = {}
+        shifted: list[dict] = []
+        warnings: list[str] = []
+
+        for tid in order:
+            task = by_id[tid]
+            duration = self._as_int(task.get("duration"), 0)
+            span = max(duration, 1) - 1
+            original = self._as_int(task.get("start_day"), 1)
+
+            earliest = original
+            for dep_id in dependency_ids(task):
+                if dep_id not in new_end:
+                    continue
+                link_type, lag = edges.get((dep_id, tid), ("FS", 0))
+                if link_type == "SS":
+                    earliest = max(earliest, new_start[dep_id] + lag)
+                elif link_type == "FF":
+                    earliest = max(earliest, new_end[dep_id] + lag - span)
+                elif link_type == "SF":
+                    earliest = max(earliest, new_start[dep_id] + lag - span)
+                else:
+                    earliest = max(earliest, new_end[dep_id] + 1 + lag)
+            earliest = max(earliest, 1)
+
+            resources = _task_resources(task)
+            consumes = bool(resources) and duration > 0 and not self._is_summary(task)
+
+            start = earliest
+            if consumes:
+                limit = earliest + horizon_days
+                while start <= limit:
+                    if all(usage[(r, day)] < table.get(r, fallback)
+                           for r in resources
+                           for day in range(start, start + span + 1)):
+                        break
+                    start += 1
+                else:
+                    warnings.append(
+                        f"Задача '{task.get('name')}' ({tid}) не намери свободен "
+                        f"ресурс в {horizon_days} дни — оставена на ден {earliest}.")
+                    start = earliest
+
+            end = start if duration <= 0 else start + span
+            if consumes:
+                for r in resources:
+                    for day in range(start, end + 1):
+                        usage[(r, day)] += 1
+
+            if start != original:
+                shifted.append({"id": tid, "name": task.get("name"),
+                                "from": original, "to": start})
+            task["start_day"] = start
+            task["end_day"] = end
+            new_start[tid] = start
+            new_end[tid] = end
+
+        peak: dict[str, int] = defaultdict(int)
+        for (resource, _), count in usage.items():
+            peak[resource] = max(peak[resource], count)
+
+        return {"schedule": updated, "shifted": shifted, "warnings": warnings,
+                "peak": dict(peak), "capacity": table, "default_capacity": fallback}
+
+    # ------------------------------------------------------------------
+    # CPM — критичен път и резерв (2026-08-06)
+    # ------------------------------------------------------------------
+
+    def compute_critical_path(
+        self, schedule: list[dict], *, deadline_day: int | None = None
+    ) -> dict[str, Any]:
+        """Обратен ход: късни дати, пълен резерв и критичен път.
+
+        СЪПОСТАВКА С ЕТАЛОН (2026-08-06): в програмния график НИТО ЕДНА от 204
+        задачи не беше критична — не защото мрежата е с резерв, а защото
+        `is_critical` НИКОЙ не го пишеше.  Полето се четеше от Gantt-а, PDF-а и
+        XML-а ([export_xml.py], `Critical`), но нямаше кой да го сметне.
+        Тоест „критичен път" в продукта беше декорация.
+
+        Обратният ход ОГЛЕДАЛНО повтаря семантиката на `reschedule` — иначе
+        резервът би бил спрямо друга мрежа, а не спрямо тази, по която са
+        сметнати датите:
+
+            FS: succ.start >= pred.end + 1 + lag   →  LF_pred = LS_succ - 1 - lag
+            SS: succ.start >= pred.start + lag     →  LS_pred = LS_succ - lag
+            FF: succ.end   >= pred.end + lag       →  LF_pred = LF_succ - lag
+            SF: succ.end   >= pred.start + lag     →  LS_pred = LF_succ - lag
+
+        Обобщаващите (summary) задачи не получават собствен резерв — те са
+        сбор, а не работа; маркират се като критични, ако критично е някое
+        тяхно дете, точно както прави MS Project.
+
+        Args:
+            schedule: Списък задачи (не се мутира).
+            deadline_day: Договорен краен ден.  Ако е зададен и е ПО-РАНЕН от
+                края на графика, резервът става отрицателен — това е реално
+                закъснение спрямо договора, не грешка в сметката.
+
+        Returns:
+            {schedule, critical, critical_count, project_finish, total_float,
+             warnings}
+        """
+        if not schedule:
+            return {"schedule": [], "critical": [], "critical_count": 0,
+                    "project_finish": 0, "warnings": []}
+
+        updated = copy.deepcopy(schedule)
+        by_id: dict[str, dict] = {_task_key(t): t for t in updated}
+
+        cycle = self._detect_cycle(updated, by_id)
+        if cycle:
+            return {"schedule": updated, "critical": [], "critical_count": 0,
+                    "project_finish": 0,
+                    "warnings": [f"Критичен път не е смятан — кръгова "
+                                 f"зависимост: {' → '.join(cycle)}."]}
+
+        order = self._topological_order(updated, by_id)
+        if order is None:
+            return {"schedule": updated, "critical": [], "critical_count": 0,
+                    "project_finish": 0,
+                    "warnings": ["Критичен път не е смятан — графикът не може "
+                                 "да се подреди топологично."]}
+
+        # --- Ранни дати: както са в графика (форуърдът е `reschedule`) ---
+        span: dict[str, int] = {}
+        early_finish: dict[str, int] = {}
+        early_start: dict[str, int] = {}
+        for tid in order:
+            task = by_id[tid]
+            duration = self._as_int(task.get("duration"), 0)
+            sp = max(duration, 1) - 1
+            start = self._as_int(task.get("start_day"), 1)
+            span[tid] = sp
+            early_start[tid] = start
+            early_finish[tid] = start if duration <= 0 else start + sp
+
+        # --- Наследници по ребра (типът и лагът са на страната на наследника) ---
+        successors: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
+        for task in updated:
+            tid = _task_key(task)
+            for link in dependency_links(task):
+                if link.predecessor_id in by_id:
+                    successors[link.predecessor_id].append(
+                        (tid, link.type, link.lag_days))
+
+        finish = max(early_finish.values(), default=1)
+        project_finish = int(deadline_day) if deadline_day else finish
+
+        # --- Обратен ход ---
+        late_finish: dict[str, int] = {}
+        late_start: dict[str, int] = {}
+        for tid in reversed(order):
+            duration = self._as_int(by_id[tid].get("duration"), 0)
+            sp = span[tid]
+            candidates: list[int] = []
+            for succ_id, link_type, lag in successors.get(tid, []):
+                if succ_id not in late_start:
+                    continue
+                if link_type == "SS":
+                    candidates.append(late_start[succ_id] - lag + sp)
+                elif link_type == "FF":
+                    candidates.append(late_finish[succ_id] - lag)
+                elif link_type == "SF":
+                    candidates.append(late_finish[succ_id] - lag + sp)
+                else:  # FS
+                    candidates.append(late_start[succ_id] - 1 - lag)
+
+            lf = min(candidates) if candidates else project_finish
+            late_finish[tid] = lf
+            late_start[tid] = lf if duration <= 0 else lf - sp
+
+        # --- Резерв и маркиране ---
+        critical: list[str] = []
+        floats: dict[str, int] = {}
+        for task in updated:
+            tid = _task_key(task)
+            total_float = late_finish[tid] - early_finish[tid]
+            floats[tid] = total_float
+            task["total_float"] = total_float
+            task["late_start"] = late_start[tid]
+            task["late_finish"] = late_finish[tid]
+            if not self._is_summary(task):
+                task["is_critical"] = total_float <= 0
+                if total_float <= 0:
+                    critical.append(tid)
+
+        # Обобщаващите се маркират по децата — те са сбор, не работа.
+        for task in updated:
+            if not self._is_summary(task):
+                continue
+            tid = _task_key(task)
+            kids = [t for t in updated
+                    if str(t.get("parent_id") or "").strip() == tid]
+            task["is_critical"] = any(k.get("is_critical") for k in kids)
+
+        return {
+            "schedule": updated,
+            "critical": critical,
+            "critical_count": len(critical),
+            "project_finish": project_finish,
+            "total_float": floats,
+            "warnings": [],
+        }
+
+    @staticmethod
+    def _is_summary(task: dict) -> bool:
+        """Дали задачата е обобщаваща (има деца) — не носи собствена работа."""
+        return bool(
+            task.get("is_summary") or task.get("_has_children")
+            or task.get("sub_activities")
+            or str(task.get("type", "")).lower() in ("summary", "wbs", "group")
+        )
 
     # ------------------------------------------------------------------
     # Пространствен ремонт (2026-08) — сериализирай РЕАЛНИТЕ сблъсъци

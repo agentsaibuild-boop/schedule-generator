@@ -106,17 +106,20 @@ def test_repaired_schedule_exports_to_mspdi_xml():
     tasks = root.findall(".//m:Task", _NS)
     assert len([t for t in tasks if t.find("m:Name", _NS) is not None]) >= 3
 
-    # Договорът с MS Project (режим 'pinned'): дните са дни (DurationFormat=5)
-    # и началото е заковано (ConstraintType=2), за да не пренарежда програмата
-    # датите, сметнати от детерминистичния двигател.
+    # Договорът с MS Project: дните са дни (DurationFormat=5).
     for task in tasks:
         fmt = task.find("m:DurationFormat", _NS)
         if fmt is not None:
             assert fmt.text == "5"
-    pinned = [t for t in tasks if t.find("m:ConstraintType", _NS) is not None]
-    assert pinned, "производствените задачи трябва да са със заковано начало"
-    for task in pinned:
-        assert task.find("m:ConstraintType", _NS).text == "2"
+
+    # Режим 'milestones' (по подразбиране от 2026-08-06): работните задачи са
+    # auto-scheduled, за да може MS Project реално да планира по зависимостите.
+    # Преди тук се искаше ConstraintType=2 върху всичко — точно това правеше
+    # зависимостите декоративни (вж. test_xml_msproject_semantics).
+    constrained = [t for t in tasks if t.find("m:ConstraintType", _NS) is not None]
+    assert constrained, "задачите трябва да носят явна constraint политика"
+    for task in constrained:
+        assert task.find("m:ConstraintType", _NS).text == "0"
 
     # Добавената от ремонта връзка оцелява в експорта.
     assert root.findall(".//m:PredecessorLink", _NS)

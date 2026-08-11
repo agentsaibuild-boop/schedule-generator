@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -468,6 +469,39 @@ class ChatHandler:
         except Exception as exc:
             logger.debug("Не мога да определя приоритетни документи: %s", exc)
             return []
+
+    def _try_package_generation(
+        self, analysis, boq_index, *, num_teams: int, locations, progress,
+        segments=None,
+    ):
+        """Пакетният път (2026-08-07) — устройството на човешкия еталон.
+
+        Моделът описва ОБЕКТА (кои участъци съществуват и коя част от кой ред
+        на КСС им се пада), а технологичните вериги, зависимостите, WBS-ът,
+        датите и критичният път идват от детерминистичния код.  Това е
+        разликата между „списък дейности" и линеен график.
+
+        Изисква индекс на КСС — без редове няма какво да се разпределя.  При
+        какъвто и да е неуспех връща None и извикващият пада към досегашния
+        път: нов път не бива да е причина за нула изход.  `PACKAGE_GENERATION=0`
+        го изключва напълно.
+        """
+        if not boq_index or os.getenv("PACKAGE_GENERATION", "1") == "0":
+            return None
+
+        progress("Генерирам по физически участъци (пакети)...")
+        try:
+            result = self.ai.generate_schedule_packaged(
+                analysis, boq_index, num_teams=max(int(num_teams or 1), 1),
+                locations=locations, segments=segments, progress_callback=progress)
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("Пакетната генерация се провали: %s", exc, exc_info=True)
+            return None
+
+        if result.get("status") == "error":
+            logger.warning("Пакетната генерация: %s", result.get("message"))
+            return None
+        return result
 
     def _boq_index(self) -> list:
         """Индексът с количествени редове — за цитиране в промпта.
@@ -988,6 +1022,7 @@ class ChatHandler:
 
         # Step 1c: Extract locations from situation / site-plan files (ground-truth toponyms)
         situation_locations: list[str] = []
+        situation_segments: list[dict] = []
         if self.files and self.ai:
             classification = self.files.classify_files(ai_processor=self.ai)
             situation_paths = classification.get("situation_paths", [])
@@ -996,10 +1031,19 @@ class ChatHandler:
                 for sit_path in situation_paths:
                     locs = self.ai.extract_situation_locations(sit_path)
                     situation_locations.extend(locs)
-                if situation_locations:
+                    # Отсечките между възли (РШ/ОТ) са в ЧЕРТЕЖА, не в КСС —
+                    # без тях пакетите не могат да се кръстят като в еталона.
+                    # Пропуск тук не спира генерацията (виж generate_packages).
+                    if os.getenv("SITUATION_SEGMENTS", "1") != "0":
+                        try:
+                            situation_segments.extend(
+                                self.ai.extract_situation_segments(sit_path))
+                        except Exception as exc:      # noqa: BLE001
+                            logger.warning("Отсечки от ситуация се провалиха: %s", exc)
+                if situation_locations or situation_segments:
                     logger.info(
-                        "Situation extraction added %d locations", len(situation_locations)
-                    )
+                        "Ситуация: %d места, %d отсечки",
+                        len(situation_locations), len(situation_segments))
 
         # Step 2: Generate schedule with verification
         self._progress(0.25, "Генериране на график...")
@@ -1016,8 +1060,9 @@ class ChatHandler:
                     f"{reason}\n\n"
                     "Системата поддържа: водоснабдяване, канализация, КПС, "
                     "довеждащ водопровод и инженеринг проекти за ВиК инфраструктура. "
-                    "При HDD/безизкопни технологии или нестандартни проекти "
-                    "моля използвайте ръчно въвеждане."
+                    "HDD/хоризонтален сондаж СЕ поддържа. При microtunneling, "
+                    "pipe bursting или нестандартни проекти моля използвайте "
+                    "ръчно въвеждане."
                 ),
                 "schedule_updated": False,
                 "schedule_data": None,
@@ -1054,7 +1099,14 @@ class ChatHandler:
         # непокрити редове, нито пространствен ремонт → 6 от 28 позиции и
         # застъпени екипи.  Сега всеки график С КОЛИЧЕСТВА минава през staging;
         # при един лист това е една част, плюс двата ремонта.
-        if [s for s in _sheets if s[1]]:
+        _packaged = self._try_package_generation(
+            analysis, _boq, num_teams=1,
+            locations=situation_locations or None,
+            segments=situation_segments or None, progress=_progress)
+
+        if _packaged is not None:
+            gen_result = _packaged
+        elif [s for s in _sheets if s[1]]:
             _progress(f"Генерирам по части (staging) — {len(_sheets)} част(и) от КСС...")
             gen_result = self.ai.generate_schedule_staged(
                 analysis, project_type, _progress,
@@ -1393,8 +1445,10 @@ class ChatHandler:
                 _citation_report["uncovered"] = _cov["uncovered"]
                 _citation_report["over_covered"] = sorted(_cov["over_covered"])
                 _citation_report["ambiguous"] = _cov.get("ambiguous", [])
+                _citation_report["uncited_production"] = _cov.get("uncited_production", [])
                 _cov_problem = bool(_cov["uncovered"] or _cov["over_covered"]
-                                    or _cov.get("ambiguous"))
+                                    or _cov.get("ambiguous")
+                                    or _cov.get("uncited_production"))
         except Exception as exc:
             logger.warning("verify_citations при модификация се провали: %s", exc)
             _citation_report = {"checked": False, "reason": "exception"}
@@ -2247,7 +2301,13 @@ class ChatHandler:
         _sheets = {(getattr(getattr(r, "source", None), "document", ""),
                     getattr(getattr(r, "source", None), "sheet", ""))
                    for r in _boq if getattr(r, "quantity", None) is not None}
-        if [s for s in _sheets if s[1]]:
+        _packaged = self._try_package_generation(
+            analysis, _boq, num_teams=num_teams,
+            locations=situation_locations or None, progress=_progress)
+
+        if _packaged is not None:
+            gen_result = _packaged
+        elif [s for s in _sheets if s[1]]:
             _progress(f"Генерирам по части (staging) — {len(_sheets)} част(и) от КСС...")
             gen_result = self.ai.generate_schedule_staged(
                 analysis, project_type, _progress,

@@ -80,6 +80,49 @@ FIELD_ID_NUMBER1 = "188743767"  # Number1 = L(м)
 # влизаше в XML-а, тоест round-trip идентичност беше невъзможна — редактиран
 # в MS Project и върнат файл не може да се свърже обратно със задачите.
 FIELD_ID_TEXT4 = "188743740"    # Text4 = ID
+# Text5 = цитатът към КСС (`КСС.xlsx!лист!ред`).  Одит 07.08.2026: „конкретна
+# MS Project задача още не може надеждно да се проследи обратно до точния ред
+# в анонимизирания КСС."  Цитатът съществуваше в задачата (`source_ref`) и се
+# проверяваше от гейта, но никога не влизаше в експорта — тоест беше проверим
+# отвътре и невидим отвън.
+FIELD_ID_TEXT5 = "188743743"    # Text5 = Източник (КСС)
+
+# Пространствената идентичност на участъка.  Одит 07.08.2026: „спрямо човешкия
+# еталон това още е сериозно under-segmentation" — но преди това изобщо не се
+# виждаше КАК е сегментирано, защото полетата не излизаха от пакета.
+FIELD_ID_TEXT6 = "188743746"    # Text6 = Участък (ID)
+FIELD_ID_TEXT7 = "188743749"    # Text7 = Улица
+FIELD_ID_TEXT8 = "188743752"    # Text8 = От възел
+FIELD_ID_TEXT9 = "188743755"    # Text9 = До възел
+FIELD_ID_TEXT10 = "188743758"   # Text10 = Запис (ID)
+FIELD_ID_NUMBER2 = "188743770"  # Number2 = Пикетаж от
+FIELD_ID_NUMBER3 = "188743773"  # Number3 = Пикетаж до
+
+#: Поле → (ключ в задачата, псевдоним в MS Project).  Държи дефиницията и
+#: стойността на едно място, за да не се разминат както Text2 („Мярка" беше
+#: дефинирано, но никога не се пишеше).
+_SPATIAL_FIELDS: tuple[tuple[str, str, str], ...] = (
+    (FIELD_ID_TEXT6, "spatial_segment_id", "Участък (ID)"),
+    (FIELD_ID_TEXT7, "street", "Улица"),
+    (FIELD_ID_TEXT8, "from_node", "От възел"),
+    (FIELD_ID_TEXT9, "to_node", "До възел"),
+    (FIELD_ID_NUMBER2, "start_chainage", "Пикетаж от"),
+    (FIELD_ID_NUMBER3, "end_chainage", "Пикетаж до"),
+    # Неизменният ключ на реда.  „Източник" казва къде да се отвори документът;
+    # това казва кой запис е и оцелява разместване на редове (одит 10.08.2026).
+    (FIELD_ID_TEXT10, "source_record_id", "Запис (ID)"),
+)
+
+#: MSPDI иска и името на полето, не само ID-то.
+_FIELD_NAMES = {
+    FIELD_ID_TEXT6: "Text6",
+    FIELD_ID_TEXT7: "Text7",
+    FIELD_ID_TEXT8: "Text8",
+    FIELD_ID_TEXT9: "Text9",
+    FIELD_ID_TEXT10: "Text10",
+    FIELD_ID_NUMBER2: "Number2",
+    FIELD_ID_NUMBER3: "Number3",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +136,7 @@ def export_to_mspdi_xml(
     start_date: str = "2026-06-01",
     calendar_type: str = "7-day",
     filename: str | None = None,
-    constraint_mode: str = "pinned",
+    constraint_mode: str = "milestones",
 ) -> bytes | None:
     """Generate MSPDI XML file compatible with MS Project 2010+.
 
@@ -137,7 +180,7 @@ def _build_xml(
     project_name: str,
     start_date: str,
     calendar_type: str,
-    constraint_mode: str = "pinned",
+    constraint_mode: str = "milestones",
 ) -> ET.Element:
     """Build the full MSPDI XML tree."""
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
@@ -254,6 +297,29 @@ def _build_extended_attributes(root: ET.Element) -> None:
     ET.SubElement(attr4, "Alias").text = "\u0415\u043a\u0438\u043f"  # Екип
 
 
+    _add_source_field_definition(ext_attrs)
+
+
+def _add_source_field_definition(ext_attrs: ET.Element) -> None:
+    """Text5 = Източник (КСС) — цитатът лист+ред, проследим отвън.
+
+    Одит 07.08.2026: „конкретна MS Project задача още не може надеждно да се
+    проследи обратно до точния ред в анонимизирания КСС."  Цитатът
+    (`source_ref`, вида `КСС.xlsx!лист!ред`) съществуваше в задачата и гейтът
+    го проверяваше, но не влизаше в експорта — проверим отвътре, невидим отвън.
+    """
+    attr = ET.SubElement(ext_attrs, "ExtendedAttribute")
+    ET.SubElement(attr, "FieldID").text = FIELD_ID_TEXT5
+    ET.SubElement(attr, "FieldName").text = "Text5"
+    ET.SubElement(attr, "Alias").text = "Източник (КСС)"
+
+    for field_id, _, alias in _SPATIAL_FIELDS:
+        spatial = ET.SubElement(ext_attrs, "ExtendedAttribute")
+        ET.SubElement(spatial, "FieldID").text = field_id
+        ET.SubElement(spatial, "FieldName").text = _FIELD_NAMES[field_id]
+        ET.SubElement(spatial, "Alias").text = alias
+
+
 def _build_calendar(root: ET.Element, calendar_type: str) -> None:
     """Build the work calendar (7-day or 5-day)."""
     calendars = ET.SubElement(root, "Calendars")
@@ -294,7 +360,7 @@ def _build_tasks(
     start_dt: datetime,
     project_name: str,
     calendar_type: str = "7-day",
-    constraint_mode: str = "pinned",
+    constraint_mode: str = "milestones",
 ) -> dict[str, int]:
     """Build the Tasks section. Returns a map of task_id → UID."""
     tasks_elem = ET.SubElement(root, "Tasks")
@@ -335,6 +401,28 @@ def _build_tasks(
     # Смята се ПРЕДИ прохода, за да е коректна дори при child-преди-parent.
     hierarchy = _compute_hierarchy(flat_tasks)
 
+    # Кой е РОДИТЕЛ — по `parent_id`, не само по вложени `sub_activities`.
+    #
+    # 2026-08-06: WBS слоят (work_package.py) строи ПЛОСКА йерархия през
+    # `parent_id`, защото така е и в еталонния график.  `_flatten_schedule`
+    # обаче слага `_has_children` само за вложените под-дейности, затова
+    # обобщаващите излизаха със Summary=0 и — понеже са с нулева
+    # продължителност — MS Project ги показваше като MILESTONE-и вместо като
+    # обобщаващи ленти.  Проверено с обратен парсър на изхода: summary=0.
+    parent_ids = {
+        str(t.get("parent_id")).strip() for t in flat_tasks
+        if str(t.get("parent_id") or "").strip()
+    }
+
+    # ROLL-UP на обобщаващите (одит 2026-08-07): обобщаващата има нулева
+    # продължителност, затова досега излизаше със Start = Finish = ден 1.  В
+    # одитирания файл всичките 26 обобщаващи бяха с грешни дати — „СТРОИТЕЛСТВО"
+    # приключваше на 01.06, докато негово дете течеше до 17.10.
+    #
+    # Обобщаващата не е работа, а СБОР: започва с първото си дете и свършва с
+    # последното.  Смята се РЕКУРСИВНО, за да е вярна и на средното ниво.
+    rollup = _compute_rollup(flat_tasks, parent_ids)
+
     # ------------------------------------------------------------------
     # ПРОХОД 2: изгради задачите и връзките с вече пълна карта на UID.
     # ------------------------------------------------------------------
@@ -362,9 +450,23 @@ def _build_tasks(
         # инвариант, който валидаторът също проверява.
         start_day = int(task.get("start_day", 1) or 1)
         raw_duration = task.get("duration", 0) or 0
-        is_milestone = raw_duration == 0 or bool(task.get("milestone") or task.get("is_milestone"))
-        dur_days = 0 if is_milestone else max(1, math.ceil(raw_duration))
-        end_day = start_day if is_milestone else start_day + dur_days - 1
+        # Обобщаваща задача с нулева продължителност НЕ е milestone — иначе
+        # цялата WBS структура влиза в MS Project като поредица от ромбчета.
+        is_summary = bool(
+            task.get("_has_children") or task.get("is_summary")
+            or task_id in parent_ids
+        )
+        is_milestone = not is_summary and (
+            raw_duration == 0
+            or bool(task.get("milestone") or task.get("is_milestone")))
+
+        if is_summary and task_id in rollup:
+            # Сборът от децата, не собствената нулева продължителност.
+            start_day, end_day = rollup[task_id]
+            dur_days = max(1, end_day - start_day + 1)
+        else:
+            dur_days = 0 if is_milestone else max(1, math.ceil(raw_duration))
+            end_day = start_day if is_milestone else start_day + dur_days - 1
 
         # Одит 2026-07-23: индексите start_day/end_day са РАБОТНИ дни —
         # превръщането прескача почивните, иначе MS Project мести задачите.
@@ -393,17 +495,12 @@ def _build_tasks(
         # Затова режимът е избираем.  'pinned' пази досегашното поведение
         # (урок #19); 'flexible' оставя MS Project да планира по зависимости.
         ET.SubElement(task_elem, "Manual").text = "0"
-        if constraint_mode == "flexible":
-            ET.SubElement(task_elem, "ConstraintType").text = "0"  # As Soon As Possible
-        else:
-            ET.SubElement(task_elem, "ConstraintType").text = "2"  # Must Start On
-            ET.SubElement(task_elem, "ConstraintDate").text = start_str
+        _apply_constraint(task_elem, task, constraint_mode, start_str, finish_str)
 
         # Calendar
         ET.SubElement(task_elem, "CalendarUID").text = "1"
 
-        # Summary flag
-        is_summary = bool(task.get("_has_children", False))
+        # Summary flag — по `parent_id` ИЛИ по вложени под-дейности (виж горе).
         ET.SubElement(task_elem, "Summary").text = "1" if is_summary else "0"
 
         # Milestone (0 duration)
@@ -423,6 +520,72 @@ def _build_tasks(
         uid_counter += 1
 
     return uid_map
+
+
+# MSPDI ConstraintType — фиксирани от схемата:
+#   0=ASAP, 1=ALAP, 2=Must Start On, 3=Must Finish On,
+#   4=Start No Earlier Than, 5=Start No Later Than,
+#   6=Finish No Earlier Than, 7=Finish No Later Than
+CONSTRAINT_ASAP = "0"
+CONSTRAINT_MUST_START_ON = "2"
+CONSTRAINT_FINISH_NO_LATER = "7"
+
+CONSTRAINT_MODES = ("milestones", "pinned", "flexible")
+
+
+def _apply_constraint(
+    task_elem: ET.Element,
+    task: dict,
+    mode: str,
+    start_str: str,
+    finish_str: str,
+) -> None:
+    """Наложи политиката за constraints върху една задача.
+
+    СЪПОСТАВКА С ЕТАЛОН (2026-08-06): всичките 204 задачи в програмния график
+    излизаха с `ConstraintType=2` (Must Start On), докато в човешкия еталон
+    НИТО ЕДНА от 610 няма constraint.  Следствието е, че MS Project не
+    планира нищо — получава готови дати и ги показва.  Зависимостите стават
+    декоративни: промени една продължителност и графикът не се пренарежда, а
+    рапортува конфликти.
+
+    Режими:
+      `milestones` (по подразбиране) — работните задачи са auto-scheduled
+          (ASAP) и датите идват от зависимостите; САМО договорните milestone-и
+          получават краен срок.  За тях се пише `Deadline` плюс FNLT, защото
+          Deadline дава на MS Project отрицателен резерв при закъснение, без
+          да зазижда мрежата.
+      `pinned` — досегашното поведение (урок #19): всяко начало заковано.
+          Пази датите точно както ги е сметнал детерминистичният двигател.
+      `flexible` — всичко ASAP, без нито един constraint.
+
+    Договорен milestone = задача с `contractual` (или `is_contractual`).
+    """
+    if mode == "pinned":
+        ET.SubElement(task_elem, "ConstraintType").text = CONSTRAINT_MUST_START_ON
+        ET.SubElement(task_elem, "ConstraintDate").text = start_str
+        return
+
+    ET.SubElement(task_elem, "ConstraintType").text = CONSTRAINT_ASAP
+
+    if mode != "milestones":
+        return
+
+    is_milestone = bool(task.get("milestone") or task.get("is_milestone")) or \
+        (task.get("duration", 0) == 0)
+    contractual = bool(task.get("contractual") or task.get("is_contractual"))
+    if not (is_milestone and contractual):
+        return
+
+    # Договорната дата може да е явна; иначе е там, където графикът я е сложил.
+    deadline = str(task.get("contract_date") or "").strip()
+    deadline_str = f"{deadline}T17:00:00" if len(deadline) == 10 else finish_str
+
+    # Deadline (не constraint) — маркер + отрицателен резерв при закъснение.
+    ET.SubElement(task_elem, "Deadline").text = deadline_str
+    # FNLT е „не по-късно от", тоест не мести задачата напред, само назад.
+    task_elem.find("ConstraintType").text = CONSTRAINT_FINISH_NO_LATER
+    ET.SubElement(task_elem, "ConstraintDate").text = deadline_str
 
 
 def _add_task_custom_fields(task_elem: ET.Element, task: dict) -> None:
@@ -454,6 +617,24 @@ def _add_task_custom_fields(task_elem: ET.Element, task: dict) -> None:
         ea = ET.SubElement(task_elem, "ExtendedAttribute")
         ET.SubElement(ea, "FieldID").text = FIELD_ID_TEXT4
         ET.SubElement(ea, "Value").text = str(task_id)
+
+    # Text5 = Източник (КСС) — `КСС.xlsx!лист!ред`.  Само производствените
+    # задачи цитират ред; обобщаващите и milestone-ите нямат какво да сочат.
+    source_ref = str(task.get("source_ref") or "").strip()
+    if source_ref:
+        ea = ET.SubElement(task_elem, "ExtendedAttribute")
+        ET.SubElement(ea, "FieldID").text = FIELD_ID_TEXT5
+        ET.SubElement(ea, "Value").text = source_ref
+
+    # Text6-9, Number2-3 = кой участък е това физически.  Празно поле не се
+    # пише: „улица: —" изглежда като отговор, а е липса на отговор.
+    for field_id, key, _ in _SPATIAL_FIELDS:
+        value = task.get(key)
+        if value is None or not str(value).strip():
+            continue
+        ea = ET.SubElement(task_elem, "ExtendedAttribute")
+        ET.SubElement(ea, "FieldID").text = field_id
+        ET.SubElement(ea, "Value").text = str(value)
 
     # Text3 = Екип (team)
     team = task.get("team")
@@ -534,7 +715,18 @@ def _add_predecessor_links(
 def _build_resources(
     root: ET.Element, flat_tasks: list[dict]
 ) -> dict[str, int]:
-    """Build the Resources section. Returns team_name → resource_uid map."""
+    """Build the Resources section. Returns resource_name → resource_uid map.
+
+    СЪПОСТАВКА С ЕТАЛОН (2026-08-06): човешкият график има 82 ресурса и 4677
+    назначения — реален състав на бригадата (технически ръководител, геодезист,
+    багер, тръбополагачи, трамбовка, камиони).  Нашият имаше 57 ресурса и 172
+    назначения: по ЕДИН низ „Екип К1" на задача.  С такъв модел не може да се
+    отговори на въпроса, който възложителят задава — дали двата фронта изобщо
+    са обезпечени с хора и механизация.
+
+    Затова тук се четат и `resources` (съставът от технологичния шаблон), и
+    `team` (етикетът на фронта).  Задача без състав се държи както досега.
+    """
     resources_elem = ET.SubElement(root, "Resources")
 
     # Empty resource (UID=0, REQUIRED by MS Project)
@@ -547,19 +739,55 @@ def _build_resources(
     res_uid = 1
 
     for task in flat_tasks:
-        team = task.get("team")
-        if team and team != "\u2014" and team not in resource_map:
-            resource_map[team] = res_uid
+        for name in _resource_names(task):
+            if name in resource_map:
+                continue
+            resource_map[name] = res_uid
 
             res = ET.SubElement(resources_elem, "Resource")
             ET.SubElement(res, "UID").text = str(res_uid)
             ET.SubElement(res, "ID").text = str(res_uid)
-            ET.SubElement(res, "Name").text = team
+            ET.SubElement(res, "Name").text = name
             ET.SubElement(res, "Type").text = "1"  # Work resource
+            # MaxUnits е НАЛИЧНОСТТА (1.0 = един брой).  Без нея MS Project
+            # приема неограничен ресурс и не показва претоварване — точно
+            # затова одитът намери един багер на 16 едновременни задачи.
+            # 100% в MSPDI се пише като 1.0 на единица.
+            ET.SubElement(res, "MaxUnits").text = f"{_resource_capacity(name):.1f}"
 
             res_uid += 1
 
     return resource_map
+
+
+def _resource_capacity(name: str) -> float:
+    """Наличност на ресурса — същата таблица, по която се прави изравняването.
+
+    Ако XML-ът обявява друга наличност от тази, с която е сметнат графикът,
+    MS Project ще покаже претоварване там, където ние сме изравнили.
+    """
+    from src.schedule_builder import _load_resource_capacity
+
+    config = _load_resource_capacity()
+    table = config.get("capacity") or {}
+    return float(table.get(name, config.get("default", 1)))
+
+
+def _resource_names(task: dict) -> list[str]:
+    """\u0420\u0435\u0441\u0443\u0440\u0441\u0438\u0442\u0435 \u043d\u0430 \u0435\u0434\u043d\u0430 \u0437\u0430\u0434\u0430\u0447\u0430: \u0441\u044a\u0441\u0442\u0430\u0432\u044a\u0442 \u043d\u0430 \u0431\u0440\u0438\u0433\u0430\u0434\u0430\u0442\u0430 \u043f\u043b\u044e\u0441 \u0435\u0442\u0438\u043a\u0435\u0442\u044a\u0442 \u043d\u0430 \u0444\u0440\u043e\u043d\u0442\u0430.
+
+    \u0420\u0435\u0434\u044a\u0442 \u0435 \u0441\u0442\u0430\u0431\u0438\u043b\u0435\u043d (\u0441\u044a\u0441\u0442\u0430\u0432, \u043f\u043e\u0441\u043b\u0435 \u0435\u043a\u0438\u043f) \u0438 \u0431\u0435\u0437 \u043f\u043e\u0432\u0442\u043e\u0440\u0435\u043d\u0438\u044f, \u0437\u0430 \u0434\u0430 \u0441\u0430
+    \u043f\u043e\u0432\u0442\u043e\u0440\u044f\u0435\u043c\u0438 \u0438 UID-\u0438\u0442\u0435, \u0438 \u043d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u044f\u0442\u0430.
+    """
+    names: list[str] = []
+    for raw in task.get("resources") or []:
+        name = str(raw).strip()
+        if name and name != "\u2014" and name not in names:
+            names.append(name)
+    team = str(task.get("team") or "").strip()
+    if team and team != "\u2014" and team not in names:
+        names.append(team)
+    return names
 
 
 def _build_assignments(
@@ -572,25 +800,38 @@ def _build_assignments(
     assignments_elem = ET.SubElement(root, "Assignments")
     asn_uid = 1
 
+    # Същото определение като в `_build_tasks`: родител е и този, посочен през
+    # `parent_id`.  Иначе обобщаващите получават ресурс и часовете се броят
+    # двойно — веднъж на родителя, веднъж на децата.
+    parent_ids = {
+        str(t.get("parent_id")).strip() for t in flat_tasks
+        if str(t.get("parent_id") or "").strip()
+    }
+
     for task in flat_tasks:
         task_id = str(task.get("id", "")).strip()
-        team = task.get("team")
-        is_summary = task.get("_has_children", False)
-
-        if not team or team == "\u2014" or is_summary:
+        is_summary = bool(task.get("_has_children") or task.get("is_summary")
+                          or task_id in parent_ids)
+        if is_summary:
             continue
 
         task_uid = uid_map.get(task_id)
-        res_uid = resource_map.get(team)
-        if task_uid is None or res_uid is None:
+        if task_uid is None:
             continue
 
-        asn = ET.SubElement(assignments_elem, "Assignment")
-        ET.SubElement(asn, "UID").text = str(asn_uid)
-        ET.SubElement(asn, "TaskUID").text = str(task_uid)
-        ET.SubElement(asn, "ResourceUID").text = str(res_uid)
+        # \u041f\u043e \u0435\u0434\u043d\u043e \u043d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435 \u0437\u0430 \u0412\u0421\u0415\u041a\u0418 \u0440\u0435\u0441\u0443\u0440\u0441 \u043d\u0430 \u0437\u0430\u0434\u0430\u0447\u0430\u0442\u0430 (\u0441\u044a\u0441\u0442\u0430\u0432 + \u0435\u043a\u0438\u043f), \u043d\u0435
+        # \u0435\u0434\u043d\u043e \u0437\u0430 \u0446\u0435\u043b\u0438\u044f \u201e\u0435\u043a\u0438\u043f" \u2014 \u0438\u043d\u0430\u0447\u0435 \u043e\u0431\u0435\u0437\u043f\u0435\u0447\u0435\u043d\u043e\u0441\u0442\u0442\u0430 \u043d\u0435 \u0441\u0435 \u0432\u0438\u0436\u0434\u0430 \u0432 MS Project.
+        for name in _resource_names(task):
+            res_uid = resource_map.get(name)
+            if res_uid is None:
+                continue
 
-        asn_uid += 1
+            asn = ET.SubElement(assignments_elem, "Assignment")
+            ET.SubElement(asn, "UID").text = str(asn_uid)
+            ET.SubElement(asn, "TaskUID").text = str(task_uid)
+            ET.SubElement(asn, "ResourceUID").text = str(res_uid)
+
+            asn_uid += 1
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +869,56 @@ def _flatten_schedule(
             )
 
     return result
+
+
+def _compute_rollup(
+    flat_tasks: list[dict], parent_ids: set[str]
+) -> dict[str, tuple[int, int]]:
+    """За всяка обобщаваща задача: (начало на първото дете, край на последното).
+
+    Смята се от ЛИСТАТА нагоре, за да е вярно и за средните нива: участък,
+    чието дете е отложено от ресурсното изравняване, трябва да се разтегне, а
+    заедно с него и фазата над него.
+    """
+    children: dict[str, list[str]] = defaultdict(list)
+    by_id: dict[str, dict] = {}
+    for task in flat_tasks:
+        tid = _sid(task)
+        if not tid:
+            continue
+        by_id[tid] = task
+        parent = str(task.get("parent_id") or "").strip()
+        if parent and parent != tid:
+            children[parent].append(tid)
+
+    def own_span(task: dict) -> tuple[int, int]:
+        start = int(task.get("start_day", 1) or 1)
+        duration = task.get("duration", 0) or 0
+        if duration <= 0:
+            return start, start
+        return start, start + max(1, math.ceil(duration)) - 1
+
+    result: dict[str, tuple[int, int]] = {}
+    guard: set[str] = set()
+
+    def span(tid: str) -> tuple[int, int]:
+        if tid in result:
+            return result[tid]
+        if tid in guard:                      # счупена йерархия (цикъл)
+            return own_span(by_id[tid])
+        guard.add(tid)
+
+        kids = children.get(tid, [])
+        if not kids:
+            value = own_span(by_id[tid])
+        else:
+            spans = [span(k) for k in kids]
+            value = (min(s for s, _ in spans), max(e for _, e in spans))
+        guard.discard(tid)
+        result[tid] = value
+        return value
+
+    return {tid: span(tid) for tid in parent_ids if tid in by_id}
 
 
 def _sid(task: dict) -> str:

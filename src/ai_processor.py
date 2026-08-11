@@ -7,6 +7,7 @@ Enforces strict JSON pipeline: only converted .json files are accepted for analy
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import logging
 import os
@@ -16,8 +17,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from src.ai_disclosure import machine_readable_marker
-from src.ai_router import AIRouter
+from src.ai_router import AIRouter, worker_max_tokens
 from src.duration_calculator import SUPPORTED_MATERIALS
+from src.json_contract import parse_json_strict
 from src.prompt_safety import build_untrusted_block
 from src.schedule_builder import ScheduleBuilder
 
@@ -34,6 +36,21 @@ _MAX_SPLIT_DEPTH = 4
 # всякакъв размер, иначе би направил двоично дърво от извиквания и би изял
 # бюджета, вместо да се предаде.
 _MAX_SPLITS_PER_RUN = 12
+
+
+def gen_max_tokens() -> int:
+    """Таван на изхода при ГЕНЕРИРАНЕ.
+
+    ПРОГОНИ 10.08.2026: твърдият default 8192 отряза 11 отговора и уби 14 от 40
+    прогона (`status=error`, 0 пакета) — цял график с десетки пакети просто не
+    се събира в 8192 изходни токена.
+
+    Затова тук няма собствено число: без изрично зададен `GEN_MAX_TOKENS`
+    генерирането иска ПЪЛНИЯ таван на работника.  Един работник — един таван,
+    вместо две настройки, които тихо си противоречат.  Ако доставчикът откаже
+    толкова, `_chat_deepseek` слиза стъпало надолу сам.
+    """
+    return int(os.getenv("GEN_MAX_TOKENS", "0")) or worker_max_tokens()
 
 
 def build_schedule_response_schema() -> dict:
@@ -90,6 +107,121 @@ def build_schedule_response_schema() -> dict:
             "notes": s_or_n,
         },
         "required": ["tasks"],
+        "additionalProperties": True,
+    }
+
+
+def _salvage_json_objects(text: str) -> list[dict]:
+    """Извади ЦЕЛИТЕ `{...}` обекти от отрязан JSON масив.
+
+    OCR извикването има таван от 4096 токена, а голям трасировъчен план дава
+    повече отсечки, отколкото се събират.  Тогава отговорът свършва по средата
+    на низ и целият масив става непарсируем — при положение че първите
+    двайсетина обекта са напълно валидни.
+
+    Броим скоби извън кавички, за да не се подведем от `{` вътре в текст.
+    """
+    objects: list[dict] = []
+    starts: list[int] = []          # стек, защото отсечките са ВЛОЖЕНИ в
+    in_string = False               # `{"segments": [...]}` — обект на най-горно
+    escaped = False                 # ниво изобщо няма да се затвори
+
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            starts.append(index)
+        elif char == "}" and starts:
+            start = starts.pop()
+            try:
+                candidate = json.loads(text[start:index + 1])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                objects.append(candidate)
+
+    # Само отсечки — външният обект `{"segments": [...]}` няма тези полета.
+    return [o for o in objects if "start_node" in o or "end_node" in o]
+
+
+# Веригите, които моделът има право да посочи за ФИЗИЧЕСКИ участък.
+# Проектирането/мобилизацията/надзорът/приемането НЕ са негова работа — те се
+# добавят от кода, защото не зависят от документите, а от вида на договора.
+_SPATIAL_CHAIN_KEYS = ("sewer_section", "water_section", "pavement_section",
+                       "cable_section", "structure")
+
+
+def build_packages_response_schema() -> dict:
+    """JSON schema за ПАКЕТНИЯ отговор — физически участъци, не готови задачи.
+
+    СЪПОСТАВКА С ЕТАЛОН (2026-08-06): човешкият график е организиран в 23
+    водопроводни и 46 канализационни ПАКЕТА — реални трасета между два възела,
+    всяко с технологична верига от 6-9 дейности.  Нашият модел връщаше плосък
+    списък задачи, групиран по диаметър, затова фронтовете клонираха
+    количества, а настилките тръгваха преди изкопа под тях.
+
+    Тук моделът връща само това, което САМО ТОЙ може да знае от документите:
+    кои участъци съществуват, между кои възли са и коя част от кой ред на КСС
+    им се пада.  Веригата, продължителностите, зависимостите, WBS-ът и
+    бригадите се добавят от детерминистичния код.
+
+    Забележка за строгите provider-и (виж `build_schedule_response_schema`):
+    всички полета се декларират явно, иначе Anthropic през OpenRouter изхвърля
+    недекларираните.
+    """
+    materials: list = list(SUPPORTED_MATERIALS) + ["", None]
+    num = {"type": ["number", "integer", "null"]}
+    s_or_n = {"type": ["string", "null"]}
+    item_props = {
+        "source_ref": {"type": "string"},
+        "quantity": {"type": ["number", "integer"]},
+    }
+    package_props = {
+        "id": {"type": ["string", "integer"]},
+        "name": {"type": "string"},
+        "network": {"enum": ["В", "К", "П", "ЕЛ", "", None]},
+        "chain": {"enum": list(_SPATIAL_CHAIN_KEYS) + ["", None]},
+        "branch": s_or_n,
+        "street": s_or_n,
+        "start_node": s_or_n,
+        "end_node": s_or_n,
+        "chainage_from": num,
+        "chainage_to": num,
+        "dn": {"type": ["string", "integer", "null"]},
+        "material": {"enum": materials},
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": item_props,
+                "required": ["source_ref", "quantity"],
+                "additionalProperties": True,
+            },
+        },
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "packages": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": package_props,
+                    "required": ["id", "name", "items"],
+                    "additionalProperties": True,
+                },
+            },
+            "notes": s_or_n,
+        },
+        "required": ["packages"],
         "additionalProperties": True,
     }
 
@@ -343,7 +475,15 @@ class AIProcessor:
                 "   - 'mega' — >20km обща дължина или >500 участъка\n"
                 "   - 'out_of_scope' — проектът НЕ може да се генерира автоматично. "
                 "Задължително използвай 'out_of_scope' при: "
-                "HDD/хоризонтално сондиране/microtunneling/pipe bursting технологии; "
+                # HDD/хоризонтален сондаж БЕШЕ в този списък.  Съпоставката с
+                # еталонен човешки график (2026-08-06) показа, че там сондажът е
+                # СТАНДАРТНИЯТ метод за уличен водопровод — цялата водопроводна
+                # верига минава през „стациониране на сондажната машина".  Тоест
+                # системата отказваше точно проектите, които клиентът реално
+                # планира, при положение че нормата за HDD е верифицирана
+                # (56 м/ден, урок #32).  Остават извън обхвата само методите
+                # без наша норма.
+                "microtunneling/pipe bursting технологии; "
                 "аварийно-ремонтни дейности ('аварийна замяна', 'аварийен ремонт'); "
                 "критично кратък срок (<20 работни дни за нестандартна работа); "
                 "проектът е 'Демонтаж' или 'Рехабилитация' без ново строителство; "
@@ -386,6 +526,560 @@ class AIProcessor:
             "fallback": result.get("fallback", False),
             "injection_findings": injection_findings,
             "truncation": truncation,
+        }
+
+    # ------------------------------------------------------------------
+    # Пакетна генерация (2026-08-07) — както е устроен човешкият график
+    # ------------------------------------------------------------------
+
+    def generate_packages(
+        self,
+        analysis: dict,
+        boq_index: list,
+        *,
+        num_teams: int = 1,
+        locations: list[str] | None = None,
+        segments: list[dict] | None = None,
+        progress_callback: Any | None = None,
+    ) -> dict:
+        """Генерирай ПАКЕТИ (физически участъци), после ги разгъни в задачи.
+
+        Това е пътят, който доближава изхода до човешкия модел.  Моделът вече
+        не съчинява задачи, продължителности и зависимости — той описва само
+        обекта: кои участъци има, между кои възли са и коя част от кой ред на
+        КСС им се пада.  Всичко останало е детерминистично:
+
+            пакети → Σ=КСС гейт → фронтове → технологични вериги → WBS
+                   → кръстосани зависимости → дати → CPM
+
+        Returns:
+            {status, tasks, packages, conservation, expansion_warnings,
+             parse_errors, cost, model} — `status='error'` при непреодолим
+            проблем, `'needs_human_review'` при нарушен инвариант.
+        """
+        from src.provenance import format_boq_for_prompt
+        from src.schedule_builder import ScheduleBuilder
+        from src.work_package import (assign_fronts, check_conservation,
+                                      conservation_messages, expand_packages,
+                                      link_cross_discipline, load_chains,
+                                      allocation_ledger, contract_packages,
+                                      enforce_construction_span,
+                                      link_contract_phases,
+                                      merge_restoration_zones,
+                                      normalize_over_allocation, packages_from_ai,
+                                      reroute_uncoverable_items)
+
+        if not self.router:
+            return {"status": "error", "message": "AI Router not initialized."}
+        if not boq_index:
+            return {"status": "error",
+                    "message": "Пакетната генерация изисква индекс на КСС — "
+                               "без него количествата не могат да се разпределят."}
+
+        def _prog(message: str) -> None:
+            if progress_callback:
+                progress_callback(message)
+
+        chains = load_chains()
+        _prog("Разделям обекта на физически участъци...")
+
+        analysis_text = (
+            analysis.get("analysis", "")
+            if isinstance(analysis.get("analysis"), str)
+            else json.dumps(analysis, ensure_ascii=False)
+        )
+        safe_analysis, _ = build_untrusted_block(analysis_text, label="АНАЛИЗ")
+
+        locations_section = ""
+        if locations:
+            joined = "\n".join(f"  - {loc}" for loc in locations)
+            locations_section = (
+                "\n\nДОПУСТИМИ ИМЕНА НА МЕСТА (само тези са в документите):\n"
+                f"{joined}\nНЕ измисляй имена извън списъка.\n")
+
+        # Отсечките от ситуационния чертеж са ЕДИНСТВЕНИЯТ източник за възлите:
+        # КСС няма РШ/ОТ номера.  Без тях моделът кръщава пакетите с описанието
+        # на реда и шест участъка излизат с едно и също име (жив прогон
+        # 2026-08-07).  Списъкът е за ИЗБОР — ако чертежът е нечетим, той е
+        # празен и генерацията продължава както досега.
+        segments_section = ""
+        if segments:
+            lines = []
+            for seg in segments[:120]:
+                bits = [str(seg.get("branch") or "").strip(),
+                        f"от {seg.get('start_node')} до {seg.get('end_node')}"
+                        if seg.get("start_node") and seg.get("end_node") else "",
+                        f"({seg.get('street')})" if seg.get("street") else "",
+                        f"DN{seg.get('dn')}" if seg.get("dn") else ""]
+                lines.append("  - " + " ".join(b for b in bits if b))
+            segments_section = (
+                "\n\nРЕАЛНИ УЧАСТЪЦИ ОТ СИТУАЦИОННИЯ ЧЕРТЕЖ "
+                f"({len(segments)} отсечки между възли):\n"
+                + "\n".join(lines)
+                + "\nПОЛЗВАЙ ТЕЗИ участъци като основа за пакетите и ги кръсти\n"
+                  "точно така: „кл. 48 от РШ 36 до РШ 37\". НЕ измисляй възли\n"
+                  "извън списъка. Ако една позиция от КСС минава през няколко\n"
+                  "от тези отсечки, раздели количеството между тях.\n")
+
+        messages = [{
+            "role": "user",
+            "content": (
+                "Раздели обекта на ФИЗИЧЕСКИ РАБОТНИ УЧАСТЪЦИ (пакети).\n\n"
+                f"{safe_analysis}\n"
+                f"{locations_section}"
+                f"{segments_section}\n"
+                f"{format_boq_for_prompt(boq_index)}\n\n"
+                "ЗАДАЧАТА ТИ Е САМО ГЕОМЕТРИЯТА И РАЗПРЕДЕЛЕНИЕТО.\n"
+                "НЕ измисляй дейности, продължителности, дати или зависимости —\n"
+                "те се добавят от системата по верифицирани технологични вериги.\n\n"
+                "Всеки пакет е ЕДНО реално трасе между ДВА възела, например:\n"
+                "  'кл. 48 от РШ 36 до РШ 40'      (канализация — възли РШ)\n"
+                "  'КЛ. 25 от ОТ 27 до ОТ 25'      (водопровод — възли ОТ/Т)\n\n"
+                "Полета на пакета: id, name, network ('В' водопровод / 'К' "
+                "канализация / 'П' пътни), branch, street, start_node, end_node, "
+                "chainage_from, chainage_to, dn, material.\n\n"
+                "⛔ НАЙ-ВАЖНОТО ПРАВИЛО — КОЛИЧЕСТВАТА СЕ РАЗДЕЛЯТ, НЕ СЕ ПРЕПИСВАТ:\n"
+                "Всеки пакет носи `items`: [{source_ref, quantity}].\n"
+                "Сборът на `quantity` по ВСИЧКИ пакети за един `source_ref` трябва\n"
+                "да е ТОЧНО РАВЕН на количеството в този ред от КСС.\n"
+                "Ако ред от 1000 м минава през три участъка → 400 + 350 + 250.\n"
+                "НИКОГА не давай пълното количество на повече от един пакет —\n"
+                "това означава двойна работа и системата ще отхвърли графика.\n"
+                "Всеки ред от КСС трябва да е разпределен в поне един пакет.\n\n"
+                "НЕ подавай клас на дейността — системата го извежда от описанието\n"
+                "на цитирания ред.\n\n"
+                "НЕ ГРУПИРАЙ ПО ДИАМЕТЪР.  „Цялата мрежа DN315“ НЕ е участък —\n"
+                "участък е трасе между два възела.  Един DN се среща в няколко\n"
+                "участъка, а един участък често има няколко DN.\n\n"
+                "ВСЯКА позиция от КСС трябва да попадне някъде:\n"
+                "  • тръбни редове (m) → в участъците, през които минава трасето;\n"
+                "  • СВО/СКО/шахти/арматури (бр.) → в участъка, в който се намират;\n"
+                "  • настилки, бордюри, тротоари (m²/m) → ОТДЕЛНИ пакети с\n"
+                "    network='П' и chain='pavement_section', по същите улици;\n"
+                "  • ЕЛ/ТТ кабели → пакети по трасето на кабела.\n\n"
+                f"Позволени стойности за `chain`: {', '.join(_SPATIAL_CHAIN_KEYS)}.\n"
+                "НЕ измисляй други — ако не си сигурен, остави `chain` празно и\n"
+                "попълни само `network`.\n\n"
+                f"Работни фронта: {max(int(num_teams), 1)} — но НЕ дели пакетите по\n"
+                "фронтове сам; системата ги разпределя, за да не се дублира работа.\n\n"
+                "Отговори в JSON с ключ `packages`."
+            ),
+        }]
+
+        result = self.router.chat(
+            messages, self.build_system_prompt(query=analysis_text),
+            max_tokens=gen_max_tokens(),
+            response_schema=build_packages_response_schema())
+
+        if result.get("error"):
+            return {"status": "error", "message": result["content"]}
+        if result.get("truncated"):
+            return {"status": "error", "truncated": True,
+                    "message": "Отговорът беше отрязан — разделете проекта на етапи."}
+
+        parsed = AIRouter.parse_json_response(result["content"])
+        # ИЗТОЧНИКЪТ НА ГЕОМЕТРИЯ решава какво може да се твърди с нея
+        # (одит 10.08.2026).  Прочетеното от PDF е ЕТИКЕТ: става за име на
+        # участък, не за зониране, зависимости или доказателство за
+        # покритие.  Днес друг източник няма, тоест това е `suggested`.
+        from src.spatial_source import SpatialSource, is_authoritative
+        spatial_source = (SpatialSource.PDF_SUGGESTIONS_ONLY if segments
+                          else SpatialSource.NONE)
+        spatial_authoritative = is_authoritative(spatial_source)
+
+        packages, parse_errors = packages_from_ai(
+            parsed, boq_index=boq_index, chains=chains, segments=segments,
+            spatial_source=spatial_source)
+        if not packages:
+            return {"status": "error",
+                    "message": "Моделът не върна използваеми пакети.",
+                    "parse_errors": parse_errors}
+
+        _prog(f"{len(packages)} участъка. Проверявам разпределението срещу КСС...")
+        conservation = check_conservation(packages, boq_index)
+
+        # ДОПИТВАНЕ ЗА НЕРАЗПРЕДЕЛЕНИТЕ (жив прогон 2026-08-07): моделът върна
+        # 11 пакета за 28 позиции — по един на диаметър, тоест старото групиране,
+        # опаковано като пакети.  „Разпредели всички редове" в промпта не е
+        # проверимо; повторното питане САМО за пропуснатите е — и се спира след
+        # таван, за да няма безкраен цикъл.
+        cost = result.get("cost", 0.0)
+        rounds = int(os.getenv("PACKAGE_REPAIR_ROUNDS", "2"))
+        for attempt in range(1, max(rounds, 0) + 1):
+            missing = list(conservation["missing"])
+            if not missing:
+                break
+            _prog(f"Допитвам за {len(missing)} неразпределени позиции "
+                  f"(опит {attempt})...")
+            extra, extra_cost, extra_errors = self._request_missing_packages(
+                missing, boq_index, analysis_text, known_packages=packages,
+                chains=chains)
+            cost += extra_cost
+            parse_errors.extend(extra_errors)
+
+            attach, create = extra["attach"], extra["create"]
+            if not attach and not create:
+                break
+            # Закачените количества се СЛИВАТ в съществуващия пакет, вместо да
+            # раждат негов дубликат — иначе едно трасе би излязло два пъти в WBS.
+            packages = [
+                dataclasses.replace(p, items=p.items + tuple(attach[p.id]))
+                if p.id in attach else p
+                for p in packages
+            ]
+            packages.extend(create)
+            conservation = check_conservation(packages, boq_index)
+
+        # Позиция, попаднала в пакет, който не може да я изпълни (настилка в
+        # канализационен участък), се мести при пакет-близнак по същото трасе.
+        # Количеството не се променя — само носителят, тоест Σ=КСС остава
+        # изпълнен, а работата не изчезва от графика.
+        # Дрейф в разпределението (сборът е 92-115% от КСС) се изравнява
+        # пропорционално В ДВЕТЕ ПОСОКИ — общото е факт от документа,
+        # пропорцията е преценка на модела.  Клониране (двоен сбор) и голям
+        # недостиг (пропуснат участък) остават блокиращи.
+        packages, trims = normalize_over_allocation(packages, boq_index)
+        if trims:
+            _prog(f"Изравнени {len(trims)} количества до КСС.")
+            parse_errors.extend(trims)
+            conservation = check_conservation(packages, boq_index)
+
+        packages, reroutes = reroute_uncoverable_items(packages, chains)
+        if reroutes:
+            _prog(f"Преместени {len(reroutes)} количества в подходяща верига.")
+            parse_errors.extend(reroutes)
+
+        # Настилките се пакетират по ЗОНА, не по ред от КСС (одит 07.08.2026):
+        # иначе всеки от трите пътни реда влачи цялата 3-степенна верига и
+        # обектът се асфалтира три пъти при напълно точен сбор по количества.
+        packages, zone_notes = merge_restoration_zones(
+            packages, spatial_authoritative=spatial_authoritative)
+        for note in zone_notes:
+            _prog(note)
+            parse_errors.append(note)
+
+        packages = assign_fronts(packages, max(int(num_teams), 1))
+
+        # ДОГОВОРНИЯТ ОБХВАТ не идва от КСС (одит 2026-08-07): проектиране,
+        # мобилизация, авторски надзор и приемане ги няма в количествената
+        # сметка, затова моделът не може да ги върне — създават се тук.
+        # Без тях готовият файл съдържа само СТРОИТЕЛСТВО и нула milestone-и.
+        with_design = "инженеринг" in str(analysis_text).lower()
+        packages = packages + contract_packages(chains, with_design=with_design)
+
+        expansion = expand_packages(packages, chains)
+        tasks = link_cross_discipline(
+            expansion.tasks, packages, chains,
+            spatial_authoritative=spatial_authoritative)
+        tasks, phase_notes = link_contract_phases(tasks, packages, chains)
+        for note in phase_notes:
+            _prog(note)
+
+        builder = ScheduleBuilder()
+
+        # ПРОДЪЛЖИТЕЛНОСТИТЕ ОТ НОРМИТЕ, не от шаблона (2026-08-07).
+        #
+        # Технологичната верига дава на всяка стъпка МЕДИАНАТА от еталона като
+        # запълване — 3 дни за „полагане".  Ако това остане, графикът излиза
+        # структурно верен и напълно безполезен като срок: 1182 м и 74 м
+        # получават еднакви 3 дни.  Проверено в изхода на живия прогон.
+        #
+        # productivities.json е ЕДИНСТВЕНИЯТ източник за продължителности
+        # (CLAUDE.md).  Пакетите носят dn, material, length_m и quantity —
+        # тоест калкулаторът има всичко, което му трябва.  Каквото не може да
+        # се сметне сигурно, запазва стойността от шаблона и се отчита.
+        duration_report = builder.recompute_durations(tasks, reschedule=False)
+        tasks = duration_report["schedule"]
+        _recomputed = duration_report["summary"]["recomputed"]
+        _prog(f"Продължителности от нормите: {_recomputed} от {len(tasks)} задачи.")
+
+        scheduled = builder.reschedule(tasks)
+        tasks = scheduled["schedule"]
+
+        # РЕСУРСНО ИЗРАВНЯВАНЕ (одит 2026-08-07): без него един ръководител
+        # излизаше на 22 едновременни задачи, а един багер на 16.  Мрежата е
+        # коректна, но графикът е физически неизпълним.  Изравняването само
+        # ОТЛАГА — зависимостите остават ненарушими.
+        leveled = builder.level_resources(tasks)
+        if leveled["warnings"]:
+            for w in leveled["warnings"][:3]:
+                logger.warning("Изравняване: %s", w)
+        tasks = leveled["schedule"]
+        if leveled["shifted"]:
+            _prog(f"Ресурсно изравняване: {len(leveled['shifted'])} задачи "
+                  f"отложени до свободен ресурс.")
+
+        # НАДЗОРЪТ ТРАЕ КОЛКОТО ОБЕКТЪТ (одит 10.08.2026, P0.3).  Прилага се
+        # СЛЕД изравняването — то мести строителството, а надзорът трябва да
+        # покрие крайния му обхват, не първоначалния.
+        tasks, span_notes = enforce_construction_span(tasks)
+        for note in span_notes:
+            _prog(note)
+
+        cpm = builder.compute_critical_path(tasks)
+        if not cpm["warnings"]:
+            tasks = cpm["schedule"]
+
+        # Обобщаващите се разтеглят по децата си — иначе Gantt-ът и таблицата
+        # показват друго от MS Project (одит 2026-08-07: 26 от 26 грешни).
+        tasks = builder.roll_up_summaries(tasks)["schedule"]
+
+        blockers = conservation_messages(conservation)
+        if expansion.unplaced:
+            blockers.append(
+                f"{len(expansion.unplaced)} количества не попадат в нито една "
+                "стъпка от технологичната верига — работата не е планирана")
+
+        _prog(f"{len(tasks)} задачи, критичен път {cpm['critical_count']}.")
+
+        return {
+            "status": "ok" if conservation["ok"] and not blockers
+                      else "needs_human_review",
+            "tasks": tasks,
+            "packages": packages,
+            "conservation": conservation,
+            "blockers": blockers,
+            "parse_errors": parse_errors,
+            "expansion_warnings": expansion.warnings,
+            "unplaced": expansion.unplaced,
+            "critical_count": cpm["critical_count"],
+            "duration_report": duration_report,
+            "leveling": {"shifted": len(leveled["shifted"]),
+                         "peak": leveled["peak"]},
+            # Описът е ДОКАЗАТЕЛСТВОТО за Σ=КСС, а не присъдата на гейта —
+            # одиторът може да пресметне сбора независимо (одит 2026-08-07).
+            "ledger": allocation_ledger(packages, boq_index, tasks),
+            "cost": cost,
+            "model": result.get("model", ""),
+        }
+
+    @staticmethod
+    def _network_from_items(items: Any, row_by_ref: dict) -> str:
+        """Изведи мрежата от ОПИСАНИЕТО на цитирания ред, не от модела.
+
+        Мрежата е следствие от това какво се строи, а редът в КСС го казва.
+        Кабел → ЕЛ, настилка/бордюр → П, канализация → К, водопровод → В.
+        Неразпознато → празно, тоест пакетът ще бъде отхвърлен, вместо да
+        отиде в грешна верига.
+        """
+        from src.provenance import _coverer_class
+
+        for raw_item in items or []:
+            if not isinstance(raw_item, dict):
+                continue
+            row = row_by_ref.get(str(raw_item.get("source_ref") or "").strip())
+            if row is None:
+                continue
+            cls = _coverer_class(row)
+            desc = str(getattr(row, "description", "") or "").lower()
+            if cls == "cable":
+                return "ЕЛ"
+            if cls == "pavement":
+                return "П"
+            if "канализац" in desc or "дъждовн" in desc or "ско" in desc:
+                return "К"
+            if "водопровод" in desc or "сво" in desc or "водомер" in desc:
+                return "В"
+        return ""
+
+    def _request_missing_packages(
+        self,
+        missing_refs: list[str],
+        boq_index: list,
+        analysis_text: str,
+        *,
+        known_packages: list,
+        chains: dict,
+    ) -> tuple[dict, float, list[str]]:
+        """Питай модела САМО за позициите, които никой пакет не е поел.
+
+        Цялостният промпт е дълъг и моделът изпуска редове от края.  Тук
+        списъкът е кратък и затворен, а отговорът се проверява по същите
+        правила — включително, че цитатът сочи точно тези редове.
+
+        Returns:
+            ({"attach": {package_id: [items]}, "create": [пакети]}, цена, бележки).
+        """
+        from src.provenance import format_boq_for_prompt
+        from src.work_package import packages_from_ai
+
+        wanted = set(missing_refs)
+        rows = [r for r in boq_index if str(getattr(r, "ref", "")) in wanted]
+        if not rows:
+            return {"attach": {}, "create": []}, 0.0, []
+
+        # ЖИВ ПРОГОН 2026-08-07: първата версия искаше САМО НОВИ пакети и
+        # моделът върна празен списък — с право.  Останалите позиции бяха
+        # 174 бр. СВО, водомерна шахта и бетонови кожуси: те не са ново
+        # трасе, а принадлежат на ВЕЧЕ описаните участъци.  Затова тук се
+        # подават съществуващите пакети и се позволява количествата да се
+        # закачат за тях.
+        existing = "\n".join(f"  {p.id} — {p.label[:70]}" for p in known_packages)
+        safe_analysis, _ = build_untrusted_block(analysis_text, label="АНАЛИЗ")
+        messages = [{
+            "role": "user",
+            "content": (
+                "Тези позиции от КСС не са поети от нито един работен участък.\n"
+                "Разпредели ТОЧНО ТЯХ — нищо друго.\n\n"
+                f"{safe_analysis}\n\n"
+                f"{format_boq_for_prompt(rows)}\n\n"
+                "ВЕЧЕ СЪЗДАДЕНИ УЧАСТЪЦИ:\n"
+                f"{existing or '  (няма)'}\n\n"
+                "Имаш ДВЕ възможности за всяка позиция:\n"
+                "  1. Закачи я за СЪЩЕСТВУВАЩ участък — повтори неговия `id` и\n"
+                "     дай само `items`.  Това е правилното за позиции, които се\n"
+                "     срещат ПО ТРАСЕТО: СВО/СКО/УО/шахти/арматури (бр.),\n"
+                "     бетонови кожуси, фасонни части.\n"
+                "  2. Направи НОВ участък, ако позицията е отделно трасе или\n"
+                "     отделно съоръжение (нов `id`).\n\n"
+                "Сборът на `quantity` за един `source_ref` по всички участъци\n"
+                "трябва да е ТОЧНО равен на количеството в реда.  Ако 174 бр. СВО\n"
+                "се разпределят по четири водопроводни участъка → 40+45+45+44.\n"
+                "Нито една от изброените позиции да не остане неразпределена.\n"
+                f"Позволени `chain`: {', '.join(_SPATIAL_CHAIN_KEYS)} — други НЕ.\n\n"
+                "Отговори в JSON с ключ `packages`."
+            ),
+        }]
+
+        result = self.router.chat(
+            messages, self.build_system_prompt(),
+            max_tokens=gen_max_tokens(),
+            response_schema=build_packages_response_schema())
+        if result.get("error") or result.get("truncated"):
+            return {"attach": {}, "create": []}, result.get("cost", 0.0), [
+                "допитването за неразпределените позиции не успя"]
+
+        parsed = AIRouter.parse_json_response(result["content"])
+
+        # ЖИВ ПРОГОН 2026-08-07: при допитването моделът връща пакетите БЕЗ
+        # `network`/`chain` — и с право, когато само закача количества към вече
+        # описан участък.  Парсерът обаче ги отхвърляше като „неопределима
+        # верига" и 12 пакета с реална работа отпадаха.
+        #
+        # Мрежата на СЪЩЕСТВУВАЩ пакет я знаем ние — не я питаме отново.  За
+        # нов пакет тя се извежда от КЛАСА на цитирания ред, който също е наш.
+        known = {p.id: p for p in known_packages}
+        row_by_ref = {str(getattr(r, "ref", "")): r for r in boq_index}
+        for raw in (parsed.get("packages") or []) if isinstance(parsed, dict) else []:
+            if not isinstance(raw, dict):
+                continue
+            pkg_id = str(raw.get("id") or "").strip()
+            if pkg_id in known:
+                raw["network"] = known[pkg_id].network
+                raw["chain"] = known[pkg_id].chain
+            elif not str(raw.get("network") or "").strip():
+                raw["network"] = self._network_from_items(raw.get("items"), row_by_ref)
+
+        packages, errors = packages_from_ai(
+            parsed, boq_index=boq_index, chains=chains)
+
+        # Цитат ИЗВЪН заявените редове означава, че моделът пипа вече
+        # разпределена работа — това би развалило сбора, затова се отрязва.
+        by_id = {p.id: p for p in known_packages}
+        attached: dict[str, list] = {}
+        created: list = []
+        for pkg in packages:
+            keep = tuple(i for i in pkg.items if i.source_ref in wanted)
+            if len(keep) != len(pkg.items):
+                errors.append(
+                    f"пакет {pkg.id}: изхвърлени цитати извън заявените редове")
+            if not keep:
+                continue
+            if pkg.id in by_id:
+                attached.setdefault(pkg.id, []).extend(keep)
+            else:
+                created.append(dataclasses.replace(pkg, items=keep))
+        return {"attach": attached, "create": created}, result.get("cost", 0.0), errors
+
+    def generate_schedule_packaged(
+        self,
+        analysis: dict,
+        boq_index: list,
+        *,
+        num_teams: int = 1,
+        locations: list[str] | None = None,
+        segments: list[dict] | None = None,
+        progress_callback: Any | None = None,
+    ) -> dict:
+        """Пакетната генерация, приведена към СТАНДАРТНИЯ резултат на pipeline-а.
+
+        `generate_packages` връща пакети и задачи; тук те минават през СЪЩИЯ
+        детерминистичен гейт като всички останали пътища — валидация, покритие
+        по КСС и решение за експорт.  Така новият път не заобикаля нито една
+        проверка само защото е нов.
+
+        Инвариантът Σ=КСС е ДОПЪЛНИТЕЛЕН блокер, не заместител на покритието:
+        първият доказва, че количествата са разпределени точно веднъж; вторият
+        — че разпределеното е свършено от дейност от правилния клас.
+        """
+        from src.provenance import analyze_boq_coverage, strip_ai_provenance
+
+        result = self.generate_packages(
+            analysis, boq_index, num_teams=num_teams, locations=locations,
+            segments=segments, progress_callback=progress_callback)
+        if result["status"] == "error":
+            return {"status": "error", "message": result.get("message", ""),
+                    "packaged": True, "parse_errors": result.get("parse_errors", [])}
+
+        tasks = result["tasks"]
+        strip_ai_provenance(tasks)
+
+        validation = self._validate_final_schedule({"tasks": tasks})
+        citation_report: dict = {"checked": False, "reason": "no_boq_index"}
+        blockers = list(result["blockers"])
+        try:
+            cov = analyze_boq_coverage(tasks, boq_index)
+            citation_report = {
+                "checked": True,
+                "uncovered": cov["uncovered"],
+                "over_covered": sorted(cov["over_covered"]),
+                "ambiguous": cov.get("ambiguous", []),
+                "uncited_production": cov.get("uncited_production", []),
+            }
+            if cov["uncovered"]:
+                blockers.append(
+                    f"{len(cov['uncovered'])} позиции от КСС не са ДОКАЗАНО покрити")
+            if cov["over_covered"]:
+                blockers.append(
+                    f"{len(cov['over_covered'])} позиции с ДУБЛИРАН покривач")
+        except Exception as exc:            # проверката не бива да събаря изхода
+            logger.warning("Покритието при пакетния път се провали: %s", exc)
+            citation_report = {"checked": False, "reason": "exception"}
+
+        if not validation.get("valid"):
+            status = "invalid"
+        elif blockers or not citation_report.get("checked"):
+            status = "needs_human_review"
+        else:
+            status = "approved"
+
+        export = self._export_decision(status, validation, {}, {}, citation_report)
+        if blockers:
+            export = {"exportable": False, "policy": export["policy"],
+                      "blockers": blockers + export.get("blockers", [])}
+
+        return {
+            "status": status,
+            "ai_status": status,
+            "packaged": True,
+            "schedule": {"tasks": tasks},
+            "packages": result["packages"],
+            "conservation": result["conservation"],
+            "parse_errors": result.get("parse_errors", []),
+            "unplaced": result.get("unplaced", []),
+            "critical_count": result.get("critical_count", 0),
+            "validation": validation,
+            "citation_report": citation_report,
+            "exportable": export["exportable"],
+            "export_blockers": export["blockers"],
+            "export_policy": export["policy"],
+            "cycles": 0,
+            "total_cost": result.get("cost", 0.0),
+            "gen_model": result.get("model", ""),
+            "history": [],
+            "duration_report": result.get("duration_report", {}),
+            "ledger": result.get("ledger", []),
+            "leveling": result.get("leveling", {}),
         }
 
     # ------------------------------------------------------------------
@@ -689,11 +1383,11 @@ class AIProcessor:
         # Проба 2026-07-24 (реален проект): default таван от 4096
         # изходни токена ОТРЯЗВАШЕ графика — реален ВиК проект с десетки
         # позиции не се събира.  Генерирането ползва пълния таван на работника
-        # (8192, колкото и корекцията).  При много голям проект (>1000 задачи)
+        # (виж `gen_max_tokens`).  При много голям проект (>1000 задачи)
         # truncation детекторът пак ще подскаже разделяне на етапи.
         gen_result = self.router.chat(
             messages, system_prompt,
-            max_tokens=int(os.getenv("GEN_MAX_TOKENS", "8192")),
+            max_tokens=gen_max_tokens(),
             response_schema=build_schedule_response_schema())
 
         if gen_result.get("error"):
@@ -808,6 +1502,12 @@ class AIProcessor:
         # точно това, което последната AI промяна може да е счупила.
         if progress_callback:
             progress_callback("Проверявам графика детерминистично...")
+
+        # CPM (2026-08-06) — вж. коментара в staged пътя.  `is_critical` дотук
+        # не се пишеше от никого, тоест критичният път в Gantt/PDF/XML беше
+        # декорация.  Смята се преди валидацията, за да пътува с графика.
+        verified_schedule = self._apply_critical_path(verified_schedule)
+
         validation = self._validate_final_schedule(verified_schedule)
 
         # GATE: кодът има последната РАЗРЕШАВАЩА дума, не само последната
@@ -866,11 +1566,14 @@ class AIProcessor:
                 citation_report["uncovered"] = cov["uncovered"]
                 citation_report["over_covered"] = sorted(cov["over_covered"])
                 citation_report["ambiguous"] = cov.get("ambiguous", [])
+                citation_report["uncited_production"] = cov.get("uncited_production", [])
                 # Одит v19 P0: непокрита/дублирана/двусмислена BOQ позиция СВАЛЯ
                 # статуса до needs_human_review — за да НЕ е експортируем при НИКОЯ
                 # policy (provisional игнорира само blockers, не и статуса).
+                # 2026-08-06: и НЕЦИТИРАНО количество — то е невидимо за сбора.
                 if (cov["uncovered"] or cov["over_covered"]
-                        or cov.get("ambiguous")) and status == "approved":
+                        or cov.get("ambiguous")
+                        or cov.get("uncited_production")) and status == "approved":
                     status = "needs_human_review"
             except Exception as exc:  # provenance не бива да събаря генерирането
                 logger.warning("verify_citations в gate се провали: %s", exc)
@@ -1233,6 +1936,22 @@ class AIProcessor:
             _prog(f"Пространствен ремонт: {len(spatial_fix['added_links'])} "
                   f"застъпвания разделени във времето.")
 
+        # CPM (2026-08-06): критичният път се смята ТУК — след като мрежата е
+        # окончателна (свързани мрежи + пространствен ремонт), но преди
+        # валидацията и експорта.  Дотук `is_critical` не го пишеше НИКОЙ:
+        # Gantt-ът, PDF-ът и XML-ът четяха полето, а в реалния прогон и 204-те
+        # задачи излизаха с Critical=0.  Резервът е спрямо СЪЩАТА мрежа, по
+        # която са сметнати датите — обратният ход огледално повтаря
+        # `reschedule`.
+        cpm = builder.compute_critical_path(merged["tasks"])
+        if cpm["warnings"]:
+            logger.warning("CPM: %s", "; ".join(cpm["warnings"]))
+        else:
+            merged["tasks"] = cpm["schedule"]
+            _total = len([t for t in merged["tasks"] if not t.get("is_summary")])
+            _prog(f"Критичен път: {cpm['critical_count']} от {_total} задачи "
+                  f"({cpm['critical_count'] * 100 // max(_total, 1)}%).")
+
         validation = self._validate_final_schedule(merged)
 
         # FAIL-CLOSED staging (одит v11, P0): досега статусът гледаше само
@@ -1252,6 +1971,7 @@ class AIProcessor:
         uncovered: list = []
         over_covered: list = []
         ambiguous: list = []
+        uncited: list = []
         if boq_index:
             try:
                 citation_report = {
@@ -1263,9 +1983,11 @@ class AIProcessor:
                 uncovered = cov["uncovered"]
                 over_covered = sorted(cov["over_covered"])
                 ambiguous = cov.get("ambiguous", [])
+                uncited = cov.get("uncited_production", [])
                 citation_report["uncovered"] = uncovered
                 citation_report["over_covered"] = over_covered
                 citation_report["ambiguous"] = ambiguous
+                citation_report["uncited_production"] = uncited
             except Exception as exc:
                 logger.warning("verify_citations (staged) се провали: %s", exc)
                 citation_report = {"checked": False, "reason": "exception"}
@@ -1303,6 +2025,14 @@ class AIProcessor:
                 f"{len(ambiguous)} позиции с НЕОПРЕДЕЛИМ клас-покривач — "
                 f"недоказано покритие, нужен е човешки преглед "
                 f"(напр. {', '.join(ambiguous[:3])})")
+        if uncited:
+            # Съпоставка с еталон (2026-08-06): точно тук минаваше дублирането
+            # по фронтове — производствена задача с количество, но без цитат,
+            # не влизаше в никой сбор и оставаше невидима за покритието.
+            _names = ", ".join(str(u.get("id")) for u in uncited[:3])
+            staging_blockers.append(
+                f"{len(uncited)} производствени задачи носят количество БЕЗ "
+                f"доказуем цитат към КСС (напр. {_names}) — непроследима работа")
 
         # Статусът наследява НАЙ-ТЕЖКОТО (одит v12 #3): провалена част → invalid;
         # недоказано покритие ИЛИ част иска преглед → needs_human_review;
@@ -1317,8 +2047,8 @@ class AIProcessor:
         _provenance_unchecked = not citation_report.get("checked")
         if not validation.get("valid") or failed_parts:
             status = "invalid"
-        elif (uncovered or ambiguous or over_covered or parts_need_review
-              or _provenance_unchecked):
+        elif (uncovered or ambiguous or over_covered or uncited
+              or parts_need_review or _provenance_unchecked):
             status = "needs_human_review"
         else:
             status = "approved"
@@ -1352,6 +2082,7 @@ class AIProcessor:
                 "uncovered": uncovered,
                 "over_covered": over_covered,
                 "ambiguous": ambiguous,
+                "uncited_production": uncited,
             },
             "exportable": export["exportable"],
             "export_blockers": export["blockers"],
@@ -1430,6 +2161,40 @@ class AIProcessor:
         if isinstance(data, dict):
             data = data.get("tasks")
         return [t for t in data if isinstance(t, dict)] if isinstance(data, list) else []
+
+    @staticmethod
+    def _apply_critical_path(schedule: Any) -> Any:
+        """Смятай критичния път, запазвайки формата на графика.
+
+        По веригата графикът се среща като dict с `tasks`, като чист списък и
+        като JSON низ.  Dict остава dict, списък остава списък; JSON низът се
+        връща РАЗПАРСЕН (dict) — всички консуматори надолу приемат и трите
+        форми, а повторното сериализиране би било излишна загуба.
+
+        При кръгова зависимост или неподредима мрежа графикът се връща
+        НЕПРОМЕНЕН: по-добре без критичен път, отколкото с грешен.
+        """
+        from src.ai_router import AIRouter
+        from src.schedule_builder import ScheduleBuilder
+
+        data = schedule
+        if isinstance(data, str):
+            data = AIRouter.parse_json_response(data)
+
+        tasks = AIProcessor._tasks_from(data)
+        if not tasks:
+            return schedule
+
+        result = ScheduleBuilder().compute_critical_path(tasks)
+        if result["warnings"]:
+            logger.warning("CPM: %s", "; ".join(result["warnings"]))
+            return schedule
+
+        logger.info("Критичен път: %d задачи", result["critical_count"])
+
+        if isinstance(data, dict):
+            return {**data, "tasks": result["schedule"]}
+        return result["schedule"]
 
     def _restore_determinism_after_ai(
         self, cycle_result: dict, before_json: str, progress_callback: Any | None = None,
@@ -2514,6 +3279,191 @@ class AIProcessor:
     # Situation / site-plan location extraction
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _situation_pages(pdf_bytes: bytes, source_name: str):
+        """Рендирай страниците на ситуацията като JPEG за vision модела.
+
+        Общо за извличането на ИМЕНА и на УЧАСТЪЦИ — единствената разлика между
+        двете е промптът, не обработката на изображението.
+
+        Yields:
+            (индекс на страница, base64 JPEG).
+        """
+        import fitz  # PyMuPDF
+
+        max_bytes = 4 * 1024 * 1024      # 4 MB — Anthropic допуска до 5 MB
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                # 100 dpi; ако изображението пак е голямо — 72, после 50.
+                img_bytes = b""
+                for dpi in (100, 72, 50):
+                    pix = page.get_pixmap(dpi=dpi)
+                    # JPEG е много по-малък от PNG за едроформатни CAD чертежи.
+                    img_bytes = pix.tobytes("jpeg", jpg_quality=85)
+                    if len(img_bytes) <= max_bytes:
+                        break
+                    logger.debug("Стр. %d при %d dpi → %d байта, намалявам",
+                                 page_num + 1, dpi, len(img_bytes))
+                if len(img_bytes) > max_bytes:
+                    logger.warning(
+                        "Ситуация, стр. %d остава >4 MB и при най-ниско dpi — "
+                        "пропусната.", page_num + 1)
+                    continue
+                yield page_num, base64.b64encode(img_bytes).decode("ascii")
+        finally:
+            doc.close()
+
+    @staticmethod
+    def _situation_segments_are_schematic(segments: list[dict]) -> bool:
+        """Дали „отсечките" са схема, а не прочетен чертеж.
+
+        ЖИВ ПРОГОН 2026-08-07: OCR модел без реален vision достъп връщаше
+        валиден JSON с улици „Първа, Втора, Трета, Четвърта" — редицата от
+        образеца, не имена от чертеж.  Формата е правилна, съдържанието е
+        измислено, и нищо надолу по веригата не може да го различи: пакетите
+        получават имена на несъществуващи места, а количествата се разделят
+        между улици, които ги няма.
+
+        Признакът е числената редица в имената.  Реален квартал не се състои
+        от „Първа, Втора, Трета"; образец се състои точно от това.
+        """
+        streets = {str(s.get("street", "")).strip().lower()
+                   for s in segments if str(s.get("street", "")).strip()}
+        if not streets:
+            return False
+        ordinals = ("първа", "втора", "трета", "четвърта", "пета")
+        hits = sum(1 for street in streets
+                   if any(street.endswith(word) for word in ordinals))
+        return hits >= 2 and hits >= len(streets) / 2
+
+    def extract_situation_segments(self, filepath: str) -> list[dict]:
+        """Извлечи РЕАЛНИТЕ участъци от ситуационния чертеж.
+
+        СЪПОСТАВКА С ЕТАЛОН: човешкият график кръщава пакетите „кл. 48 от РШ 36
+        до Пр. Ш 1" — клон плюс двата възела.  Тези възли ги НЯМА в КСС; те са
+        начертани на ситуацията.  Затова досега моделът кръщаваше пакетите с
+        описанието на КСС реда („Изграждане на смесена канализационна мрежа") и
+        шест участъка излизаха с едно и също име.
+
+        Тук се вадят самите отсечки между възли — това, което прави участъка
+        участък.  Резултатът е СПИСЪК ЗА ИЗБОР, не задължение: ако чертежът е
+        нечетим, връща празен списък и генерацията продължава както досега.
+
+        Returns:
+            [{branch, start_node, end_node, street, network, dn}] — без дубликати.
+        """
+        try:
+            import fitz  # noqa: F401 — проверка за наличност
+        except ImportError:
+            logger.warning("PyMuPDF липсва — участъците от ситуацията се пропускат.")
+            return []
+        if not self.router:
+            return []
+
+        source_name = Path(filepath).name
+        try:
+            with open(filepath, "rb") as fh:
+                pdf_bytes = fh.read()
+        except OSError as exc:
+            logger.error("Ситуацията %s не може да се прочете: %s", source_name, exc)
+            return []
+
+        prompt = (
+            "Това е строителна ситуация (трасировъчен план) на ВиК проект в България.\n\n"
+            "ЗАДАЧА: Извлечи ОТСЕЧКИТЕ между съседни възли по трасетата.\n\n"
+            "КАК ИЗГЛЕЖДАТ ВЪЗЛИТЕ:\n"
+            "- Канализация: ревизионни шахти — 'РШ 12', 'СРШ 5', 'Пр.Ш 1'.\n"
+            "- Водопровод: осови точки и точки — 'ОТ 27', 'ОТ 27А', 'Т.15'.\n"
+            "- Клоновете са надписани по трасето: 'кл. 48', 'КЛ. 25 - И', 'ГЛ.КЛ.I'.\n\n"
+            "ЕДНА ОТСЕЧКА = участъкът между ДВА СЪСЕДНИ възела по един клон.\n"
+            "Ако по клон 48 има шахти РШ36, РШ37, РШ38 → това са ДВЕ отсечки:\n"
+            "РШ36→РШ37 и РШ37→РШ38.\n\n"
+            "За всяка отсечка дай: branch (клон), start_node, end_node, street\n"
+            "(улицата, по която минава, ако е надписана), network ('К' за\n"
+            "канализация, 'В' за водопровод), dn (диаметър, ако е надписан).\n\n"
+            "НЕ ИЗМИСЛЯЙ възли, които не виждаш на чертежа. По-добре по-малко\n"
+            "отсечки, отколкото измислени номера.\n"
+            "Ако чертежът е нечетим, върни празен списък.\n\n"
+            # Схемата е с ЪГЛОВИ СКОБИ, не с правдоподобни стойности.
+            # ЖИВ ПРОГОН 2026-08-07: с конкретен пример („кл. 48, РШ 36 → РШ 37,
+            # ул. Първа, DN315") слаб vision модел ПРЕПИСВАШЕ примера — връщаше
+            # 5-7 отсечки по улици „Първа, Втора, Трета", които ги няма никъде.
+            # Валиден JSON, правдоподобна форма, изцяло измислено съдържание —
+            # най-опасният възможен изход.  Схематичният образец няма какво да
+            # бъде преписано.
+            "Отговори САМО с валиден JSON по следната СХЕМА:\n"
+            '{"segments": [{"branch": "<клон от чертежа>", '
+            '"start_node": "<възел>", "end_node": "<следващ възел>", '
+            '"street": "<улица или празно>", "network": "К или В", '
+            '"dn": <число или null>}]}'
+        )
+
+        found: list[dict] = []
+        for page_num, b64_image in self._situation_pages(pdf_bytes, source_name):
+            try:
+                # Задачата отива и в ПОТРЕБИТЕЛСКОТО съобщение: само в системния
+                # промпт тя губеше от закованото „отговори само с текст" и
+                # чертежът даваше нула отсечки (виж `ocr_pdf_page`).
+                raw = self.router.ocr_pdf_page(
+                    b64_image, system_prompt=prompt, media_type="image/jpeg",
+                    user_prompt=prompt)
+                # Устойчивият парсер на проекта: изкопава обекта и когато
+                # моделът е сложил текст около него.  Голото `json.loads`
+                # се проваляше с „Expecting value: line 1 column 1".
+                parsed = parse_json_strict(raw or "")
+                if parsed.data is not None:
+                    segments = parsed.data.get("segments", [])
+                    if isinstance(segments, list):
+                        found.extend(s for s in segments if isinstance(s, dict))
+                    continue
+
+                # ОТРЯЗАН отговор (OCR таванът е 4096 токена, а голям чертеж
+                # има много отсечки): спасяваме целите обекти вместо да върнем
+                # нула.  Частичен списък отсечки е далеч по-полезен от липсващ —
+                # той е предложение за именуване, не доказателство.
+                salvaged = _salvage_json_objects(raw or "")
+                if salvaged:
+                    logger.warning(
+                        "Ситуация %s, стр. %d: отговорът е отрязан (%s) — "
+                        "спасени %d отсечки.",
+                        source_name, page_num + 1, parsed.error, len(salvaged))
+                    found.extend(salvaged)
+                else:
+                    logger.warning("Ситуация %s, стр. %d: %s",
+                                   source_name, page_num + 1, parsed.error)
+            except Exception as exc:      # noqa: BLE001 — една нечетима страница
+                logger.warning("Участъци от ситуация %s, стр. %d: %s",
+                               source_name, page_num + 1, exc)
+
+        # Без дубликати: отсечката се определя от клона и двата си края.
+        seen: set[tuple] = set()
+        unique: list[dict] = []
+        for seg in found:
+            key = (str(seg.get("branch", "")).strip().lower(),
+                   str(seg.get("start_node", "")).strip().lower(),
+                   str(seg.get("end_node", "")).strip().lower())
+            if not any(key) or key in seen:
+                continue
+            seen.add(key)
+            unique.append(seg)
+
+        # FAIL-CLOSED: измислени отсечки са по-лоши от липсващи.  Празният
+        # списък просто връща генерацията към именуване по КСС; схематичните
+        # имена кръщават участъци с несъществуващи улици и разделят количества
+        # между места, които ги няма.
+        if self._situation_segments_are_schematic(unique):
+            logger.warning(
+                "Ситуация '%s': %d отсечки изглеждат преписани от образеца "
+                "(улици от рода на „Първа/Втора/Трета“), а не прочетени "
+                "от чертежа — "
+                "отхвърлени.  Провери дали OCR_MODEL има реален vision достъп.",
+                source_name, len(unique))
+            return []
+        logger.info("Ситуация '%s': %d отсечки", source_name, len(unique))
+        return unique
+
     def extract_situation_locations(self, filepath: str) -> list[str]:
         """Extract street/quarter/locality names from a situation (site-plan) PDF.
 
@@ -2569,32 +3519,7 @@ class AIProcessor:
         )
 
         all_locations: list[str] = []
-        doc = fitz.open(stream=_pdf_bytes, filetype="pdf")
-        num_pages = len(doc)
-
-        _MAX_BYTES = 4 * 1024 * 1024  # 4 MB — Anthropic hard limit is 5 MB
-
-        for page_num in range(num_pages):
-            page = doc[page_num]
-            # Start at 100 dpi; if image is still too large drop to 72 then 50
-            img_bytes = b""
-            for dpi in (100, 72, 50):
-                pix = page.get_pixmap(dpi=dpi)
-                # JPEG is far smaller than PNG for large-format CAD drawings
-                img_bytes = pix.tobytes("jpeg", jpg_quality=85)
-                if len(img_bytes) <= _MAX_BYTES:
-                    break
-                logger.debug(
-                    "Page %d at %d dpi → %d bytes, retrying at lower dpi",
-                    page_num + 1, dpi, len(img_bytes),
-                )
-            if len(img_bytes) > _MAX_BYTES:
-                logger.warning(
-                    "Situation page %d still >4 MB after lowest dpi — skipping.", page_num + 1
-                )
-                continue
-            b64_image = base64.b64encode(img_bytes).decode("ascii")
-
+        for page_num, b64_image in self._situation_pages(_pdf_bytes, source_name):
             try:
                 raw = self.router.ocr_pdf_page(b64_image, system_prompt=situation_prompt, media_type="image/jpeg")
                 # Strip markdown fences if present
@@ -2612,8 +3537,6 @@ class AIProcessor:
                     "Situation location extraction failed on page %d of %s: %s",
                     page_num + 1, source_name, exc,
                 )
-
-        doc.close()
 
         # De-duplicate while preserving order
         seen: set[str] = set()

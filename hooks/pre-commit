@@ -84,7 +84,24 @@ fi
 # --- Run unit/integration tests ---
 echo ""
 echo "[2/2] Running all unit tests (excluding E2E)..."
-uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e -v --tb=short --no-header -q
+
+# `uvx` е предпочитаният начин (вдига точните версии от requirements.txt), но
+# НЕ е навсякъде.  Липсваше ли, hook-ът досега умираше с „uvx: command not
+# found" — тоест на такава машина тестовете не се пускаха ИЗОБЩО и всеки
+# комит минаваше само през скана.  По-добре тестовете да се пуснат с наличния
+# python, отколкото да не се пуснат.
+if command -v uvx >/dev/null 2>&1; then
+    uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e -v --tb=short --no-header -q
+elif command -v python >/dev/null 2>&1; then
+    echo "  (uvx липсва — минавам през наличния python)"
+    python -m pytest tests/ --ignore=tests/e2e -v --tb=short --no-header -q
+else
+    echo ""
+    echo "НЯМА С КАКВО ДА СЕ ПУСНАТ ТЕСТОВЕТЕ (нито uvx, нито python)."
+    echo "Инсталирай uv или python, или пусни с PRECOMMIT_SKIP_TESTS=1,"
+    echo "ако СИ ГИ ПУСНАЛ РЪЧНО."
+    exit 1
+fi
 if [ $? -ne 0 ]; then
     echo ""
     echo "UNIT TESTS FAILED. Commit aborted."

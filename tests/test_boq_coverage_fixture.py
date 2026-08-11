@@ -151,3 +151,68 @@ def test_synthetic_kss_coverage_is_reproducible():
     assert out["total"] == 16
     assert not out["mismatches"], out["mismatches"]
     assert out["codes"]["CALCULATED"] == 13
+
+
+# ---------------------------------------------------------------------------
+# Нецитираните количества — сляпото петно, през което минаваше дублирането
+# ---------------------------------------------------------------------------
+
+
+def test_cloned_front_without_citation_is_caught(tmp_path):
+    """КОРЕННИЯТ ДЕФЕКТ (съпоставка с еталон, 2026-08-06).
+
+    В реалния прогон „Фронт 1" и „Фронт 2" носеха ПЪЛНОТО количество бордюри
+    (3880,5 + 3880,5 при 7761 в КСС).  Проверката за дублиране не се задейства,
+    ако клонингът НЯМА `source_ref`: сборът се смята само по цитиращите задачи,
+    затова редът излизаше чисто покрит, а в графика стоеше двойна работа.
+
+    FAILURE означава: непроследима работа пак може да влезе в графика невидимо.
+    """
+    idx = _index(tmp_path)
+    kerbs = next(r for r in idx if "бордюри" in r.description)
+    tasks = [
+        {"id": "F1", "name": "Доставка и полагане на бордюри — Фронт 1",
+         "quantity": kerbs.quantity, "unit": "м", "source_ref": kerbs.ref},
+        # Клонингът: същото количество, БЕЗ цитат.
+        {"id": "F2", "name": "Доставка и полагане на бордюри — Фронт 2",
+         "quantity": kerbs.quantity, "unit": "м", "source_ref": ""},
+    ]
+
+    cov = analyze_boq_coverage(tasks, [kerbs])
+
+    assert cov["covered"] == [kerbs.ref]        # цитиращата задача покрива реда
+    flagged = {u["id"] for u in cov["uncited_production"]}
+    assert "F2" in flagged, "нецитираният клонинг трябва да е уловен"
+    assert cov["uncited_production"][0]["reason"] == "missing_ref"
+
+
+def test_uncited_task_without_quantity_is_not_flagged(tmp_path):
+    """Геодезия/ВОБД/изпитване нямат количество — те не могат да надуят сбора."""
+    idx = _index(tmp_path)
+    kerbs = next(r for r in idx if "бордюри" in r.description)
+    tasks = [
+        {"id": "S1", "name": "Въвеждане на ВОБД и трасиране", "source_ref": ""},
+        {"id": "F1", "name": "Доставка и полагане на бордюри",
+         "quantity": kerbs.quantity, "unit": "м", "source_ref": kerbs.ref},
+    ]
+
+    cov = analyze_boq_coverage(tasks, [kerbs])
+
+    assert cov["uncited_production"] == []
+
+
+def test_invented_ref_with_quantity_is_flagged(tmp_path):
+    """Цитат към несъществуващ ред е по-лош от липсващ — изглежда като доказателство."""
+    idx = _index(tmp_path)
+    kerbs = next(r for r in idx if "бордюри" in r.description)
+    tasks = [
+        {"id": "F1", "name": "Доставка и полагане на бордюри",
+         "quantity": kerbs.quantity, "unit": "м", "source_ref": kerbs.ref},
+        {"id": "X1", "name": "Доставка и полагане на бордюри — измислен ред",
+         "quantity": 500.0, "unit": "м", "source_ref": "КСС.xlsx!Няма!999"},
+    ]
+
+    cov = analyze_boq_coverage(tasks, [kerbs])
+
+    flagged = {u["id"]: u["reason"] for u in cov["uncited_production"]}
+    assert flagged.get("X1") == "invalid_ref"

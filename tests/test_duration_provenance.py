@@ -273,3 +273,109 @@ def test_every_task_declares_its_source():
     """Задача без произход е точно случаят, който одитът намери."""
     mixed = ScheduleBuilder().recompute_durations(_mixed_schedule())["schedule"]
     assert all("duration_source" in t for t in mixed)
+
+
+# ===================================================================
+# ПРОБА 10.08.2026 — какво всъщност оставаше недоказано и защо
+#
+# Прогоните съобщаваха 130–220 задачи „с НЕДОКАЗАНА продължителност
+# (стойност от AI)" на прогон.  Разбито, числото се оказа съставено от четири
+# различни неща, нито едно от които „стойност от AI":
+#
+#   1. полагането на ВОДОПРОВОД падаше, защото „PEHD" не се разпознаваше
+#      като полиетилен — гръбнакът на участъка без нито една норма;
+#   2. изкопи и изпитвания минаваха за тръбна работа заради думите
+#      „канализац"/„водопровод" в името и се отчитаха като „липсва дължина";
+#   3. стойностите от технологичната верига (еталонния ЧОВЕШКИ график) се
+#      преетикетираха на „от AI";
+#   4. обобщаващите редове, които нямат собствена продължителност, влизаха в
+#      същото число — по един на пакет.
+#
+# FAILURE означава: отчетът за продължителностите пак описва нещо, което не
+# се е случило, и числото в него не може да се изпрати на одитор.
+# ===================================================================
+
+@pytest.mark.parametrize("material", ["PEHD", "HDPE", "ПЕВП", "PE-HD", "PE100", "PE"])
+def test_high_density_polyethylene_names_resolve_to_pe(material):
+    """Стандартните имена на PE в българските КСС — всички са един материал."""
+    from src.duration_calculator import detect_material
+    task = {"name": f"Доставка и полагане на тръби {material} DN110",
+            "material": material}
+    assert detect_material(task) == "PE"
+
+
+def test_water_laying_row_is_computable_with_pehd():
+    """Гръбнакът на водопроводния участък не бива да пада на името."""
+    result = calculate_task_duration({
+        "id": "В10", "name": "Полагане — Доставка и полагане на тръби PEHD DN110",
+        "material": "PEHD", "dn": 110, "length_m": 210,
+        "activity_class_hint": "laying", "unit": "м", "duration": 5,
+    })
+    assert result.code == CODE_OK
+    assert result.days
+
+
+def test_row_class_beats_the_words_in_the_name():
+    """Изкоп с „канализац" в името не е полагане на тръба."""
+    result = calculate_task_duration({
+        "id": "И10", "name": "Изкоп — Изкоп с багер за канализационен изкоп",
+        "activity_class_hint": "excavation", "unit": "м3", "quantity": 430,
+        "duration": 3,
+    })
+    assert result.code == CODE_NOT_PARAMETRIC
+    assert result.code != CODE_MISSING_LENGTH
+
+
+def test_chain_step_without_a_row_is_not_pipe_work():
+    """Стъпка без количество няма ред, по който да се смята — липсва НОРМА,
+    не дължина."""
+    result = calculate_task_duration({
+        "id": "Т10", "chain_step": "leak_test", "duration": 1,
+        "name": "Изпитване за непропускливост на канализационния участък",
+    })
+    assert result.code == CODE_NOT_PARAMETRIC
+
+
+def test_a_name_without_a_class_still_falls_back_to_the_regex():
+    """Плоският път (без пакети) не носи клас — там името остава единственото,
+    с което разполагаме."""
+    result = calculate_task_duration({
+        "id": "В11", "name": "Полагане на тръбопровод DN300", "duration": 4,
+    })
+    assert result.code == CODE_MISSING_LENGTH
+
+
+def test_reference_schedule_value_is_not_reported_as_ai():
+    """`chain_template` идва от еталонния човешки график, не от модела."""
+    from_template = {
+        "id": "К10", "name": "Видеоинспекция със CCTV камера",
+        "duration": 1, "duration_source": "chain_template",
+        "start_day": 1, "end_day": 1, "dependencies": [],
+    }
+    out = ScheduleBuilder().recompute_durations([from_template])
+
+    task = out["schedule"][0]
+    assert task["duration_source"] == "chain_template"
+    assert out["skipped"][0]["duration_source"] == "chain_template"
+
+
+def test_a_model_value_is_still_marked_as_suggested():
+    """Разграничението работи и в другата посока."""
+    out = ScheduleBuilder().recompute_durations([
+        {"id": "И11", "name": "Изкоп", "duration": 9, "start_day": 1,
+         "end_day": 9, "dependencies": []}])
+    assert out["schedule"][0]["duration_source"] == "suggested"
+
+
+def test_summary_rows_are_not_counted_as_unproven():
+    """Обобщаващият ред няма СОБСТВЕНА продължителност — тя е сбор на децата."""
+    out = ScheduleBuilder().recompute_durations([
+        {"id": "WBS", "name": "СТРОИТЕЛСТВО", "type": "summary", "duration": 0,
+         "dependencies": []},
+        {"id": "П1", "name": "кл. 48 от РШ 36 до Пр. Ш 1", "type": "summary",
+         "duration": 0, "parent_id": "WBS", "dependencies": []},
+        _pipe(id="В20", parent_id="П1"),
+    ])
+
+    assert out["summary"]["unresolved"] == 0
+    assert not [s for s in out["skipped"] if s["id"] in {"WBS", "П1"}]

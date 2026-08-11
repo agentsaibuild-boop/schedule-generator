@@ -27,6 +27,7 @@ from src.export_xml import (
     FIELD_ID_TEXT2,
     FIELD_ID_TEXT3,
     FIELD_ID_TEXT4,
+    FIELD_ID_TEXT5,
     LINK_LAG_FACTOR,
     MINUTES_PER_DAY,
     NAMESPACE,
@@ -179,6 +180,8 @@ def parse_mspdi(xml_data: bytes | str) -> dict[str, Any]:
             task["unit"] = fields[FIELD_ID_TEXT2]
         if fields.get(FIELD_ID_TEXT3):
             task["team"] = fields[FIELD_ID_TEXT3]
+        if fields.get(FIELD_ID_TEXT5):
+            task["source_ref"] = fields[FIELD_ID_TEXT5]
 
         tasks.append(task)
 

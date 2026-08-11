@@ -26,8 +26,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.ai_processor import AIProcessor  # noqa: E402
-from src.ai_router import AIRouter  # noqa: E402
+from src.ai_processor import AIProcessor, gen_max_tokens  # noqa: E402
+from src.ai_router import AIRouter, worker_max_tokens  # noqa: E402
 
 
 # ===================================================================
@@ -212,3 +212,108 @@ def test_the_old_test_claim_is_no_longer_true():
     source = (Path(__file__).parent.parent / "src" / "ai_processor.py").read_text(
         encoding="utf-8")
     assert 'gen_result.get("truncated")' in source
+
+
+# ===================================================================
+# БЮДЖЕТЪТ ЗА ТОКЕНИ — настройката трябва да върши работа
+#
+# ПРОГОНИ 10.08.2026: 11 отговора излязоха отрязани „при таван 8192" и убиха
+# 14 от 40 прогона.  Предупреждението съветваше да се вдигне
+# `WORKER_MAX_TOKENS`, но тя се прилагаше САМО по Claude-клона — по
+# DeepSeek/OpenRouter минаваше `GEN_MAX_TOKENS` с твърд default 8192.
+# Тоест съветът в лога беше неизпълним: нямаше настройка, която да помогне.
+# ===================================================================
+
+def _recording_deepseek_router(fail_above: int | None = None):
+    """Router, който ЗАПИСВА всяка заявка; по избор отказва висок таван.
+
+    `fail_above` играе работник с ТВЪРД таван на изхода (DeepSeek V3 директно):
+    заявка над него не се отрязва, а се отхвърля.
+    """
+    seen: list[dict] = []
+
+    def create(**kwargs):
+        seen.append(kwargs)
+        if fail_above is not None and kwargs["max_tokens"] > fail_above:
+            raise ValueError(
+                f"max_tokens {kwargs['max_tokens']} над тавана на модела")
+        if kwargs.get("stream"):
+            return iter([MagicMock(
+                choices=[MagicMock(delta=MagicMock(content="{}"),
+                                   finish_reason="stop")],
+                usage=MagicMock(prompt_tokens=10, completion_tokens=5))])
+        return MagicMock(
+            choices=[MagicMock(message=MagicMock(content="{}"),
+                               finish_reason="stop")],
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5))
+
+    router = AIRouter()
+    client = MagicMock()
+    client.chat.completions.create.side_effect = create
+    router._deepseek_client = client
+    router.deepseek_available = True
+    router.anthropic_available = False
+    return router, seen
+
+
+def test_generation_asks_for_the_full_worker_ceiling(monkeypatch):
+    """Без изрична настройка генерирането иска тавана на РАБОТНИКА, не 8192."""
+    monkeypatch.delenv("GEN_MAX_TOKENS", raising=False)
+    monkeypatch.setenv("WORKER_MAX_TOKENS", "16000")
+    assert gen_max_tokens() == worker_max_tokens() == 16000
+
+
+def test_raising_the_worker_ceiling_raises_the_generation_ceiling(monkeypatch):
+    """Едно копче, не две, които тихо си противоречат."""
+    monkeypatch.delenv("GEN_MAX_TOKENS", raising=False)
+    monkeypatch.setenv("WORKER_MAX_TOKENS", "32000")
+    assert gen_max_tokens() == 32000
+
+
+def test_explicit_generation_ceiling_still_wins(monkeypatch):
+    monkeypatch.setenv("WORKER_MAX_TOKENS", "16000")
+    monkeypatch.setenv("GEN_MAX_TOKENS", "12000")
+    assert gen_max_tokens() == 12000
+
+
+def test_the_raised_ceiling_reaches_the_deepseek_request(monkeypatch):
+    """Същината на дефекта: настройката трябва да стигне ДО заявката."""
+    monkeypatch.delenv("GEN_MAX_TOKENS", raising=False)
+    monkeypatch.setenv("WORKER_MAX_TOKENS", "16000")
+    monkeypatch.setattr("src.ai_router.WORKER_MODEL_OVERRIDE", "")
+    router, seen = _recording_deepseek_router()
+
+    router.chat([{"role": "user", "content": "x"}], "s" * 200,
+                max_tokens=gen_max_tokens())
+
+    assert seen[0]["max_tokens"] == 16000
+
+
+def test_provider_refusing_the_high_ceiling_falls_a_rung_down():
+    """Работник с твърд таван не бива да превръща настройката в отказ."""
+    router, seen = _recording_deepseek_router(fail_above=8192)
+
+    result = router._chat_deepseek(
+        [{"role": "user", "content": "x"}], "s" * 200, max_tokens=16000)
+
+    assert [kw["max_tokens"] for kw in seen] == [16000, 8192]
+    assert result["truncated"] is False
+
+
+def test_no_downgrade_when_the_full_ceiling_is_accepted():
+    """Стъпалото надолу е за отказ, не разход по подразбиране."""
+    router, seen = _recording_deepseek_router()
+
+    router._chat_deepseek(
+        [{"role": "user", "content": "x"}], "s" * 200, max_tokens=16000)
+
+    assert len(seen) == 1
+
+
+def test_a_failure_on_every_rung_still_raises():
+    """Слизането надолу не бива да ЗАМАЗВА истински провал на доставчика."""
+    router, _ = _recording_deepseek_router(fail_above=0)
+
+    with pytest.raises(ValueError):
+        router._chat_deepseek(
+            [{"role": "user", "content": "x"}], "s" * 200, max_tokens=16000)

@@ -18,11 +18,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -87,6 +89,35 @@ class QuantityRow(NamedTuple):
         """
         return f"{self.source.document}!{self.source.sheet}!{self.source.row}"
 
+    @property
+    def record_id(self) -> str:
+        """Неизменен ключ на СЪДЪРЖАНИЕТО, независим от номера на реда.
+
+        ОДИТ 10.08.2026, P0.1: цитатът беше само `документ!лист!ред`, а редът е
+        най-крехкото нещо в един Excel файл — вмъкнат ред отгоре мести всичко
+        отдолу.  По-лошото се случи наистина: изнесохме график, генериран върху
+        конвертирани данни от СТАРА версия на конвертора, чиито номера бяха с
+        4 реда назад спрямо файла.  Цитатите сочеха несъществуващи места, а
+        нищо не изгърмя, защото цитатът се проверява само срещу същия индекс.
+
+        Затова цитирането има две части с различна роля:
+
+            `ref`        КЪДЕ е записано — за човек, който ще отвори файла
+            `record_id`  КОЕ е записано — за машина, която сверява
+
+        Хешът е върху документа, листа, описанието, количеството и мярката.
+        Разместване на редове не го мени; смяна на количеството — да, и точно
+        това трябва да се забележи.
+        """
+        payload = " | ".join((
+            self.source.document,
+            self.source.sheet,
+            " ".join(str(self.description or "").split()).lower(),
+            "" if self.quantity is None else format(float(self.quantity), ".6g"),
+            str(self.unit or "").strip().lower(),
+        ))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
 
 def _tokens(text: str) -> set[str]:
     return {
@@ -148,7 +179,44 @@ def _looks_like_description(text: str) -> bool:
     return bool(re.search(r"[^\W\d_].*[^\W\d_]", str(text or ""), re.UNICODE))
 
 
-def _pick(row: dict, keys: tuple[str, ...], prefer_numeric: bool = False) -> tuple[str, Any]:
+def _is_unit_like(value: Any) -> bool:
+    """Дали клетката изобщо може да БЪДЕ мярка.
+
+    Одит 07.08.2026: в експортирания XML стояха „Мярка = 100" (УО единичен),
+    „Мярка = 1" (Преливна шахта) и цялото описание на дейността при пътните
+    редове.  И трите идват от едно място — колоната се избираше по заглавие, а
+    в реалния КСС под заглавие „Ед. мярка" стои ту броят, ту описанието
+    (разместен хедър, лист „4. Пътна").
+
+    Мярка не е голо число и не е изречение.
+    """
+    text = str(value or "").strip()
+    if not text or not _looks_like_unit(text):
+        return False
+    # Само ГОЛО число дисквалифицира клетката.  `_number` вади число от текст
+    # (за количествата това е нарочно), но тук би отхвърлило „m3/m'" заради
+    # тройката — а точно съставната мярка на бетоновия кожух не бива да се губи.
+    try:
+        float(text.replace(",", "."))
+    except ValueError:
+        return True
+    return False
+
+
+def _pick_unit(row: dict) -> Any:
+    """Мярката от реда, или „" ако нито една колона не носи мярка.
+
+    Празно е честният отговор, когато КСС не казва мярката: `_norm_unit("")`
+    не е реална единица, значи не поражда фалшиво разминаване надолу.  Число
+    или описание на нейно място обвинява задачата за нещо, което документът
+    никога не е твърдял.
+    """
+    _, value = _pick(row, _UNIT_KEYS, predicate=_is_unit_like)
+    return value if _is_unit_like(value) else ""
+
+
+def _pick(row: dict, keys: tuple[str, ...], prefer_numeric: bool = False,
+          predicate: Callable[[Any], bool] | None = None) -> tuple[str, Any]:
     """Върни (име на колона, стойност) за колона, чието заглавие пасва.
 
     Одит v12 #5: предпочита се първата НЕПРАЗНА стойност (празна „Количество"
@@ -163,10 +231,54 @@ def _pick(row: dict, keys: tuple[str, ...], prefer_numeric: bool = False) -> tup
         for col, val in matches:
             if _number(val) is not None:
                 return col, val
+    if predicate is not None:
+        for col, val in matches:
+            if predicate(val):
+                return col, val
     for col, val in matches:
         if val is not None and str(val).strip():
             return col, val
     return matches[0] if matches else ("", None)
+
+
+def stale_conversions(base_path: str | Path) -> list[str]:
+    """Кои конвертирани файлове са по-стари от оригинала си.
+
+    ОДИТ 10.08.2026, P0.1: изнесохме на одитора график, чиито цитати сочеха
+    редове с четири назад.  Кодът беше верен — конверторът записва истинския
+    Excel ред от одит v11.  Сгрешена беше ПАПКАТА: `converted/` беше останала
+    от по-стара версия на конвертора и никой не я преобразува наново.
+
+    Мълчаливо остарял индекс е най-лошият вид дефект тук, защото всичко
+    надолу се сверява срещу самия него и излиза съгласувано.
+    """
+    base = Path(base_path)
+    converted = base / "converted"
+    if not converted.exists():
+        return []
+
+    stale: list[str] = []
+    for json_file in converted.glob("*.json"):
+        if json_file.name == "_manifest.json":
+            continue
+        originals = [p for p in base.glob(f"{json_file.stem}.*")
+                     if p.suffix.lower() != ".json"]
+        for original in originals:
+            try:
+                if original.stat().st_mtime > json_file.stat().st_mtime:
+                    stale.append(original.name)
+            except OSError:
+                continue
+    return sorted(set(stale))
+
+
+def _warn_if_conversions_are_stale(base: Path, converted: Path) -> None:
+    stale = stale_conversions(base)
+    if stale:
+        logger.warning(
+            "Конвертираните данни са по-стари от оригиналите (%s) — цитатите "
+            "може да сочат разместени редове.  Преобразувай наново.",
+            ", ".join(stale))
 
 
 def build_quantity_index(base_path: str | Path) -> list[QuantityRow]:
@@ -187,6 +299,8 @@ def build_quantity_index(base_path: str | Path) -> list[QuantityRow]:
     if not converted.exists():
         return []
 
+    _warn_if_conversions_are_stale(Path(base_path), converted)
+
     index: list[QuantityRow] = []
 
     for jf in sorted(converted.glob("*.json")):
@@ -205,7 +319,7 @@ def build_quantity_index(base_path: str | Path) -> list[QuantityRow]:
                     continue
                 desc_col, description = _pick(row, _DESC_KEYS)
                 qty_col, quantity = _pick(row, _QTY_KEYS, prefer_numeric=True)
-                _, unit = _pick(row, _UNIT_KEYS)
+                unit = _pick_unit(row)
 
                 # Fallback за описанието: ако избраната колона е празна ИЛИ държи
                 # само число/код (напр. пореден номер „1" под разместен хедър —
@@ -684,9 +798,13 @@ def _coverer_class(row: QuantityRow) -> str | None:
     if ("настилк" in desc or "асфалт" in desc or "паваж" in desc
             or "тротоар" in desc or "бордюр" in desc):
         return "pavement"
+    # ЖИВ ПРОГОН 2026-08-07 (реален търг): „УО единичен" / „УО двоен" —
+    # уличните оттоци — нямаха клас, тоест не можеха да бъдат покрити от нищо
+    # и блокираха експорта.  Те са точкови съоръжения като шахтите.
     if ("шахт" in desc or "ревизион" in desc or "арматур" in desc
             or "хидрант" in desc or "спирател" in desc
-            or re.search(r"\b(срс|сво|ско|рш)\b", desc)):   # кодове = цяла дума
+            or "отток" in desc or "дъждоприемн" in desc
+            or re.search(r"\b(срс|сво|ско|рш|уо)\b", desc)):   # кодове = цяла дума
         return "manhole"
     # Кабели (ЕЛ/ТТ) — ЖИВ ПРОГОН 2026-08-06: редовете „Подземни ТТ кабели" и
     # „Подземни ЕЛ кабели" нямаха клас-покривач, тоест не можеха да бъдат
@@ -717,7 +835,10 @@ def analyze_boq_coverage(schedule: list[dict], index: list[QuantityRow]) -> dict
     Дейност от друг клас, цитираща реда, е ПРОИЗВОДНА (не покрива, не е нарушение).
 
     Returns:
-        {covered, uncovered, over_covered, derived, required} — множества refs.
+        {covered, uncovered, over_covered, derived, required, uncited_production}
+        — множества refs; `uncited_production` е списък ЗАДАЧИ с количество, но
+        без доказуем цитат (те не влизат в никой сбор и затова са невидими за
+        проверката за дублиране — вж. коментара в цикъла).
     """
     by_ref = {row.ref: row for row in index}
     required = {r.ref for r in index if r.quantity is not None}
@@ -726,12 +847,31 @@ def analyze_boq_coverage(schedule: list[dict], index: list[QuantityRow]) -> dict
     ambiguous: set = set()          # ред с неопределим клас, но има производна задача
     derived: list[dict] = []
 
+    uncited: list[dict] = []
+
     for task in schedule:
         if not isinstance(task, dict) or not _is_production_task(task):
             continue
         ref = str(task.get("source_ref") or "").strip()
         row = by_ref.get(ref)
         if row is None or row.quantity is None:
+            # СЛЯПОТО ПЕТНО (съпоставка с еталон, 2026-08-06): дотук задача без
+            # валиден цитат просто се прескачаше.  Затова дублирането по
+            # фронтове минаваше НЕВИДИМО: „Фронт 2" носеше пълното количество,
+            # но без `source_ref`, тоест не влизаше в сбора — редът излизаше
+            # чисто покрит, а в графика стоеше двойна работа.
+            #
+            # Задача БЕЗ количество не може да надуе сбора и не е нарушение
+            # (геодезия, ВОБД, изпитване).  Задача С количество и БЕЗ доказуем
+            # цитат е точно обратното — непроследима работа.
+            stray = _number(task.get("length_m") or task.get("quantity"))
+            if stray is not None and stray > 0 and activity_class(task) in _PRODUCTION_CLASSES:
+                uncited.append({
+                    "id": str(task.get("id")), "name": task.get("name"),
+                    "quantity": stray, "unit": task.get("unit"),
+                    "source_ref": ref,
+                    "reason": "invalid_ref" if ref else "missing_ref",
+                })
             continue
         qty = _number(task.get("length_m") or task.get("quantity"))
         if qty is None:
@@ -774,6 +914,7 @@ def analyze_boq_coverage(schedule: list[dict], index: list[QuantityRow]) -> dict
         "uncovered": uncovered,
         "ambiguous": sorted(ambiguous),
         "over_covered": over_covered,
+        "uncited_production": uncited,
         "derived": derived,
         "quantities": {ref: {"required": by_ref[ref].quantity, "planned": totals[ref],
                              "tasks": ids}

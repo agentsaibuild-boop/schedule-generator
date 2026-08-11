@@ -59,7 +59,26 @@ MODEL_CONTROLLER = "claude-opus-4-8"
 # насочва работника към този модел (висок max_tokens, без отрязване).  Празно =
 # досегашният DeepSeek работник.
 WORKER_MODEL_OVERRIDE = os.getenv("WORKER_MODEL", "").strip()
-_WORKER_MAX_TOKENS = int(os.getenv("WORKER_MAX_TOKENS", "16000"))
+
+# Таван на изхода, който МОЖЕ да поеме безусловно всеки работник — под него
+# заявката не се отхвърля от нито един доставчик.  Ползва се само като
+# СТЪПАЛО НАДОЛУ, когато доставчикът откаже по-високия таван.
+_SAFE_OUTPUT_TOKENS = 8192
+
+
+def worker_max_tokens() -> int:
+    """Таванът на изхода на РАБОТНИКА — един източник за ДВАТА клона.
+
+    ПРОГОНИ 10.08.2026: 11 отговора излязоха отрязани „при таван 8192", а
+    предупреждението съветваше да се вдигне `WORKER_MAX_TOKENS`.  Съветът беше
+    празен: променливата се прилагаше САМО по Claude-клона (`chat()` →
+    `_chat_worker_claude`), а по DeepSeek/OpenRouter минаваше подаденият от
+    извикващия `GEN_MAX_TOKENS` (8192) и вдигането ѝ не променяше нищо.
+
+    Чете се при всяко повикване, а не веднъж при import, за да важи и когато
+    `.env` се зарежда след модула.
+    """
+    return int(os.getenv("WORKER_MAX_TOKENS", "16000"))
 
 # Над този таван на изхода Anthropic SDK иска STREAMING, иначе дълъг генериращ
 # отговор рискува HTTP timeout (препоръка от проучването за модели, 2026-08).
@@ -89,7 +108,23 @@ if MODEL_OCR != MODEL_WORKER:
 # ---------------------------------------------------------------------------
 # Token limits per call type
 # ---------------------------------------------------------------------------
-_MAX_TOKENS_CHAT = 4096        # regular chat, analysis, OCR, verification
+_MAX_TOKENS_CHAT = 4096        # regular chat, analysis, verification
+
+# OCR има СВОЙ таван, по-висок от чата.
+#
+# ОДИТ 07.08.2026, точка 3: „спрямо човешкия еталон с около 46 канализационни и
+# 23 водопроводни физически участъка това още е сериозно under-segmentation."
+#
+# Причината се оказа тук, а не в четенето.  Списъкът с отсечки от ситуационния
+# чертеж се РЕЖЕШЕ на 4096 токена — при ~45 токена на отсечка това е таван от
+# около 80 отсечки за целия отговор, а с полетата и форматирането реално към
+# 15-20.  Оттам „извличаме 6-16 отсечки от файл, което е далеч от пълнотата" и
+# „четенето е нестабилно между опити": спасителният парсер вадеше толкова цели
+# обекта, колкото са се побрали, и броят им зависеше от дължината на имената.
+#
+# Чертежът се чете веднъж на проект, тоест по-високият таван не се плаща на
+# всяка генерация.
+_OCR_MAX_TOKENS = int(os.getenv("OCR_MAX_TOKENS", "16000"))
 _MAX_TOKENS_CORRECTION = 8192  # schedule correction (larger output needed)
 _MAX_TOKENS_LESSON = 1024      # lesson verification (short JSON response)
 _MIN_SYSTEM_PROMPT_LEN = 100   # minimum viable knowledge-aware system prompt
@@ -367,7 +402,7 @@ class AIRouter:
             try:
                 return self._chat_worker_claude(
                     messages, system_prompt, model=WORKER_MODEL_OVERRIDE,
-                    max_tokens=max(max_tokens, _WORKER_MAX_TOKENS),
+                    max_tokens=max(max_tokens, worker_max_tokens()),
                     response_schema=response_schema)
             except Exception as exc:
                 logger.warning("Claude работник (%s) се провали, fallback: %s",
@@ -450,29 +485,47 @@ class AIRouter:
         client = self._get_deepseek()
         full_messages = [{"role": "system", "content": system_prompt}] + messages
         base_kwargs = dict(
-            model=MODEL_WORKER, messages=full_messages,
-            max_tokens=max_tokens, temperature=0.3,
-        )
-        # JSON MODE вместо строга json_schema (жив тест Sonnet/OpenRouter,
-        # 2026-08): строгата schema или ИЗТРИВАШЕ недекларирани полета, или се
-        # отхвърляше (union-type лимит на Anthropic).  `{"type":"json_object"}`
-        # гарантира ВАЛИДЕН JSON без да ограничава полетата и работи при всички
-        # provider-и.  Материалният enum се налага през промпта.
-        attempts: list[dict] = []
-        if response_schema is not None:
-            attempts.append({**base_kwargs,
-                             "response_format": {"type": "json_object"}})
-        attempts.append(base_kwargs)
+            model=MODEL_WORKER, messages=full_messages, temperature=0.3)
 
-        result = None
+        # СТЪПАЛА НАДОЛУ, в реда на пробване.  Две измерения:
+        #
+        # 1. ТАВАН.  Част от работниците (DeepSeek V3 директно) имат ТВЪРД таван
+        #    на изхода и ОТХВЪРЛЯТ заявка над него.  След като генерирането вече
+        #    иска пълния таван на работника, липсата на стъпало надолу би
+        #    превърнала една настройка в отказ на всеки прогон.  По-нисък таван
+        #    е по-добре от загубен прогон — отрязването после си личи в
+        #    `truncated`.
+        # 2. JSON MODE вместо строга json_schema (жив тест Sonnet/OpenRouter,
+        #    2026-08): строгата schema или ИЗТРИВАШЕ недекларирани полета, или
+        #    се отхвърляше (union-type лимит на Anthropic).
+        #    `{"type":"json_object"}` гарантира ВАЛИДЕН JSON без да ограничава
+        #    полетата и работи при всички provider-и.  Материалният enum се
+        #    налага през промпта.
+        caps = [max_tokens]
+        if max_tokens > _SAFE_OUTPUT_TOKENS:
+            caps.append(_SAFE_OUTPUT_TOKENS)
+
+        attempts: list[dict] = []
+        for cap in caps:
+            kw = {**base_kwargs, "max_tokens": cap}
+            if response_schema is not None:
+                attempts.append({**kw, "response_format": {"type": "json_object"}})
+            attempts.append(kw)
+
+        result, used_cap = None, max_tokens
         for i, kw in enumerate(attempts):
             try:
-                result = self._openai_request(client, kw, max_tokens)
+                result = self._openai_request(client, kw, kw["max_tokens"])
+                used_cap = kw["max_tokens"]
                 break
             except Exception as exc:
                 if i < len(attempts) - 1:
+                    nxt = attempts[i + 1]
                     logger.warning(
-                        "DeepSeek structured output отказан (%s) → без schema.", exc)
+                        "Заявката към %s се провали (%s) → следващо стъпало: "
+                        "таван %d, %s json mode.", MODEL_WORKER, exc,
+                        nxt["max_tokens"],
+                        "със" if "response_format" in nxt else "без")
                 else:
                     raise
         content, tokens_in, tokens_out, finish_reason = result
@@ -483,10 +536,18 @@ class AIRouter:
         # проблемът се появяваше чак при парсването, като „моделът се обърка".
         truncated = finish_reason == "length"
         if truncated:
+            # Съветът сочи РАБОТЕЩАТА променлива: `used_cap` е таванът, който
+            # доставчикът наистина прие, а той може да е стъпало НАДОЛУ от
+            # поискания — тогава вдигането на настройката няма да помогне и
+            # проектът трябва да се раздели на етапи.
+            hit_ceiling = used_cap < max_tokens
             logger.warning(
                 "Отговорът на %s е ОТРЯЗАН (finish_reason=length, %d изходни "
-                "токена при таван %d). Вдигни WORKER_MAX_TOKENS/GEN_MAX_TOKENS.",
-                MODEL_WORKER, tokens_out, max_tokens,
+                "токена при таван %d). %s",
+                MODEL_WORKER, tokens_out, used_cap,
+                "Работникът отказа по-висок таван — раздели проекта на етапи "
+                "или смени модела." if hit_ceiling
+                else "Вдигни WORKER_MAX_TOKENS (или GEN_MAX_TOKENS).",
             )
 
         return {
@@ -1054,7 +1115,8 @@ class AIRouter:
     # ------------------------------------------------------------------
 
     def ocr_pdf_page(
-        self, image_base64: str, system_prompt: str = "", media_type: str = "image/png"
+        self, image_base64: str, system_prompt: str = "", media_type: str = "image/png",
+        user_prompt: str = "",
     ) -> str:
         """OCR a single page image via DeepSeek vision. Falls back to Anthropic.
 
@@ -1062,6 +1124,7 @@ class AIRouter:
             image_base64: Base64-encoded image.
             system_prompt: Optional knowledge context for OCR guidance.
             media_type: MIME type of the image ("image/png" or "image/jpeg").
+            user_prompt: Заменя стандартната заявка „извлечи целия текст".
 
         Returns:
             Extracted text string.
@@ -1070,7 +1133,20 @@ class AIRouter:
         additional = system_prompt if system_prompt else ""
         full_ocr_system = OCR_SYSTEM_PROMPT.format(additional_context=additional)
 
-        ocr_user_prompt = (
+        # ДВЕ ПРОТИВОРЕЧАЩИ СИ ИНСТРУКЦИИ (жив прогон 2026-08-07).
+        #
+        # Заявката тук беше закована на „Отговори САМО с извлечения текст, без
+        # коментари", а извикващият слагаше своята задача в СИСТЕМНИЯ промпт.
+        # Когато `extract_situation_segments` поиска JSON с отсечките, моделът
+        # виждаше едновременно „върни JSON" (система) и „върни само текст"
+        # (потребител) — и се подчиняваше на второто, защото е по-конкретно и
+        # по-близо до изображението.
+        #
+        # Следствието: отговорът е свободен текст, `parse_json_strict` пада с
+        # „Expecting value: line 1 column 1", и от чертежа излизат НУЛА
+        # отсечки.  Оттам идва и „четенето е нестабилно между опити" — понякога
+        # моделът все пак връщаше JSON, понякога не.
+        ocr_user_prompt = user_prompt.strip() or (
             "Извлечи ЦЕЛИЯ текст от това изображение. "
             "Текстът е на български. Запази структурата — заглавия, параграфи, таблици. "
             "Отговори САМО с извлечения текст, без коментари."
@@ -1122,7 +1198,7 @@ class AIRouter:
         response = client.chat.completions.create(
             model=MODEL_OCR,
             messages=messages,
-            max_tokens=_MAX_TOKENS_CHAT,
+            max_tokens=_OCR_MAX_TOKENS,
             timeout=_API_TIMEOUT_SECONDS,
         )
         text = response.choices[0].message.content or ""
@@ -1139,7 +1215,7 @@ class AIRouter:
         client = self._get_anthropic()
         response = client.messages.create(
             model=MODEL_CONTROLLER,
-            max_tokens=_MAX_TOKENS_CHAT,
+            max_tokens=_OCR_MAX_TOKENS,
             system=system_prompt if system_prompt else "",
             messages=[{
                 "role": "user",

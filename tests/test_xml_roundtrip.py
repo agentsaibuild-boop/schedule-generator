@@ -229,3 +229,87 @@ def test_comparison_detects_a_changed_dependency_type():
 
 def test_comparison_of_identical_schedules_is_clean():
     assert compare_schedules(REALISTIC, REALISTIC)["identical"] is True
+
+
+# ===================================================================
+# Цитатът към КСС оцелява до MS Project и обратно
+# ===================================================================
+#
+# Одит 07.08.2026: „конкретна MS Project задача още не може надеждно да се
+# проследи обратно до точния ред в анонимизирания КСС."  Цитатът съществуваше
+# в задачата (`source_ref`) и гейтът го проверяваше, но не влизаше в експорта.
+
+def test_source_ref_reaches_the_exported_file():
+    """Одиторът трябва да види листа и реда в самата задача."""
+    xml = export_to_mspdi_xml(
+        [_task("A", 1, 5, source_ref="КСС.xlsx!3. Канализация!18")],
+        "Тест", "2026-08-03",
+    )
+
+    assert "КСС.xlsx!3. Канализация!18" in xml.decode("utf-8")
+
+
+def test_source_ref_survives_the_roundtrip():
+    tasks, _ = _roundtrip([_task("A", 1, 5, source_ref="КСС.xlsx!4. Пътна!8")])
+
+    assert tasks[0]["source_ref"] == "КСС.xlsx!4. Пътна!8"
+
+
+def test_tasks_without_a_citation_carry_no_source_field():
+    """Обобщаващите и milestone-ите нямат ред, който да сочат — и не измислят."""
+    tasks, _ = _roundtrip([_task("M", 1, 0, milestone=True)])
+
+    assert "source_ref" not in tasks[0]
+
+
+# ===================================================================
+# Пространствената идентичност стига до готовия файл
+# ===================================================================
+#
+# Одит 07.08.2026: „Липсват street, from_node, to_node, chainage_from,
+# chainage_to, spatial_segment_id."  Пакетът ги носеше — те спираха преди
+# експорта, тоест участъкът беше моделиран, но невидим в MS Project.
+
+_SPATIAL = {
+    "spatial_segment_id": "K7",
+    "street": "ул. Петуния",
+    "from_node": "РШ 36",
+    "to_node": "Пр. Ш 1",
+    "start_chainage": 0.0,
+    "end_chainage": 260.0,
+}
+
+
+@pytest.mark.parametrize("key", sorted(_SPATIAL))
+def test_spatial_identity_reaches_the_exported_file(key):
+    xml = export_to_mspdi_xml(
+        [_task("A", 1, 5, **_SPATIAL)], "Тест", "2026-08-03",
+    ).decode("utf-8")
+
+    assert str(_SPATIAL[key]) in xml
+
+
+def test_the_exported_file_names_the_spatial_fields():
+    """Без Alias одиторът вижда „Text7", а не „Улица"."""
+    xml = export_to_mspdi_xml(
+        [_task("A", 1, 5, **_SPATIAL)], "Тест", "2026-08-03",
+    ).decode("utf-8")
+
+    for alias in ("Участък (ID)", "Улица", "От възел", "До възел",
+                  "Пикетаж от", "Пикетаж до"):
+        assert alias in xml
+
+
+def test_a_task_without_a_location_claims_none():
+    """Празно поле не се пише: „улица: —" изглежда като отговор, а е липса.
+
+    ID-то на полето стои веднъж в дефинициите.  Втора поява би значела, че
+    задачата носи стойност.
+    """
+    from src.export_xml import FIELD_ID_TEXT7  # Улица
+
+    xml = export_to_mspdi_xml(
+        [_task("A", 1, 5, street="", from_node="")], "Тест", "2026-08-03",
+    ).decode("utf-8")
+
+    assert xml.count(FIELD_ID_TEXT7) == 1

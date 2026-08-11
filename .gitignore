@@ -61,3 +61,6 @@ API's.env.txt
 # история — извади ги с `git rm --cached <файл>` (иска изрично разрешение).
 config/projects_history.json
 config/project_summary.json
+
+# Имена на клиентски обекти за анонимизиране — НЕ в git
+config/client_names.local.json
