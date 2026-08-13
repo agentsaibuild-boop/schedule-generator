@@ -85,4 +85,17 @@ class TestDuplicateDetector:
         (запис,) = execution_scope_duplicates(
             [_пакет("P1", "СВО — ул. Хортензия", "water_section")], chains)
 
-        assert запис["steps_in_chain"] > запис["steps_that_are_its_own"] > 0
+        assert запис["emitted_tasks"] > запис["steps_that_are_its_own"] > 0
+
+    def test_after_the_fix_the_emitted_schedule_is_clean(self):
+        """Детекторът мери породеното, не конфигурацията.
+
+        Иначе би светил червено и след като дублирането е премахнато — тоест
+        не би мерил нищо.
+        """
+        chains = load_chains()
+        пакети = [_пакет("P1", "СВО — ул. Хортензия", "water_section"),
+                  _пакет("P2", "Кл. В4-1: бул. Рожен", "water_section")]
+        задачи = expand_packages(пакети, chains).tasks
+
+        assert execution_scope_duplicates(пакети, chains, задачи) == []

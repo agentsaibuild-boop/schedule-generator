@@ -746,15 +746,29 @@ def _attachment_keywords(pkg: Any) -> tuple[str, ...]:
     return ()
 
 
-def execution_scope_duplicates(packages: Iterable[Any], chains: dict) -> list[dict]:
-    """Пакети, които повтарят изпълнение, вече съдържащо се в родителска верига.
+def execution_scope_duplicates(packages: Iterable[Any], chains: dict,
+                               tasks: Iterable[dict] | None = None) -> list[dict]:
+    """Пакети, които ИЗПЪЛНЯВАТ работа, вече съдържаща се в родителска верига.
 
     Гейтът за количествата пази СБОРА; този — ОБХВАТА.  Двете се провалят
     поотделно: седем СВО пакета с коректно разпределени 174 бр. пак изпълняват
     изкопа и изпитването втори път.
+
+    Мери се ПОРОДЕНОТО, не конфигурацията.  Първата версия сравняваше стъпките
+    на веригата със стъпките на прикачената работа — тоест щеше да сочи всеки
+    прикачен пакет и след като дублирането е премахнато.  Детектор, който
+    свети червено винаги, не мери нищо.
     """
-    дубликати = []
     defs = (chains or {}).get("chains", chains or {})
+    породени: dict[str, int] = {}
+    for task in tasks or []:
+        if task.get("is_summary"):
+            continue
+        родител = str(task.get("parent_id") or "")
+        if родител:
+            породени[родител] = породени.get(родител, 0) + 1
+
+    дубликати = []
     for pkg in packages or []:
         ключови = _attachment_keywords(pkg)
         if not ключови:
@@ -763,11 +777,17 @@ def execution_scope_duplicates(packages: Iterable[Any], chains: dict) -> list[di
         всички = chain.get("steps") or []
         свои = [s for s in всички
                 if any(д in str(s.get("name", "")).lower() for д in ключови)]
-        if len(всички) > len(свои) > 0:
+        if not свои:
+            continue
+        име = str(getattr(pkg, "id", ""))
+        излезли = породени.get(име)
+        if излезли is None:              # без задачи съдим по конфигурацията
+            излезли = len(всички)
+        if излезли > len(свои):
             дубликати.append({
-                "package": getattr(pkg, "id", ""),
+                "package": име,
                 "chain": getattr(pkg, "chain", ""),
-                "steps_in_chain": len(всички),
+                "emitted_tasks": излезли,
                 "steps_that_are_its_own": len(свои),
             })
     return дубликати
