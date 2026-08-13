@@ -706,6 +706,16 @@ _ATTACHMENT_STEPS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
 )
 
 
+def effective_chain_steps(pkg: Any, chain: dict) -> list[dict]:
+    """Стъпките, които ТОЗИ пакет наистина трябва да роди.
+
+    Един източник за разгъването и за гейта: иначе гейтът иска цялата верига
+    от прикачена работа, която нарочно ражда само своите стъпки — и пада точно
+    защото дублирането е премахнато.
+    """
+    return list(_attachment_scope(pkg, chain or {}).get("steps") or [])
+
+
 def _attachment_scope(pkg: Any, chain: dict) -> dict:
     """Прикачената работа получава СВОИТЕ стъпки, не цялата верига.
 

@@ -99,3 +99,40 @@ class TestDuplicateDetector:
         задачи = expand_packages(пакети, chains).tasks
 
         assert execution_scope_duplicates(пакети, chains, задачи) == []
+
+
+class TestGateMatchesTheModel:
+    """Гейтът за пълнота трябва да иска това, което пакетът наистина е.
+
+    СЕРИЯ 14.08.2026: след като прикачената работа спря да се разгъва като цял
+    участък, `template_complete` падна в 14 от 30 реални прогона — гейтът все
+    още искаше цялата верига от пакет, който нарочно ражда само своите стъпки.
+    Чистите паднаха от 16/40 на 6/40 заради собствената ни поправка.
+
+    FAILURE означава: премахването на дублирането пак ще се брои за дефект.
+    """
+
+    def test_an_attachment_package_satisfies_the_template(self):
+        from src.schedule_diagnostics import structural_flags
+
+        chains = load_chains()
+        пакети = [_пакет("P1", "СВО — ул. Хортензия", "water_section"),
+                  _пакет("P2", "Кл. В4-1: бул. Рожен", "water_section")]
+        задачи = expand_packages(пакети, chains).tasks
+
+        флагове = structural_flags(задачи, packages=пакети, chains=chains)
+        assert флагове["template_complete"] is True, (
+            "гейтът иска от прикачената работа стъпки, които не са нейни")
+
+    def test_a_section_missing_steps_still_fails(self):
+        """Стесняването не бива да отваря вратата за истински непълен участък."""
+        from src.schedule_diagnostics import structural_flags
+
+        chains = load_chains()
+        пакети = [_пакет("P2", "Кл. В4-1: бул. Рожен", "water_section")]
+        задачи = [t for t in expand_packages(пакети, chains).tasks
+                  if t.get("is_summary") or t.get("chain_step") in (None, "")
+                  or list(t.get("chain_step"))[:1] == ["1"]]
+
+        флагове = structural_flags(задачи, packages=пакети, chains=chains)
+        assert флагове["template_complete"] is False

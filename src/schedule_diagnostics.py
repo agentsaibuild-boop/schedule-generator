@@ -450,7 +450,14 @@ def _template_complete(packages, chains, tasks) -> bool:
         chain = defined.get(key, {})
         if chain.get("wbs_root", "construction") != "construction":
             continue                      # договорна фаза — не е шаблон
-        expected = {str(s.get("key")) for s in chain.get("steps") or []}
+        # ПРИКАЧЕНАТА РАБОТА има собствен, по-къс шаблон.  СВО, СКО, УО и
+        # кожухът са операции ВЪРХУ участък, не участъци — от 13.08.2026 те
+        # раждат само своите стъпки (`_attachment_scope`).  Без това уточнение
+        # гейтът искаше от тях цялата верига и падаше точно защото дублирането
+        # е премахнато: 14 от 30 прогона в серията от 14.08 се провалиха така.
+        from src.work_package import effective_chain_steps
+
+        expected = {str(s.get("key")) for s in effective_chain_steps(package, chain)}
         if not expected:
             continue
         checked += 1
