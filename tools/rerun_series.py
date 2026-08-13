@@ -270,12 +270,24 @@ def _run_series(prep: dict, number: int, label: str,
                 time.sleep(20 * attempt)
 
         calls = list(router.usage_log[usage_mark:])
+        изход = sum(int(c.get("tokens_out") or 0) for c in calls)
+        предупреждения = captured[-3:]
+        # ЧЕТИРИ РАЗЛИЧНИ НЕЩА, не едно.  ОДИТ 13.08.2026: „reached_worker=true
+        # е записано във всичките 40 runs, включително петте с tokens_out=7 —
+        # името не значи получен реален worker response."  Вярно е: флагът
+        # означаваше „имаше платена заявка".  Заявка, отговор, разбираем
+        # отговор и цял отговор са четири отделни събития и се провалят по
+        # различни причини — доставчик, модел, формат, таван.
         usage = {
             "tokens_in": sum(int(c.get("tokens_in") or 0) for c in calls),
-            "tokens_out": sum(int(c.get("tokens_out") or 0) for c in calls),
+            "tokens_out": изход,
             "calls": len(calls),
-            "reached_worker": bool(calls),
-            "router_warnings": captured[-3:],
+            "request_reached_provider": bool(calls),
+            "nonempty_worker_response": изход >= 100,
+            "response_parseable": not any(
+                "парсване" in w or "невалиден JSON" in w for w in предупреждения),
+            "output_truncated": any("ОТРЯЗАН" in w for w in предупреждения),
+            "router_warnings": предупреждения,
         }
 
         if result is None:

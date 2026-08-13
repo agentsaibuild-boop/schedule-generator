@@ -273,7 +273,7 @@ def structural_flags(
     resolvable_pct = round(
         100.0 * len(resolvable) / len(cited), 1) if cited and refs else 0.0
 
-    return {
+    флагове = {
         "template_complete": _template_complete(packages, chains, tasks),
         "contract_scope_complete": _REQUIRED_PHASES <= set(spans),
         "terminal_count": len(terminals),
@@ -295,6 +295,47 @@ def structural_flags(
         "spatial_resolved_pct": round(
             100.0 * len(located) / len(spatial), 1) if spatial else 0.0,
     }
+    return _mark_unevaluated(флагове, tasks)
+
+
+#: Флагове, които при ПРАЗЕН график са истина по празнота: няма лист, който да
+#: не стига до финала; няма ресурс, който да е претоварен; надзорът покрива
+#: строителство, което го няма.
+_VACUOUS_WHEN_EMPTY = (
+    "all_leaves_reach_terminal", "summary_rollup_ok", "supervision_span_ok",
+    "resource_capacity_ok", "template_complete", "contract_scope_complete",
+    "quantity_conservation_ok", "source_ref_fully_resolvable",
+)
+
+
+def _mark_unevaluated(флагове: dict[str, Any], tasks: list[dict]) -> dict[str, Any]:
+    """Празен график НЕ дава зелени флагове.
+
+    ОДИТ 13.08.2026: „при empty/error schedules някои flags са true по vacuous
+    truth... по-добре tri-state: pass / fail / not_evaluated."
+
+    Прав е, и това не е дребно: в серията от 40 прогона петте празни отговора
+    на доставчика носеха `supervision_span_ok=true` при НУЛА задачи.  Тоест
+    част от зелените числа в телеметрията означаваха „нямаше какво да се
+    провери", а се четяха като „проверено и наред".
+
+    Булевите флагове остават за съвместимост, но при празен график стават
+    False — зелено вече не се получава даром.  Точното състояние е в
+    `flag_states`.
+    """
+    оценим = bool(tasks)
+    състояния = {}
+    for име, стойност in флагове.items():
+        if not isinstance(стойност, bool):
+            continue
+        if not оценим and име in _VACUOUS_WHEN_EMPTY:
+            флагове[име] = False
+            състояния[име] = "not_evaluated"
+        else:
+            състояния[име] = "pass" if стойност else "fail"
+    флагове["flag_states"] = състояния
+    флагове["evaluated"] = оценим
+    return флагове
 
 
 def _capacity_overloads(tasks: list[dict]) -> list[dict]:

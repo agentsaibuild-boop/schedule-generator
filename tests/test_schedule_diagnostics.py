@@ -423,3 +423,49 @@ def test_milestones_consume_nothing():
              _task("M", "construction", 3, 3, resources=["Валяк"], milestone=True)]
 
     assert structural_flags(tasks)["resource_capacity_ok"]
+
+
+class TestEmptyScheduleGivesNoGreenFlags:
+    """Празен график не бива да дава зелени флагове по празнота.
+
+    ОДИТ 13.08.2026: „при empty/error schedules някои flags са true по vacuous
+    truth: supervision_span_ok, all_leaves_reach_terminal, resource_capacity_ok,
+    summary_rollup_ok."
+
+    В серията от 40 прогона петте празни отговора на доставчика носеха точно
+    тези флагове зелени при НУЛА задачи.  Зелено, което значи „нямаше какво да
+    се провери", се чете като „проверено и наред" — и вдига процента.
+
+    FAILURE означава: провален прогон пак ще изглежда структурно изряден.
+    """
+
+    def test_flags_are_not_true_without_tasks(self):
+        from src.schedule_diagnostics import structural_flags
+
+        флагове = structural_flags([])
+        for име in ("supervision_span_ok", "all_leaves_reach_terminal",
+                    "resource_capacity_ok", "summary_rollup_ok"):
+            assert флагове[име] is False, f"{име} е зелен при нула задачи"
+
+    def test_states_say_not_evaluated_rather_than_fail(self):
+        """Разликата има значение: не е проверено ≠ проверено и лошо."""
+        from src.schedule_diagnostics import structural_flags
+
+        състояния = structural_flags([])["flag_states"]
+        assert състояния["supervision_span_ok"] == "not_evaluated"
+        assert състояния["resource_capacity_ok"] == "not_evaluated"
+
+    def test_empty_schedule_is_not_clean(self):
+        from src.schedule_diagnostics import is_clean, structural_flags
+
+        assert is_clean(structural_flags([])) is False
+
+    def test_a_real_schedule_still_gets_pass_or_fail(self):
+        """Механизмът не бива да маркира истински прогон като непроверен."""
+        from src.schedule_diagnostics import structural_flags
+
+        задачи = [{"id": "T1", "name": "Изкоп", "start_day": 1, "end_day": 3,
+                   "dependencies": []}]
+        флагове = structural_flags(задачи)
+        assert флагове["evaluated"] is True
+        assert set(флагове["flag_states"].values()) <= {"pass", "fail"}
