@@ -55,7 +55,7 @@ src/
 start.bat  ← стартира app на localhost:8501
 
 ## Тестове
-uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e   ← unit тестове (2051 теста в 69 файла)
+uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e   ← unit тестове (2207 теста в 82 файла)
 pytest tests/e2e/ -v               ← E2E Playwright тестове (10 теста)
 
 - Unit тестовете не изискват стартирано приложение, но изискват пълния Python стек (.env не е нужен)
