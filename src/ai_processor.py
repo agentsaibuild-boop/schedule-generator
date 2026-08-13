@@ -1088,6 +1088,11 @@ class AIProcessor:
             "history": [],
             "duration_report": result.get("duration_report", {}),
             "ledger": result.get("ledger", []),
+            # Решенията и едновременността се ПРЕНАСЯТ, а не се раждат наново:
+            # без този ред описът в пакета излиза без човешкото решение по КСС
+            # (проба 14.08.2026 — точно това се случи в изнесения пакет).
+            "resolutions": result.get("resolutions", []),
+            "concurrency": result.get("concurrency", {}),
             "leveling": result.get("leveling", {}),
         }
 

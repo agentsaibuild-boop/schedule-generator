@@ -917,3 +917,20 @@ class TestExactDecimalConservation:
         пакети, _ = normalize_over_allocation(self._пакети([37.0, 37.0, 37.0]), [Row()])
         сбор = sum(i.quantity for p in пакети for i in p.items)
         assert abs(сбор - 100.0) < 1e-9
+
+    def test_a_row_within_tolerance_is_also_made_exact(self):
+        """Точността не зависи от това дали има дрейф за изравняване.
+
+        Проба 14.08.2026: описът в изнесения пакет показа -0.05 m² при
+        унипаважа.  Сборът беше В допустимото, затова редът изобщо не минаваше
+        през точното разделяне и си запазваше закръглянето на модела.
+        """
+        from src.work_package import normalize_over_allocation
+
+        class Row:
+            ref, quantity = "КСС!1", 18671.0
+
+        # 15 × 1244.73 = 18670.95 — разлика 0.05, далеч под допустимото.
+        пакети, _ = normalize_over_allocation(self._пакети([1244.73] * 15), [Row()])
+        сбор = sum(i.quantity for p in пакети for i in p.items)
+        assert abs(сбор - 18671.0) < 1e-9, f"остатък {сбор - 18671.0:+.4f}"
