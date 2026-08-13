@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import statistics
 from collections import defaultdict
 from typing import Any, Iterable
 
@@ -33,6 +34,9 @@ __all__ = [
     "delay_breakdown",
     "structural_flags",
     "duration_report",
+    "concurrency_report",
+    "concurrency_bottlenecks",
+    "widest_join",
     "HARD_STRUCTURAL_FLAGS",
 ]
 
@@ -453,3 +457,81 @@ def _template_complete(packages, chains, tasks) -> bool:
         if not expected <= produced.get(getattr(package, "id", ""), set()):
             return False
     return checked > 0
+
+
+# ---------------------------------------------------------------------------
+# Едновременност (одит 13.08.2026, P0.3)
+# ---------------------------------------------------------------------------
+
+
+def concurrency_report(tasks: Iterable[dict]) -> dict[str, Any]:
+    """Колко работа върви ЕДНОВРЕМЕННО и кой я задържа.
+
+    ОДИТ 13.08.2026: „Броят leaf задачи вече е почти същият (486 срещу 513), но
+    span-ът е 1.7× по-дълъг: човекът държи медиана 7 активни задачи и пик 10,
+    ние — 2 и 2.  Не е нужно просто ‚още задачи'."
+
+    Това коригира и нашия собствен извод от раздел 11.3 на брийфа, че целта е
+    повече задачи.  Целта е повече ЕДНОВРЕМЕННИ задачи — а дали е постигната
+    се вижда само ако се мери.  Затова тук няма твърдо зададен срок: числата
+    се сравняват с еталона, а не с константа в кода.
+    """
+    листа = [t for t in _leaves(list(tasks))
+             if not t.get("is_milestone") and t.get("type") != "milestone"]
+    строителни = [t for t in листа
+                  if str(t.get("phase") or "").lower() in ("", "construction")
+                  or "строит" in str(t.get("phase") or "").lower()]
+    редове = строителни or листа
+    if not редове:
+        return {"construction_leaf_count": 0, "construction_span_days": 0,
+                "peak_active_leaf_tasks": 0, "median_active_leaf_tasks": 0,
+                "average_active_leaf_tasks": 0.0, "evaluated": False}
+
+    начало = min(int(t.get("start_day") or 0) for t in редове)
+    край = max(int(t.get("end_day") or 0) for t in редове)
+    активни: list[int] = []
+    for ден in range(начало, край + 1):
+        активни.append(sum(
+            1 for t in редове
+            if int(t.get("start_day") or 0) <= ден <= int(t.get("end_day") or 0)))
+
+    активни_работни = [n for n in активни if n] or [0]
+    return {
+        "construction_leaf_count": len(редове),
+        "construction_span_days": край - начало + 1,
+        "peak_active_leaf_tasks": max(активни_работни),
+        "median_active_leaf_tasks": round(statistics.median(активни_работни), 1),
+        "average_active_leaf_tasks": round(statistics.fmean(активни_работни), 2),
+        "idle_days": sum(1 for n in активни if n == 0),
+        "evaluated": True,
+    }
+
+
+def concurrency_bottlenecks(tasks: Iterable[dict], top: int = 5) -> list[dict]:
+    """Кои предшественици държат най-много работа зад себе си.
+
+    Одиторът посочи конкретния случай: една задача за пътна основа с 41
+    предшественика — тоест глобална бариера, представена като локална зона.
+    """
+    задачи = list(tasks)
+    по_ид = {str(t.get("id")): t for t in задачи}
+    брой: dict[str, int] = {}
+    for t in задачи:
+        for dep in (t.get("dependencies") or []):
+            pred = str(dep.get("predecessor_id") if isinstance(dep, dict) else dep)
+            брой[pred] = брой.get(pred, 0) + 1
+
+    подредени = sorted(брой.items(), key=lambda kv: kv[1], reverse=True)[:top]
+    return [{"task_id": ид, "name": str(по_ид.get(ид, {}).get("name", ""))[:80],
+             "successors": n} for ид, n in подредени]
+
+
+def widest_join(tasks: Iterable[dict]) -> dict[str, Any]:
+    """Задачата с НАЙ-МНОГО предшественици — най-широкото събиране в графика."""
+    най = {"task_id": "", "name": "", "predecessors": 0}
+    for t in tasks:
+        n = len(t.get("dependencies") or [])
+        if n > най["predecessors"]:
+            най = {"task_id": str(t.get("id")), "predecessors": n,
+                   "name": str(t.get("name", ""))[:80]}
+    return най

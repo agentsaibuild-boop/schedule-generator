@@ -125,7 +125,8 @@ def _metrics(run: int, result: dict, elapsed: float,
     надзорът, нито roll-up-ът, нито проследимостта до КСС.
     """
     from src.schedule_diagnostics import (
-        duration_report, is_clean, is_clean_but_for_the_input, structural_flags)
+        concurrency_report, duration_report, is_clean,
+        is_clean_but_for_the_input, structural_flags)
     from src.work_package import load_chains
 
     conservation = result.get("conservation") or {}
@@ -151,6 +152,10 @@ def _metrics(run: int, result: dict, elapsed: float,
         # генерацията остава неизмерена.
         "clean_but_for_input": (bool(result.get("exportable"))
                                 and is_clean_but_for_the_input(flags)),
+        # Едновременност: броят задачи вече е близък до еталона, срокът — не.
+        # Разликата е в паралелизацията, затова тя се мери на всеки прогон.
+        **{f"concurrency_{k}": v
+           for k, v in concurrency_report(tasks).items() if k != "evaluated"},
         "total_days": timing["total_days"],
         "critical_path_days": timing["critical_path_days"],
         "resource_delay_days": timing["resource_delay_days"],

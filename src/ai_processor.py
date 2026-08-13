@@ -833,6 +833,8 @@ class AIProcessor:
 
         _prog(f"{len(tasks)} задачи, критичен път {cpm['critical_count']}.")
 
+        from src.schedule_diagnostics import concurrency_report
+
         return {
             "status": "ok" if conservation["ok"] and not blockers
                       else "needs_human_review",
@@ -845,6 +847,9 @@ class AIProcessor:
             "unplaced": expansion.unplaced,
             "critical_count": cpm["critical_count"],
             "duration_report": duration_report,
+            # Едновременността е отделен въпрос от продължителността: еталонът
+            # държи медиана 7 активни задачи, ние — 3 (одит 13.08.2026).
+            "concurrency": concurrency_report(tasks),
             "leveling": {"shifted": len(leveled["shifted"]),
                          "peak": leveled["peak"]},
             # Описът е ДОКАЗАТЕЛСТВОТО за Σ=КСС, а не присъдата на гейта —
