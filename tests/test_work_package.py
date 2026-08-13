@@ -629,7 +629,11 @@ def test_slight_over_allocation_is_scaled_to_the_boq():
     assert total == pytest.approx(1000.0)
     # Пропорцията на модела е запазена: 600/500 → 6/5
     got = [sum(i.quantity for i in p.items) for p in adjusted]
-    assert got[0] / got[1] == pytest.approx(600 / 500)
+    # Пропорцията се пази до стотна, не до последния бит: от 13.08.2026
+    # дяловете се закръглят до 0.01, а последният поема остатъка, за да е
+    # сборът ТОЧНО количеството от КСС.  Разменяме 0.002% дрейф в пропорцията
+    # (преценка на модела) срещу точен сбор (факт от документа).
+    assert got[0] / got[1] == pytest.approx(600 / 500, rel=1e-4)
     assert notes
 
 
@@ -688,7 +692,8 @@ def test_a_small_shortfall_is_stretched_to_the_boq():
     assert sum(i.quantity for p in adjusted
                for i in p.items) == pytest.approx(1000.0)
     got = [sum(i.quantity for i in p.items) for p in adjusted]
-    assert got[0] / got[1] == pytest.approx(500 / 420)   # пропорцията е негова
+    # Виж бележката по-горе: закръгляне до стотна, точен сбор.
+    assert got[0] / got[1] == pytest.approx(500 / 420, rel=1e-4)   # пропорцията е негова
     assert notes and "не достига" in notes[0]
 
 
@@ -850,3 +855,65 @@ def test_phase_wiring_creates_no_cycles():
 
     result = ScheduleBuilder().reschedule(tasks)
     assert result["warnings"] == []
+
+
+class TestExactDecimalConservation:
+    """Сборът на дяловете е ТОЧНО количеството от КСС, не „почти".
+
+    ОДИТ 13.08.2026: „‚28/28 точно' не е буквално точно: има +0.02 m при DN110
+    и -0.02 m² при унипаважа в самия allocation ledger."
+
+    Прав е.  Всяко количество се умножаваше по коефициент в плаваща запетая
+    независимо от другите, тоест закръгленията не се сумираха до нула.  Описът
+    е ДОКАЗАТЕЛСТВОТО за Σ=КСС — в него „почти" няма стойност.
+
+    FAILURE означава: описът пак ще твърди точност, която не е точност.
+    """
+
+    @staticmethod
+    def _пакети(дялове: list[float], ref: str = "КСС!1"):
+        from src.work_package import PackageItem, SpatialWorkPackage
+
+        return [
+            SpatialWorkPackage(
+                id=f"P{i}", network="В", chain="water_section",
+                name=f"участък {i}",
+                items=(PackageItem(source_ref=ref, activity_class="laying",
+                                   quantity=дял, unit="m"),))
+            for i, дял in enumerate(дялове)
+        ]
+
+    def test_the_audited_row_sums_exactly(self):
+        """1758.86 върху 8 пакета — числото от описа, който одиторът провери."""
+        from src.work_package import normalize_over_allocation
+
+        class Row:
+            ref, quantity = "КСС!1", 1758.86
+
+        # Сбор 1800 → дрейф, който се изравнява.
+        пакети, _ = normalize_over_allocation(self._пакети([225.0] * 8), [Row()])
+        сбор = sum(i.quantity for p in пакети for i in p.items)
+        assert round(сбор, 2) == 1758.86
+        assert abs(сбор - 1758.86) < 1e-9, f"остатък {сбор - 1758.86:+.4f}"
+
+    def test_the_pavement_row_sums_exactly(self):
+        """18671 m² върху 6 пакета — вторият случай от описа."""
+        from src.work_package import normalize_over_allocation
+
+        class Row:
+            ref, quantity = "КСС!1", 18671.0
+
+        пакети, _ = normalize_over_allocation(self._пакети([3200.0] * 6), [Row()])
+        сбор = sum(i.quantity for p in пакети for i in p.items)
+        assert abs(сбор - 18671.0) < 1e-9, f"остатък {сбор - 18671.0:+.4f}"
+
+    def test_an_indivisible_quantity_still_sums_exactly(self):
+        """Число, което не се дели на равни стотни — остатъкът има къде да иде."""
+        from src.work_package import normalize_over_allocation
+
+        class Row:
+            ref, quantity = "КСС!1", 100.0
+
+        пакети, _ = normalize_over_allocation(self._пакети([37.0, 37.0, 37.0]), [Row()])
+        сбор = sum(i.quantity for p in пакети for i in p.items)
+        assert abs(сбор - 100.0) < 1e-9

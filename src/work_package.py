@@ -33,6 +33,7 @@ import json
 import logging
 import re
 from collections import defaultdict
+from decimal import Decimal, ROUND_HALF_UP
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable
@@ -690,6 +691,44 @@ def _chain_from_description(item: PackageItem, covers: dict[str, set]) -> str:
     return chain if item.activity_class in covers.get(chain, set()) else ""
 
 
+#: Стъпката, до която се закръгляват количествата в описа.
+_QUANTITY_STEP = Decimal("0.01")
+
+
+def _exact_shares(packages: list, factors: dict[str, float],
+                  required: dict[str, float]) -> dict[tuple[int, int], float]:
+    """Дяловете, чийто сбор е ТОЧНО количеството от КСС.
+
+    Пропорцията си остава на модела — тук се сменя само аритметиката: първите
+    n-1 дяла се закръглят до стотна, а последният поема остатъка, за да няма
+    закръгляне, което да не се сумира до нула.
+    """
+    места: dict[str, list[tuple[int, int, float]]] = {}
+    for индекс, pkg in enumerate(packages):
+        for позиция, item in enumerate(pkg.items):
+            if item.source_ref in factors:
+                места.setdefault(item.source_ref, []).append(
+                    (индекс, позиция, item.quantity))
+
+    резултат: dict[tuple[int, int], float] = {}
+    for ref, записи in места.items():
+        цел = Decimal(str(required[ref]))
+        сбор = sum(Decimal(str(q)) for *_, q in записи)
+        if сбор <= 0:
+            continue
+        раздадено = Decimal("0")
+        for ред, (индекс, позиция, количество) in enumerate(записи):
+            ако_последен = ред == len(записи) - 1
+            if ако_последен:
+                дял = цел - раздадено
+            else:
+                дял = (цел * Decimal(str(количество)) / сбор).quantize(
+                    _QUANTITY_STEP, rounding=ROUND_HALF_UP)
+                раздадено += дял
+            резултат[(индекс, позиция)] = float(дял)
+    return резултат
+
+
 def normalize_over_allocation(
     packages: list[SpatialWorkPackage],
     boq_index: Iterable[Any],
@@ -765,12 +804,22 @@ def normalize_over_allocation(
     if not factors:
         return packages, []
 
+    # ТОЧНО В ДЕСЕТИЧНА ОБЛАСТ, не „почти".  ОДИТ 13.08.2026: описът показва
+    # 1758.86 искани срещу 1758.88 разпределени (+0.02 m) и 18671 срещу
+    # 18670.98 (-0.02 m²).  Причината: всяко количество се умножаваше по
+    # коефициент в плаваща запетая независимо от другите, тоест закръгленията
+    # не се сумират до нула.  Инженерно е дребно, но „28 от 28 точно" тогава
+    # не е буквално вярно, а описът е ДОКАЗАТЕЛСТВОТО за Σ=КСС.
+    #
+    # Затова: първите n-1 дяла се закръглят, последният поема остатъка.
+    exact = _exact_shares(packages, factors, required)
+
     adjusted = []
-    for pkg in packages:
+    for индекс, pkg in enumerate(packages):
         items = tuple(
-            replace(item, quantity=item.quantity * factors[item.source_ref])
-            if item.source_ref in factors else item
-            for item in pkg.items
+            replace(item, quantity=exact[(индекс, позиция)])
+            if (индекс, позиция) in exact else item
+            for позиция, item in enumerate(pkg.items)
         )
         adjusted.append(replace(pkg, items=items) if items != pkg.items else pkg)
     return adjusted, notes
