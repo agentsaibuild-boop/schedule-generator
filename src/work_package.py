@@ -695,6 +695,84 @@ def _chain_from_description(item: PackageItem, covers: dict[str, set]) -> str:
 _QUANTITY_STEP = Decimal("0.01")
 
 
+#: ПРИКАЧЕНА работа: СВО, СКО, УО и бетоновият кожух не са самостоятелни
+#: участъци — те са операции ВЪРХУ участък и вече присъстват като стъпка в
+#: неговата верига.  Ключът е дума от името на пакета, стойността — думи от
+#: стъпката, която тази работа наистина изпълнява.
+_ATTACHMENT_STEPS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("сво",), ("реконструкция на сво", "връзки към съществува")),
+    (("ско", "уо", "оттичане"), ("изграждане на ско",)),
+    (("кожух", "кожуси"), ("монтаж на тръби", "полагане")),
+)
+
+
+def _attachment_scope(pkg: Any, chain: dict) -> dict:
+    """Прикачената работа получава СВОИТЕ стъпки, не цялата верига.
+
+    ОДИТ 13.08.2026, P0.2: „SVO/SKO/УО/кожуси се разгъват като пълни
+    pipe/structure chains и дублират операции, които вече съществуват в
+    основните templates... quantity gate може да е зелен, а execution scope да
+    е повторен."
+
+    Прав е и това е най-тежкият моделен дефект в изнесеното.  `water_section`
+    стъпка 8 вече съдържа „реконструкция на СВО", а `sewer_section` стъпка 5 —
+    „Изграждане на СКО и УО".  Въпреки това седем СВО пакета се разгъваха
+    отново по цялата 9-степенна водопроводна верига: ВОБД, разкъртване, изкоп,
+    заваряване, изпитване, дезинфекция... за втори път, върху същия обхват.
+
+    Количеството се разпределя веднъж, затова гейтът за количествата мълчи —
+    той пази СБОРА, не ИЗПЪЛНЕНИЕТО.  Тук се пази изпълнението: пакет, който е
+    прикачена работа, ражда само стъпките, които наистина е той.
+    """
+    ключови = _attachment_keywords(pkg)
+    if not ключови:
+        return chain
+
+    стъпки = [
+        step for step in chain.get("steps", [])
+        if any(дума in str(step.get("name", "")).lower() for дума in ключови)
+    ]
+    if not стъпки:                       # непозната прикачена работа — не режем
+        return chain
+    return {**chain, "steps": стъпки}
+
+
+def _attachment_keywords(pkg: Any) -> tuple[str, ...]:
+    """Думите на стъпката, която този пакет изпълнява, или празно."""
+    име = f"{getattr(pkg, 'name', '')} {getattr(pkg, 'label', '')}".lower()
+    for маркери, стъпки in _ATTACHMENT_STEPS:
+        if any(маркер in име for маркер in маркери):
+            return стъпки
+    return ()
+
+
+def execution_scope_duplicates(packages: Iterable[Any], chains: dict) -> list[dict]:
+    """Пакети, които повтарят изпълнение, вече съдържащо се в родителска верига.
+
+    Гейтът за количествата пази СБОРА; този — ОБХВАТА.  Двете се провалят
+    поотделно: седем СВО пакета с коректно разпределени 174 бр. пак изпълняват
+    изкопа и изпитването втори път.
+    """
+    дубликати = []
+    defs = (chains or {}).get("chains", chains or {})
+    for pkg in packages or []:
+        ключови = _attachment_keywords(pkg)
+        if not ключови:
+            continue
+        chain = defs.get(getattr(pkg, "chain", "")) or {}
+        всички = chain.get("steps") or []
+        свои = [s for s in всички
+                if any(д in str(s.get("name", "")).lower() for д in ключови)]
+        if len(всички) > len(свои) > 0:
+            дубликати.append({
+                "package": getattr(pkg, "id", ""),
+                "chain": getattr(pkg, "chain", ""),
+                "steps_in_chain": len(всички),
+                "steps_that_are_its_own": len(свои),
+            })
+    return дубликати
+
+
 def _exact_shares(packages: list, factors: dict[str, float],
                   required: dict[str, float]) -> dict[tuple[int, int], float]:
     """Дяловете, чийто сбор е ТОЧНО количеството от КСС.
@@ -1369,6 +1447,8 @@ def expand_packages(
 
     for pkg in packages:
         chain = chain_defs.get(pkg.chain)
+        if chain:
+            chain = _attachment_scope(pkg, chain)
         if not chain:
             result.warnings.append(
                 f"Пакет {pkg.id}: непозната верига {pkg.chain!r} — пропуснат")
