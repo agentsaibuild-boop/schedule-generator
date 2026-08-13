@@ -295,3 +295,79 @@ def test_the_material_decision_is_bound_to_the_row_content(monkeypatch, conflict
 
     _dn, material = work_package._row_pipe_spec(conflicting)
     assert material == ""
+
+
+# ---------------------------------------------------------------------------
+# Решението трябва да СЕ ВИЖДА в изнесеното (одит 13.08.2026)
+# ---------------------------------------------------------------------------
+
+
+class TestResolutionIsVisible:
+    """Решено и мълчаливо прието не бива да изглеждат еднакво отвън.
+
+    ОДИТ 13.08.2026: „DIAMETER_CONFLICT не се засича изобщо... Shipped XML
+    silently избира DN200."  Първата половина е невярна — засичането работи и
+    се пази от тестовете по-горе; конфликтът е РЕШЕН от възложителя на 10.08.
+    Втората половина е вярна и е по-важна: в пакета нямаше нито дума за това
+    решение, а 20 задачи носеха DN200 в имената си, докато сметките ползваха
+    решените 225.
+
+    FAILURE означава: одиторът пак ще види график с един диаметър в имената и
+    друг в сметките, без нищо, което да обясни разликата.
+    """
+
+    def test_the_applied_decision_travels_with_the_schedule(self, boq):
+        from src.work_package import applied_resolutions
+
+        записи = applied_resolutions(boq)
+        assert len(записи) == 1, "приложеното решение липсва в резултата"
+
+        запис = записи[0]
+        assert запис["chosen_value"] == 225
+        assert sorted(запис["candidates"]) == [200, 225], \
+            "кандидатите не са записани — не се вижда МЕЖДУ КАКВО е избирано"
+        assert запис["resolution_source"] == "human"
+        assert запис["decided_by"] == "възложител"
+        assert запис["resolved_at"] == "2026-08-10"
+
+    def test_a_row_without_a_decision_produces_no_record(self, unresolved):
+        """Артефактът описва решения, не конфликти — иначе става обратното."""
+        from src.work_package import applied_resolutions
+
+        assert applied_resolutions([unresolved]) == []
+
+    def test_the_ledger_shows_the_decision(self, boq):
+        """Описът е документът, който одиторът чете — там трябва да е."""
+        from src.work_package import applied_resolutions, format_allocation_ledger
+
+        текст = format_allocation_ledger([], applied_resolutions(boq))
+        assert "225" in текст
+        assert "възложител" in текст
+        assert "2026-08-10" in текст
+
+    def test_the_ledger_warns_that_names_carry_the_old_value(self, boq):
+        """Имената носят описанието от КСС; сметките — приетата стойност."""
+        from src.work_package import applied_resolutions, format_allocation_ledger
+
+        текст = format_allocation_ledger([], applied_resolutions(boq))
+        assert "приетата стойност" in текст
+
+
+class TestUnresolvedConflictIsNotClean:
+    """Нерешен конфликт сваля СТРОГАТА чистота, но не спира износа.
+
+    Точно това е договорената policy и одиторът иска доказателство за нея:
+    `clean = false`, `clean_but_for_input_conflict = true`.
+    """
+
+    def test_unresolved_conflict_fails_strict_clean(self):
+        from src.schedule_diagnostics import (HARD_STRUCTURAL_FLAGS, is_clean,
+                                              is_clean_but_for_the_input)
+
+        # Флаговете се строят от самия списък, а не се преписват: иначе
+        # добавен утре критерий ще мине незабелязано през този тест.
+        флагове = {име: True for име in HARD_STRUCTURAL_FLAGS}
+        флагове["no_unresolved_diameter_conflict"] = False
+        assert is_clean(флагове) is False, "нерешен конфликт минава за чист"
+        assert is_clean_but_for_the_input(флагове) is True, \
+            "конфликтът в самия КСС се брои за наш дефект"

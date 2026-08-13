@@ -559,7 +559,8 @@ class AIProcessor:
         """
         from src.provenance import format_boq_for_prompt
         from src.schedule_builder import ScheduleBuilder
-        from src.work_package import (assign_fronts, check_conservation,
+        from src.work_package import (applied_resolutions, assign_fronts,
+                                      check_conservation,
                                       conservation_messages, expand_packages,
                                       link_cross_discipline, load_chains,
                                       allocation_ledger, contract_packages,
@@ -849,6 +850,9 @@ class AIProcessor:
             # Описът е ДОКАЗАТЕЛСТВОТО за Σ=КСС, а не присъдата на гейта —
             # одиторът може да пресметне сбора независимо (одит 2026-08-07).
             "ledger": allocation_ledger(packages, boq_index, tasks),
+            # Приложените човешки решения пътуват с графика: без тях решено и
+            # мълчаливо прието изглеждат еднакво отвън (одит 13.08.2026).
+            "resolutions": applied_resolutions(boq_index),
             "cost": cost,
             "model": result.get("model", ""),
         }

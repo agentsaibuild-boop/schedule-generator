@@ -520,6 +520,61 @@ def resolved_value(row: Any, field: str) -> Any:
     return None
 
 
+def _diameter_candidates(row: Any) -> tuple[int | None, int | None]:
+    """(DN от описанието, DN от колоната) — без оглед дали има решение."""
+    from src.duration_calculator import detect_dn
+
+    raw = getattr(row, "raw", None) or {}
+    description = str(getattr(row, "description", "") or "")
+    columns = " ".join(
+        str(v) for k, v in raw.items()
+        if v not in (None, "") and not str(k).startswith("__")
+        and "диаметър" in str(k).lower()
+    )
+    if not columns:
+        return None, None
+    return detect_dn({"name": description}), detect_dn({"name": columns})
+
+
+def applied_resolutions(rows: list) -> list[dict]:
+    """Човешките решения, ПРИЛОЖЕНИ в този график — като артефакт.
+
+    ОДИТ 13.08.2026: „никога не избирай мълчаливо".  Проверката беше права по
+    последствие и грешна по причина: конфликтът Ф200/Ф225 се засича коректно и
+    е РЕШЕН от възложителя на 10.08 (`config/boq_resolutions.json`).  Но в
+    изнесения пакет нямаше и следа от това решение — отвън мълчаливото
+    приемане и решението изглеждат еднакво.  Оттам и изводът, че конфликтът се
+    подминава.
+
+    Затова решението пътува с графика: кой ред, кои са били кандидатите, коя
+    стойност е приета, от кого и кога.
+    """
+    записи: list[dict] = []
+    for row in rows or []:
+        record_id = str(getattr(row, "record_id", "") or "")
+        if not record_id:
+            continue
+        for resolution in load_boq_resolutions():
+            if record_id not in (resolution.get("record_ids") or []):
+                continue
+            кандидати = []
+            if resolution.get("field") == "dn":
+                кандидати = [c for c in _diameter_candidates(row) if c is not None]
+            записи.append({
+                "conflict_ref": str(getattr(row, "source_ref", "") or ""),
+                "record_id": record_id,
+                "field": resolution.get("field"),
+                "candidates": кандидати,
+                "chosen_value": resolution.get("value"),
+                "resolution_source": "human",
+                "decided_by": resolution.get("decided_by"),
+                "resolved_at": resolution.get("decided_on"),
+                "note": resolution.get("note"),
+                "conflict": resolution.get("conflict"),
+            })
+    return записи
+
+
 def diameter_conflict(row: Any) -> tuple[int, int] | None:
     """(DN от описанието, DN от колоната), ако се разминават.
 
@@ -527,27 +582,14 @@ def diameter_conflict(row: Any) -> tuple[int, int] | None:
     мълчи или двата казват едно и също.  Разминаването не се решава тук:
     кой е верният е инженерен въпрос, не програмен.
     """
-    from src.duration_calculator import detect_dn
-
     # Решен от човек конфликт вече не е конфликт.  Записът стои в
-    # `config/boq_resolutions.json` с автор и дата, тоест графикът може да
-    # каже не само какъв диаметър е взел, а и кой го е решил.
+    # `config/boq_resolutions.json` с автор и дата, а самото решение пътува с
+    # графика през `applied_resolutions` — иначе решено и подминато изглеждат
+    # еднакво отвън (одит 13.08.2026).
     if resolved_value(row, "dn") is not None:
         return None
 
-    raw = getattr(row, "raw", None) or {}
-    description = str(getattr(row, "description", "") or "")
-
-    columns = " ".join(
-        str(v) for k, v in raw.items()
-        if v not in (None, "") and not str(k).startswith("__")
-        and "диаметър" in str(k).lower()
-    )
-    if not columns:
-        return None
-
-    from_description = detect_dn({"name": description})
-    from_column = detect_dn({"name": columns})
+    from_description, from_column = _diameter_candidates(row)
     if from_description is None or from_column is None:
         return None
     if from_description == from_column:
@@ -954,7 +996,36 @@ def _ledger_status(want: Any, got: float) -> str:
     return "ок"
 
 
-def format_allocation_ledger(ledger: list[dict]) -> str:
+def format_resolutions(resolutions: list[dict]) -> str:
+    """Приложените човешки решения — като част от описа.
+
+    Без този раздел графикът показва диаметър от описанието в КСС, смята с
+    друг (решения), и никъде не казва защо.  Одиторът прочете това като
+    мълчалив избор — и беше прав, че отвън не се различава.
+    """
+    if not resolutions:
+        return ""
+    lines = ["", "## Приложени решения по противоречия в КСС", "",
+             "Тези редове на КСС си противоречат сами. Програмата НЕ избира —",
+             "стойността идва от човешко решение, записано с автор и дата.", "",
+             "| Ред | Поле | Кандидати | Прието | Решил | Дата |",
+             "|---|---|---|---|---|---|"]
+    for r in resolutions:
+        кандидати = " / ".join(str(c) for c in r.get("candidates") or []) or "—"
+        lines.append(
+            f"| {r.get('conflict_ref') or r.get('record_id')} | {r.get('field')} "
+            f"| {кандидати} | **{r.get('chosen_value')}** "
+            f"| {r.get('decided_by') or '—'} | {r.get('resolved_at') or '—'} |")
+    забележки = [r.get("note") for r in resolutions if r.get("note")]
+    if забележки:
+        lines += ["", "Мотиви: " + "; ".join(забележки)]
+    lines += ["", "**Имената на задачите носят описанието от КСС, а сметките — "
+              "приетата стойност.** Където двете се разминават, вярна е "
+              "приетата стойност от таблицата по-горе."]
+    return "\n".join(lines)
+
+
+def format_allocation_ledger(ledger: list[dict], resolutions: list[dict] | None = None) -> str:
     """Описът като таблица за четене от човек."""
     lines = ["# Опис на разпределението (allocation ledger)", "",
              "Всеки ред от КСС: колко се иска, колко е разпределено и къде.",
@@ -973,6 +1044,9 @@ def format_allocation_ledger(ledger: list[dict]) -> str:
     total_rows = len(ledger)
     clean = sum(1 for r in ledger if r["status"] == "ок")
     lines += ["", f"**{clean} от {total_rows} реда са разпределени точно.**"]
+    раздел = format_resolutions(resolutions or [])
+    if раздел:
+        lines.append(раздел)
     return "\n".join(lines)
 
 

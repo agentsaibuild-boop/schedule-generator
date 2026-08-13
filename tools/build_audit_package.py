@@ -130,7 +130,8 @@ def build_schedule_files(folder: Path, result: dict) -> dict:
 
     # `format_allocation_ledger` носи собствено заглавие — не му слагаме второ.
     ledger = result.get("ledger") or []
-    text = format_allocation_ledger(ledger).replace(
+    # Приложените решения вървят с описа — виж `format_resolutions`.
+    text = format_allocation_ledger(ledger, result.get("resolutions") or []).replace(
         "Сборът може да бъде пресметнат независимо от този документ.",
         "Сборът може да бъде пресметнат независимо от този документ — срещу\n"
         "анонимизирания КСС в `технически/`, чиито количества са автентичните.")
