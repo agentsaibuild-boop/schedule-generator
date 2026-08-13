@@ -382,6 +382,141 @@ class TestTruncationDetection:
 
 
 # ---------------------------------------------------------------------------
+# Празен отговор от доставчика (серия 13.08.2026)
+# ---------------------------------------------------------------------------
+
+class TestEmptyResponseRetry:
+    """Празен отговор е засечка на доставчика, не резултат на модела.
+
+    FAILURE означава: 2-секунден отговор със седем изходни токена пак ще се
+    брои за провалена генерация.  В серията от 13.08.2026 това бяха 5 от 40
+    прогона — цели пет процента от статистиката за качеството на модела бяха
+    чужда инфраструктура.
+    """
+
+    @staticmethod
+    def _router(responses: list[tuple[str, int]]):
+        """responses: списък от (съдържание, изходни токени) по реда на опитите."""
+        from unittest.mock import MagicMock
+        from src.ai_router import AIRouter
+
+        r = AIRouter()
+        client = MagicMock()
+        client.chat.completions.create.side_effect = [
+            MagicMock(
+                choices=[MagicMock(message=MagicMock(content=content),
+                                   finish_reason="stop")],
+                usage=MagicMock(prompt_tokens=12000, completion_tokens=out),
+            )
+            for content, out in responses
+        ]
+        r._deepseek_client = client
+        return r
+
+    def test_empty_response_is_retried_and_recovers(self, monkeypatch):
+        monkeypatch.setattr("src.ai_router.time.sleep", lambda _s: None)
+        r = self._router([("", 7), ('{"tasks": []}', 900)])
+        result = r._chat_deepseek([{"role": "user", "content": "x"}], "system" * 40)
+        assert result["content"] == '{"tasks": []}'
+
+    def test_persistent_empty_response_raises(self, monkeypatch):
+        """След изчерпване на опитите се вдига грешка, не се връща празно.
+
+        Празен низ, върнат тихо, се превръща в „невалиден JSON" няколко слоя
+        по-нагоре — точно заблудата, която тази поправка премахва.
+        """
+        import pytest
+        monkeypatch.setattr("src.ai_router.time.sleep", lambda _s: None)
+        r = self._router([("", 7)] * 12)
+        with pytest.raises(Exception, match="празен отговор"):
+            r._chat_deepseek([{"role": "user", "content": "x"}], "system" * 40)
+
+    def test_empty_attempt_is_still_billed(self, monkeypatch):
+        """Входът на изхвърления опит е платен и трябва да личи в сметката."""
+        monkeypatch.setattr("src.ai_router.time.sleep", lambda _s: None)
+        r = self._router([("", 7), ('{"tasks": []}', 900)])
+        r._chat_deepseek([{"role": "user", "content": "x"}], "system" * 40)
+        assert any(entry["task_type"] == "chat-празен" for entry in r.usage_log)
+
+    def test_worker_failure_does_not_disable_the_whole_session(self):
+        """Една засечка НЕ прехвърля цялата сесия на скъпия контрольор.
+
+        FAILURE означава: първият отказ на работника пак ще изключва пътя му
+        до края на живота на инстанцията.  На 12.08.2026 това струваше $3.92 —
+        18 прогона, поискани от шест евтини работника, бяха обслужени от Opus,
+        а резултатът беше представен като сравнение между модели.
+        """
+        from unittest.mock import MagicMock
+        from src.ai_router import AIRouter
+
+        r = AIRouter()
+        r.anthropic_available = True
+        r._chat_deepseek = MagicMock(side_effect=RuntimeError("засечка"))
+        r._chat_anthropic = MagicMock(return_value={"content": "{}", "cost": 0.0})
+
+        r.chat([{"role": "user", "content": "x"}], "system")
+
+        assert r.deepseek_available is True, "работникът е изключен след ЕДИН провал"
+        assert r._chat_anthropic.called, "резервният път не се е задействал"
+
+    def test_worker_disabled_only_after_three_consecutive_failures(self):
+        from unittest.mock import MagicMock
+        from src.ai_router import AIRouter
+
+        r = AIRouter()
+        r.anthropic_available = True
+        r._chat_deepseek = MagicMock(side_effect=RuntimeError("засечка"))
+        r._chat_anthropic = MagicMock(return_value={"content": "{}", "cost": 0.0})
+
+        for _ in range(2):
+            r.chat([{"role": "user", "content": "x"}], "system")
+        assert r.deepseek_available is True
+
+        r.chat([{"role": "user", "content": "x"}], "system")
+        assert r.deepseek_available is False, "системната засечка трябва да го изключи"
+
+    def test_success_resets_the_failure_counter(self):
+        """Разпръснати засечки не бива да се натрупват до изключване."""
+        from unittest.mock import MagicMock
+        from src.ai_router import AIRouter
+
+        r = AIRouter()
+        r.anthropic_available = True
+        r._chat_anthropic = MagicMock(return_value={"content": "{}", "cost": 0.0})
+        r._chat_deepseek = MagicMock(side_effect=[
+            RuntimeError("засечка"), {"content": "{}", "cost": 0.0},
+            RuntimeError("засечка"), RuntimeError("засечка"),
+        ])
+
+        for _ in range(4):
+            r.chat([{"role": "user", "content": "x"}], "system")
+
+        assert r.deepseek_available is True, "успехът по средата не е нулирал брояча"
+
+    def test_fallback_says_the_controller_took_over(self, caplog):
+        import logging
+        from unittest.mock import MagicMock
+        from src.ai_router import AIRouter
+
+        r = AIRouter()
+        r.anthropic_available = True
+        r._chat_deepseek = MagicMock(side_effect=RuntimeError("засечка"))
+        r._chat_anthropic = MagicMock(return_value={"content": "{}", "cost": 0.0})
+
+        with caplog.at_level(logging.WARNING):
+            r.chat([{"role": "user", "content": "x"}], "system")
+
+        assert any("контрольора" in rec.message for rec in caplog.records), \
+            "прехвърлянето към по-скъпия модел минава мълчаливо"
+
+    def test_whitespace_only_counts_as_empty(self, monkeypatch):
+        monkeypatch.setattr("src.ai_router.time.sleep", lambda _s: None)
+        r = self._router([("   \n  ", 40), ('{"tasks": []}', 900)])
+        result = r._chat_deepseek([{"role": "user", "content": "x"}], "system" * 40)
+        assert result["content"] == '{"tasks": []}'
+
+
+# ---------------------------------------------------------------------------
 # Claude worker: streaming при голям изход + best-effort JSON schema (2026-08)
 # ---------------------------------------------------------------------------
 

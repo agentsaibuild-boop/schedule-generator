@@ -65,6 +65,16 @@ WORKER_MODEL_OVERRIDE = os.getenv("WORKER_MODEL", "").strip()
 # СТЪПАЛО НАДОЛУ, когато доставчикът откаже по-високия таван.
 _SAFE_OUTPUT_TOKENS = 8192
 
+# Колко пъти да се повтори ПРАЗЕН отговор от доставчика, преди да се обяви за
+# провал.  Признакът е празно СЪДЪРЖАНИЕ, не малък брой токени: кратък отговор
+# може да е напълно законен и не бива да се преповтаря.
+_EMPTY_RETRIES = int(os.getenv("EMPTY_RESPONSE_RETRIES", "2"))
+
+# След колко ПОРЕДНИ провала работникът се изключва за цялата сесия.  Виж
+# `chat()` — една засечка не бива да прехвърля целия прогон на контрольора.
+_WORKER_FAILURES_BEFORE_DISABLE = int(
+    os.getenv("WORKER_FAILURES_BEFORE_DISABLE", "3"))
+
 
 def worker_max_tokens() -> int:
     """Таванът на изхода на РАБОТНИКА — един източник за ДВАТА клона.
@@ -77,8 +87,15 @@ def worker_max_tokens() -> int:
 
     Чете се при всяко повикване, а не веднъж при import, за да важи и когато
     `.env` се зарежда след модула.
+
+    СЕРИЯ 13.08.2026: подразбиращите се 16 000 не стигат за реален търг —
+    отрязване имаше при три от шестте пробвани работника, а чистите прогони
+    ползват до 28 000 изходни токена.  Стойността живееше само в `.env`, който
+    НЕ е в git, тоест всяка друга машина работеше по старому.  Затова тук е
+    32 000: за търг с 70 реда КСС това е таванът, при който отрязването спира
+    да е водеща причина за провал.
     """
-    return int(os.getenv("WORKER_MAX_TOKENS", "16000"))
+    return int(os.getenv("WORKER_MAX_TOKENS", "32000"))
 
 # Над този таван на изхода Anthropic SDK иска STREAMING, иначе дълъг генериращ
 # отговор рискува HTTP timeout (препоръка от проучването за модели, 2026-08).
@@ -227,6 +244,10 @@ class AIRouter:
             WORKER_MODEL_OVERRIDE.startswith("claude")
             or "claude" in MODEL_WORKER.lower()
         )
+
+        # ПОРЕДНИ провали на работника.  Виж `chat()`: една засечка НЕ изключва
+        # работника за цялата сесия — само този брояч решава кога е системно.
+        self._worker_failures: int = 0
 
         self.usage_log: list[dict] = []
 
@@ -411,12 +432,40 @@ class AIRouter:
         # Try DeepSeek first
         if self.deepseek_available:
             try:
-                return self._chat_deepseek(messages, system_prompt, max_tokens=max_tokens,
-                                           response_schema=response_schema)
+                result = self._chat_deepseek(messages, system_prompt, max_tokens=max_tokens,
+                                             response_schema=response_schema)
+                self._worker_failures = 0
+                return result
             except Exception as exc:
-                logger.warning("DeepSeek chat failed, trying fallback: %s", exc)
-                self.deepseek_available = False
-                self._update_fallback_state()
+                # ЕДНА ЗАСЕЧКА НЕ ИЗКЛЮЧВА РАБОТНИКА ЗА ЦЯЛАТА СЕСИЯ.
+                #
+                # Досега първият отказ вдигаше `deepseek_available = False` до
+                # края на живота на инстанцията и всичко следващо мълчаливо
+                # минаваше през контрольора — 5 до 25 пъти по-скъп модел, без
+                # това да личи никъде в изхода.  Проба 12.08.2026: OpenRouter
+                # беше без кредит и 18 прогона, поискани от шест различни
+                # евтини работника, ги обслужи Opus.  $3.92 и шест еднакви
+                # резултата, представени като сравнение между модели.
+                #
+                # Резервният път остава — но за ЕДНА заявка.  Работникът се
+                # изключва чак след `_WORKER_FAILURES_BEFORE_DISABLE` поредни
+                # провала, тоест когато засечката наистина е системна (изтекъл
+                # ключ, свършил кредит), а не преходна.
+                self._worker_failures += 1
+                logger.warning(
+                    "Работникът %s се провали (%s) — заявката минава през "
+                    "контрольора (%d-и пореден провал от %d, след които "
+                    "работникът се изключва за сесията).",
+                    MODEL_WORKER, exc, self._worker_failures,
+                    _WORKER_FAILURES_BEFORE_DISABLE)
+                if self._worker_failures >= _WORKER_FAILURES_BEFORE_DISABLE:
+                    logger.error(
+                        "Работникът %s се изключва за сесията след %d поредни "
+                        "провала — ОТСЕГА ВСИЧКО минава през контрольора, "
+                        "който е чувствително по-скъп.",
+                        MODEL_WORKER, self._worker_failures)
+                    self.deepseek_available = False
+                    self._update_fallback_state()
 
         # Fallback to Anthropic
         if self.anthropic_available:
@@ -473,6 +522,41 @@ class AIRouter:
                 u.prompt_tokens if u else 0, u.completion_tokens if u else 0,
                 getattr(ch, "finish_reason", None))
 
+    def _request_with_empty_retry(self, client: Any, kw: dict) -> tuple:
+        """Заявка, която повтаря ПРАЗЕН отговор — това е засечка, не резултат.
+
+        Серията от 13.08.2026: 5 от 40 прогона се върнаха за 2 секунди със
+        СЕДЕМ изходни токена.  Доставчикът отговаря „успешно" с празно тяло,
+        затова нищо не гърми — парсването после се проваля и прогонът се
+        отчита като лоша генерация.  Пет процента загубени прогони, дължащи се
+        на чужда инфраструктура, влизаха в статистиката за качеството на
+        модела.
+
+        Токените на изхвърлените опити СЕ ЗАПИСВАТ: входът е платен, дори
+        отговорът да е празен, и сметката трябва да го показва.
+        """
+        last: tuple | None = None
+        for attempt in range(1, _EMPTY_RETRIES + 2):
+            content, tokens_in, tokens_out, finish_reason = self._openai_request(
+                client, kw, kw["max_tokens"])
+            last = (content, tokens_in, tokens_out, finish_reason)
+            if (content or "").strip():
+                return last
+
+            self._log_usage(MODEL_WORKER, tokens_in, tokens_out, "chat-празен")
+            if attempt > _EMPTY_RETRIES:
+                raise RuntimeError(
+                    f"{MODEL_WORKER} върна празен отговор {attempt} пъти "
+                    f"({tokens_out} изходни токена, finish_reason="
+                    f"{finish_reason}) — засечка на доставчика, не резултат.")
+            logger.warning(
+                "Отговорът на %s е ПРАЗЕН (%d изходни токена, "
+                "finish_reason=%s) — опит %d от %d.",
+                MODEL_WORKER, tokens_out, finish_reason, attempt,
+                _EMPTY_RETRIES + 1)
+            time.sleep(2 * attempt)
+        return last                                     # pragma: no cover
+
     def _chat_deepseek(self, messages: list[dict], system_prompt: str,
                        max_tokens: int = _MAX_TOKENS_CHAT,
                        response_schema: dict | None = None) -> dict:
@@ -515,7 +599,7 @@ class AIRouter:
         result, used_cap = None, max_tokens
         for i, kw in enumerate(attempts):
             try:
-                result = self._openai_request(client, kw, kw["max_tokens"])
+                result = self._request_with_empty_retry(client, kw)
                 used_cap = kw["max_tokens"]
                 break
             except Exception as exc:

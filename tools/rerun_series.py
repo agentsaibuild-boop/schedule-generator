@@ -37,6 +37,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Конзолата на Windows е cp1252 по подразбиране, а целият изход е на кирилица —
+# без това серията пада на първия print, преди да е пуснала един прогон.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -189,6 +194,18 @@ def _metrics(run: int, result: dict, elapsed: float,
     }
 
 
+def _diagnosis_only(message: str) -> str:
+    """Диагнозата от предупреждението, БЕЗ суровия отговор на модела.
+
+    Предупреждението за невалиден JSON носи и парчето от отговора, а в него
+    влизат имена на обекта и улиците.  Телеметрията отива в git — тоест
+    прихващачът щеше да изнесе клиентски данни, ако pre-commit проверката не
+    беше го хванала (13.08.2026).  Оставяме само първия ред до началото на
+    полезния товар.
+    """
+    return message.split("\n", 1)[0].split("{", 1)[0].strip()[:200]
+
+
 def _amounts(entries: Any) -> list[dict]:
     """{ref: {required, planned, packages}} → списък с числата, запазени."""
     if not isinstance(entries, dict):
@@ -213,9 +230,28 @@ def _run_series(prep: dict, number: int, label: str,
     os.environ["PACKAGE_REPAIR_ROUNDS"] = str(repair_rounds)
     segments = prep["segments"] if use_segments else None
 
+    router = prep["ai"].router
+
+    # ДОСТИГНА ЛИ ПРОГОНЪТ РАБОТНИКА.  Проба 13.08.2026: интернетът прекъсна по
+    # средата на измерване и шест прогона се записаха като провал на модела —
+    # с нула токени и по 5 секунди.  Без токените в телеметрията мрежово
+    # прекъсване е неразличимо от провалена генерация, а точно това смесване
+    # одиторът вече ни посочи веднъж.  Затова всеки запис носи и токените.
+    captured: list[str] = []
+
+    class _RouterWarnings(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.levelno >= logging.WARNING:
+                captured.append(_diagnosis_only(record.getMessage()))
+
+    sniffer = _RouterWarnings()
+    logging.getLogger("src.ai_router").addHandler(sniffer)
+
     records: list[dict] = []
     for run in range(1, runs + 1):
         started = time.monotonic()
+        captured.clear()
+        usage_mark = len(router.usage_log)
         # ПОВТОРЕН ОПИТ САМО ПРИ ТЕХНИЧЕСКИ ПРОВАЛ (безплатните модели се
         # ограничават от споделен пул и връщат 429).  Това НЕ е повтаряне на
         # лош резултат — прогон, който е дал график, се записва какъвто е.
@@ -233,14 +269,24 @@ def _run_series(prep: dict, number: int, label: str,
                                number, run, attempt, exc)
                 time.sleep(20 * attempt)
 
+        calls = list(router.usage_log[usage_mark:])
+        usage = {
+            "tokens_in": sum(int(c.get("tokens_in") or 0) for c in calls),
+            "tokens_out": sum(int(c.get("tokens_out") or 0) for c in calls),
+            "calls": len(calls),
+            "reached_worker": bool(calls),
+            "router_warnings": captured[-3:],
+        }
+
         if result is None:
             records.append({"run": run, "status": "error", "exportable": False,
-                            "error": str(failure), "cost": 0.0,
+                            "error": str(failure), "cost": 0.0, **usage,
                             "seconds": round(time.monotonic() - started, 1)})
             continue
 
         record = _metrics(run, result, time.monotonic() - started,
                           prep["boq_index"])
+        record.update(usage)
         records.append(record)
         mark = "✓" if record["clean"] else ("~" if record["exportable"] else "·")
         print(f"    {mark} прогон {run:2d}: {record['status']:20s} "
@@ -248,7 +294,9 @@ def _run_series(prep: dict, number: int, label: str,
               f"крит={record['critical']:3d} превиш={record['over']} "
               f"непокрити={record['uncovered']} "
               f"структура={'ок' if record['structural_ok'] else 'НЕ'} "
+              f"ток={record['tokens_in']}/{record['tokens_out']} "
               f"${record['cost']:.4f} {record['seconds']:.0f}s")
+    logging.getLogger("src.ai_router").removeHandler(sniffer)
     return records
 
 
