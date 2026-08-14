@@ -541,6 +541,7 @@ class AIProcessor:
         locations: list[str] | None = None,
         segments: list[dict] | None = None,
         progress_callback: Any | None = None,
+        feedback: str = "",
     ) -> dict:
         """Генерирай ПАКЕТИ (физически участъци), после ги разгъни в задачи.
 
@@ -552,10 +553,17 @@ class AIProcessor:
             пакети → Σ=КСС гейт → фронтове → технологични вериги → WBS
                    → кръстосани зависимости → дати → CPM
 
+        Args:
+            feedback: Какво се провали в ПРЕДИШНИЯ опит (ако е имало такъв).
+                Влиза в питането за геометрията: иначе всеки следващ опит е
+                ново хвърляне на зара, при което моделът не научава, че
+                предишното разделяне е оставило редове непокрити.
+
         Returns:
             {status, tasks, packages, conservation, expansion_warnings,
-             parse_errors, cost, model} — `status='error'` при непреодолим
-            проблем, `'needs_human_review'` при нарушен инвариант.
+             parse_errors, partition_diagnosis, cost, model} —
+            `status='error'` при непреодолим проблем, `'needs_human_review'`
+            при нарушен инвариант.
         """
         from src.provenance import format_boq_for_prompt
         from src.schedule_builder import ScheduleBuilder
@@ -568,6 +576,7 @@ class AIProcessor:
                                       link_contract_phases,
                                       merge_restoration_zones,
                                       normalize_over_allocation, packages_from_ai,
+                                      partition_diagnosis,
                                       reroute_uncoverable_items)
 
         if not self.router:
@@ -622,11 +631,22 @@ class AIProcessor:
                   "извън списъка. Ако една позиция от КСС минава през няколко\n"
                   "от тези отсечки, раздели количеството между тях.\n")
 
+        # ОБРАТНА ВРЪЗКА ОТ ПРЕДИШНИЯ ОПИТ (жив прогон 14.08.2026): четири
+        # опита дадоха 36, 28, 11 и 33 участъка за един и същ обект, защото
+        # всеки започваше от нулата и не научаваше нищо от провала на предния.
+        feedback_section = ""
+        if (feedback or "").strip():
+            feedback_section = (
+                "\n\n⚠️ ПРЕДИШНИЯТ ОПИТ ЗА ТОЗИ ОБЕКТ НЕ ДАДЕ ГОДЕН ГРАФИК:\n"
+                f"{feedback.strip()}\n"
+                "Поправи точно това — не започвай от нулата с друга едрина.\n")
+
         messages = [{
             "role": "user",
             "content": (
                 "Раздели обекта на ФИЗИЧЕСКИ РАБОТНИ УЧАСТЪЦИ (пакети).\n\n"
                 f"{safe_analysis}\n"
+                f"{feedback_section}"
                 f"{locations_section}"
                 f"{segments_section}\n"
                 f"{format_boq_for_prompt(boq_index)}\n\n"
@@ -667,8 +687,10 @@ class AIProcessor:
             ),
         }]
 
+        system_prompt = self.build_system_prompt(query=analysis_text)
+        искане = messages[0]["content"]
         result = self.router.chat(
-            messages, self.build_system_prompt(query=analysis_text),
+            messages, system_prompt,
             max_tokens=gen_max_tokens(),
             response_schema=build_packages_response_schema())
 
@@ -696,6 +718,46 @@ class AIProcessor:
                     "message": "Моделът не върна използваеми пакети.",
                     "parse_errors": parse_errors}
 
+        cost = result.get("cost", 0.0)
+
+        # ГЕЙТ ЗА САМОТО РАЗДЕЛЯНЕ (жив прогон 14.08.2026).  Досега приемахме
+        # каквато и геометрия да върне моделът и разбирахме, че е негодна, чак
+        # след като целият график е построен — 11 „участъка" по един на
+        # ДИАМЕТЪР минаваха за разделяне на обекта.  Тук се проверява
+        # СВОЙСТВОТО (участък = трасе между два възела), не броят, и негодното
+        # разделяне се пита ВЕДНЪЖ повече, с казано какво не е наред.
+        диагноза = partition_diagnosis(packages, boq_index, segments)
+        for _ in range(max(int(os.getenv("PARTITION_RETRIES", "1") or 0), 0)):
+            if диагноза["ok"]:
+                break
+            _prog(f"{len(packages)} участъка, но разделянето не е по трасета "
+                  f"({диагноза['signals'][0]}) — питам още веднъж.")
+            повторно = self.router.chat(
+                [{"role": "user",
+                  "content": f"{искане}\n\n{диагноза['prompt_note']}"}],
+                system_prompt, max_tokens=gen_max_tokens(),
+                response_schema=build_packages_response_schema())
+            if повторно.get("error") or повторно.get("truncated"):
+                break
+            cost += повторно.get("cost", 0.0)
+            кандидат, кандидат_грешки = packages_from_ai(
+                AIRouter.parse_json_response(повторно["content"]),
+                boq_index=boq_index, chains=chains, segments=segments,
+                spatial_source=spatial_source)
+            if not кандидат:
+                break
+            кандидат_диагноза = partition_diagnosis(кандидат, boq_index, segments)
+            # По-лошо второ питане НЕ заменя първото: целта е да се махне
+            # израждането, а не да се обикаля из различни едрини.
+            if not self._better_partition(кандидат_диагноза, диагноза):
+                break
+            packages, parse_errors, диагноза = (
+                кандидат, кандидат_грешки, кандидат_диагноза)
+
+        if not диагноза["ok"]:
+            for сигнал in диагноза["signals"]:
+                parse_errors.append(f"разделяне: {сигнал}")
+
         _prog(f"{len(packages)} участъка. Проверявам разпределението срещу КСС...")
         conservation = check_conservation(packages, boq_index)
 
@@ -704,7 +766,6 @@ class AIProcessor:
         # опаковано като пакети.  „Разпредели всички редове" в промпта не е
         # проверимо; повторното питане САМО за пропуснатите е — и се спира след
         # таван, за да няма безкраен цикъл.
-        cost = result.get("cost", 0.0)
         rounds = int(os.getenv("PACKAGE_REPAIR_ROUNDS", "2"))
         for attempt in range(1, max(rounds, 0) + 1):
             missing = list(conservation["missing"])
@@ -847,6 +908,9 @@ class AIProcessor:
             "unplaced": expansion.unplaced,
             "critical_count": cpm["critical_count"],
             "duration_report": duration_report,
+            # КАКВО е разделянето, а не само колко са участъците: без това
+            # „36 участъка" и „11 участъка" изглеждат еднакво отвън.
+            "partition_diagnosis": диагноза,
             # Едновременността е отделен въпрос от продължителността: еталонът
             # държи медиана 7 активни задачи, ние — 3 (одит 13.08.2026).
             "concurrency": concurrency_report(tasks),
@@ -861,6 +925,20 @@ class AIProcessor:
             "cost": cost,
             "model": result.get("model", ""),
         }
+
+    @staticmethod
+    def _better_partition(кандидат: dict, досегашно: dict) -> bool:
+        """Дали второто разделяне е по-добро от първото — по правило, не на око.
+
+        По-малко нарушени признака печели.  При равен брой печели ПО-СИТНОТО
+        разделяне: еталонният човешки график има 46 канализационни участъка, а
+        нашето израждане е точно обратното — един пакет на диаметър.  Равното
+        във всичко остава при първото (не се въртим между едрини).
+        """
+        а, б = len(кандидат.get("signals") or []), len(досегашно.get("signals") or [])
+        if а != б:
+            return а < б
+        return int(кандидат.get("packages", 0)) > int(досегашно.get("packages", 0))
 
     @staticmethod
     def _network_from_items(items: Any, row_by_ref: dict) -> str:
@@ -1009,6 +1087,7 @@ class AIProcessor:
         locations: list[str] | None = None,
         segments: list[dict] | None = None,
         progress_callback: Any | None = None,
+        feedback: str = "",
     ) -> dict:
         """Пакетната генерация, приведена към СТАНДАРТНИЯ резултат на pipeline-а.
 
@@ -1025,7 +1104,8 @@ class AIProcessor:
 
         result = self.generate_packages(
             analysis, boq_index, num_teams=num_teams, locations=locations,
-            segments=segments, progress_callback=progress_callback)
+            segments=segments, progress_callback=progress_callback,
+            feedback=feedback)
         if result["status"] == "error":
             return {"status": "error", "message": result.get("message", ""),
                     "packaged": True, "parse_errors": result.get("parse_errors", [])}
@@ -1074,6 +1154,7 @@ class AIProcessor:
             "schedule": {"tasks": tasks},
             "packages": result["packages"],
             "conservation": result["conservation"],
+            "partition_diagnosis": result.get("partition_diagnosis", {}),
             "parse_errors": result.get("parse_errors", []),
             "unplaced": result.get("unplaced", []),
             "critical_count": result.get("critical_count", 0),

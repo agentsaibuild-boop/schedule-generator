@@ -15,6 +15,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from src.ai_router import MODEL_CONTROLLER
+from src.deadline import DeadlineExceeded, attempt_timeout, run_with_deadline
 from src.prompt_safety import format_injection_warnings
 from src.self_evolution import DISABLED_MESSAGE as EVOLUTION_DISABLED_MESSAGE
 from src.self_evolution import is_enabled as evolution_enabled
@@ -28,6 +29,11 @@ if TYPE_CHECKING:
     from src.self_evolution import SelfEvolution
 
 logger = logging.getLogger(__name__)
+
+
+def _срок_с_думи(секунди: int) -> str:
+    """„10 мин" / „45 сек" — за съобщението към човека пред екрана."""
+    return f"{секунди // 60} мин" if секунди >= 60 else f"{секунди} сек"
 
 # ---------------------------------------------------------------------------
 # AI Intent Detection — prompt template
@@ -502,15 +508,30 @@ class ChatHandler:
         # какъвто е — това не е търсене на по-хубав изход, а довършване на
         # прекъснат опит.
         опити = max(int(os.getenv("GENERATION_ATTEMPTS", "4")), 1)
+        срок = attempt_timeout()
         последен = None
+        обратна_връзка = ""      # какво се провали в ПРЕДИШНИЯ опит
         for опит in range(1, опити + 1):
             ако_повторен = f" (опит {опит} от {опити})" if опит > 1 else ""
             progress(f"Генерирам по физически участъци (пакети){ако_повторен}...")
             try:
-                result = self.ai.generate_schedule_packaged(
-                    analysis, boq_index, num_teams=max(int(num_teams or 1), 1),
-                    locations=locations, segments=segments,
-                    progress_callback=progress)
+                # ТВЪРД СРОК НА ЕДИН ОПИТ (жив прогон 14.08.2026): опитът виси с
+                # часове при увиснал доставчик и заключва интерфейса.  Таванът на
+                # едно HTTP извикване не е таван на опита — един опит е десетки
+                # извиквания, а стрийминг, който капе по токен, не гърми никога.
+                result = run_with_deadline(
+                    lambda напредък, _вр=обратна_връзка: self.ai.generate_schedule_packaged(
+                        analysis, boq_index,
+                        num_teams=max(int(num_teams or 1), 1),
+                        locations=locations, segments=segments,
+                        progress_callback=напредък, feedback=_вр),
+                    срок, progress=progress, name=f"пакетна генерация, опит {опит}")
+            except DeadlineExceeded:
+                logger.warning("Пакетната генерация, опит %d: изтече срокът от "
+                               "%d сек", опит, срок)
+                края = "прекъсвам и повтарям." if опит < опити else "прекъсвам."
+                progress(f"Опит {опит}: няма отговор {_срок_с_думи(срок)} — {края}")
+                continue
             except Exception as exc:                   # noqa: BLE001
                 logger.warning("Пакетната генерация, опит %d: %s", опит, exc,
                                exc_info=True)
@@ -533,6 +554,11 @@ class ChatHandler:
             причина = self._why_not_exportable(result)
             logger.info("Опит %d не даде износим график (%s) — повтарям",
                         опит, причина)
+            # СЛЕДВАЩИЯТ ОПИТ НАУЧАВА ОТ ТОЗИ (жив прогон 14.08.2026): четири
+            # слепи опита дадоха 36, 28, 11 и 33 участъка за един и същ обект.
+            # Всеки започваше от нулата и наново избираше едрината на
+            # разделянето, вместо да поправи каквото не е достигнало.
+            обратна_връзка = self._feedback_for_next_attempt(result, опит)
             if опит < опити:
                 # Причината е на екрана, не само в лога: иначе човекът гледа
                 # „генерирам..." по няколко минути и не знае какво не достига.
@@ -563,6 +589,43 @@ class ChatHandler:
         if блокери and not причини:
             причини.append(str(блокери[0])[:80])
         return "; ".join(причини) or str(result.get("status") or "не мина проверката")
+
+    @staticmethod
+    def _feedback_for_next_attempt(result: dict, опит: int) -> str:
+        """Какво да знае СЛЕДВАЩИЯТ опит за провала на този — с редовете.
+
+        Разликата с `_why_not_exportable` е адресатът: онова е изречение за
+        човека, това е указание за модела.  Затова тук има РЕФЕРЕНЦИИ (кой ред
+        е останал непокрит, кой е разпределен двойно) — те са проверими и
+        насочват към поправка, вместо към ново хвърляне на зара.
+        """
+        редове: list[str] = []
+        участъци = len(result.get("packages") or [])
+        if участъци:
+            редове.append(f"Опит {опит} раздели обекта на {участъци} участъка.")
+
+        диагноза = result.get("partition_diagnosis") or {}
+        редове.extend(f"Разделянето: {s}" for s in (диагноза.get("signals") or []))
+
+        непокрити = (result.get("citation_report") or {}).get("uncovered") or []
+        if непокрити:
+            редове.append(
+                f"{len(непокрити)} реда от КСС останаха БЕЗ покриваща дейност — "
+                f"напр. {', '.join(map(str, непокрити[:5]))}. Тези количества "
+                "трябва да попаднат в участък, чиято работа ги изпълнява.")
+
+        запазване = result.get("conservation") or {}
+        if запазване and not запазване.get("ok"):
+            for ключ, дума in (("missing", "неразпределени"),
+                               ("over", "разпределени в повече от нужното"),
+                               ("short", "разпределени под количеството в КСС")):
+                редове_кл = запазване.get(ключ) or []
+                if редове_кл:
+                    примери = list(редове_кл)[:5]
+                    редове.append(
+                        f"{len(редове_кл)} реда {дума} — напр. "
+                        f"{', '.join(map(str, примери))}.")
+        return "\n".join(редове)
 
     def _boq_index(self) -> list:
         """Индексът с количествени редове — за цитиране в промпта.
@@ -721,6 +784,29 @@ class ChatHandler:
         времето, за да прецени дали така е приемливо на терен.
         """
         lines: list[str] = []
+
+        # КАКВО е разделянето на обекта, а не само колко участъка са станали:
+        # „36 участъка" и „11 участъка" изглеждат еднакво на екрана, а второто
+        # е групиране по диаметър (жив прогон 14.08.2026).
+        разделяне = gen_result.get("partition_diagnosis") or {}
+        if разделяне.get("packages"):
+            от_чертежа = разделяне.get("drawn_segments") or 0
+            потвърдено = (f", {от_чертежа} отсечки от чертежа" if от_чертежа
+                          else ", без отсечки от чертеж")
+            if разделяне.get("ok"):
+                lines.append(
+                    f"\n🗺️ **Разделяне на обекта:** {разделяне['packages']} "
+                    f"участъка ({разделяне.get('linear_packages', 0)} мрежови"
+                    f"{потвърдено})."
+                )
+            else:
+                причини = "; ".join(разделяне.get("signals") or [])
+                lines.append(
+                    f"\n🗺️ **Разделянето не е по трасета:** "
+                    f"{разделяне['packages']} участъка{потвърдено} — {причини}. "
+                    "Графикът е верен по количества, но едрината му не отговаря "
+                    "на обекта."
+                )
 
         rounds = gen_result.get("repair_rounds") or 0
         if rounds:
@@ -1167,22 +1253,42 @@ class ChatHandler:
 
         if _packaged is not None:
             gen_result = _packaged
-        elif [s for s in _sheets if s[1]]:
-            _progress(f"Генерирам по части (staging) — {len(_sheets)} част(и) от КСС...")
-            gen_result = self.ai.generate_schedule_staged(
-                analysis, project_type, _progress,
-                all_text=all_text, boq_index=_boq,
-                extra_locations=situation_locations or None,
-                sequence_constraints=project_context.get("sequence_constraints") if project_context else None,
-            )
         else:
-            gen_result = self.ai.generate_schedule(
-                analysis, project_type, _progress,
-                all_text=all_text,
-                extra_locations=situation_locations or None,
-                sequence_constraints=project_context.get("sequence_constraints") if project_context else None,
-                boq_index=_boq,
-            )
+            # Резервните пътища минават през СЪЩИЯ твърд срок: увисналият
+            # доставчик не пита по кой път е тръгнала генерацията.
+            _срок = attempt_timeout()
+            _последователности = (project_context.get("sequence_constraints")
+                                  if project_context else None)
+            if [s for s in _sheets if s[1]]:
+                _progress(f"Генерирам по части (staging) — {len(_sheets)} част(и) от КСС...")
+
+                def _работа(напредък, *, _seq=_последователности):
+                    return self.ai.generate_schedule_staged(
+                        analysis, project_type, напредък,
+                        all_text=all_text, boq_index=_boq,
+                        extra_locations=situation_locations or None,
+                        sequence_constraints=_seq,
+                    )
+            else:
+                def _работа(напредък, *, _seq=_последователности):
+                    return self.ai.generate_schedule(
+                        analysis, project_type, напредък,
+                        all_text=all_text,
+                        extra_locations=situation_locations or None,
+                        sequence_constraints=_seq,
+                        boq_index=_boq,
+                    )
+
+            try:
+                gen_result = run_with_deadline(
+                    _работа, _срок, progress=_progress, name="генерация")
+            except DeadlineExceeded:
+                logger.warning("Генерацията изтече срока от %d сек", _срок)
+                _обяснение = (
+                    f"генерацията не завърши за {_срок_с_думи(_срок)} и беше "
+                    "прекъсната — доставчикът не отговаря. Опитайте отново.")
+                gen_result = {"status": "error", "error": _обяснение,
+                              "message": _обяснение}
 
         # Build response
         status = gen_result.get("status", "error")
