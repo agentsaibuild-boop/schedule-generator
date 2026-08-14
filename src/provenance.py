@@ -636,6 +636,25 @@ def _is_production_task(task: dict) -> bool:
     return True
 
 
+def _fits_in_row(claimed: float, actual: float) -> bool:
+    """Побира ли се вече заявеното количество в цитирания ред.
+
+    ЕДИНСТВЕНОТО правило за „разделен ред" в целия модул.  Един ред от КСС
+    нарочно се дели между фронтовете (7761 m² бордюри → 1500 + 3000 + 600 + …),
+    затова ЧАСТ от реда е нормална, а дефект е чак СБОР, който надхвърля реда.
+
+    Одит 14.08.2026: правилото беше написано ТРИ пъти на три места и се
+    поправяше поотделно — `verify_citations` го научи, `annotate_schedule`
+    остана със старото „количеството трябва да е равно на целия ред" и пак
+    обяви коректния график за несверен.  Затова тук е едно място.
+
+    Args:
+        claimed: Сборът на заявеното до момента, включително текущата част.
+        actual: Количеството на реда в КСС.
+    """
+    return claimed - actual <= abs(actual) * _QUANTITY_TOLERANCE
+
+
 def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
     """Провери цитатите, които моделът е дал за количествата.
 
@@ -658,7 +677,9 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
     counts = {CITE_VERIFIED: 0, CITE_MISMATCH: 0, CITE_UNKNOWN: 0, CITE_UNCITED: 0}
     problems: list[dict] = []
     verified_refs: list[str] = []      # одит v12: ДОКАЗАНО покрити редове
-    _seen_verified: set = set()        # одит v14: за хващане на дублирани задачи
+    # Одит v14: за хващане на дублирани задачи.  СБОР по (ред, клас), не
+    # присъствие — вж. коментара при самата проверка по-долу.
+    _claimed: dict[tuple, float] = {}
     human = 0
 
     for task in schedule:
@@ -694,7 +715,7 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
             if actual is None:
                 check = CitationCheck(CITE_MISMATCH, ref, quantity, None,
                                       "редът няма количество")
-            elif quantity - actual > abs(actual) * _QUANTITY_TOLERANCE:
+            elif not _fits_in_row(quantity, actual):
                 # НАД реда е дефект; ПОД реда е разделяне.
                 #
                 # Жив прогон 14.08.2026: 115 от 134 цитата излязоха „не
@@ -727,15 +748,26 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
                     # проверката.  Различните ДЕЙНОСТИ на един ред (изкоп vs
                     # полагане — различен клас) остават легитимни.  Неразпознат
                     # клас пада към нормализираното име, за да има все пак защита.
+                    #
+                    # Жив прогон 14.08.2026, ВТОРАТА половина на същия дефект:
+                    # поправката отвори „по-малко от реда е разделяне", но тук
+                    # ВСЯКА следваща част пак падаше за дубликат — един ред,
+                    # разделен на четири фронта, даваше 1 verified и 3
+                    # „дублирани".  Затова се брои СБОРЪТ по (ред, клас), както
+                    # прави и `analyze_boq_coverage`: части, чийто сбор се
+                    # побира в реда, са РАЗДЕЛЯНЕ; дублиране е чак когато сборът
+                    # НАДХВЪРЛИ реда (две задачи по 100 на ред от 100).
                     cls = activity_class(task) or str(task.get("name", "")).strip().lower()
                     dup_key = (ref, cls)
-                    if dup_key in _seen_verified:
+                    claimed = _claimed.get(dup_key, 0.0) + quantity
+                    if not _fits_in_row(claimed, actual):
                         check = CitationCheck(
                             CITE_MISMATCH, ref, quantity, actual,
-                            f"дублирана дейност (клас '{cls}') — редът вече е зает "
-                            "от същия вид дейност")
+                            f"дублирана работа (клас '{cls}') — сборът на "
+                            f"дейностите от този клас става {claimed:g} при "
+                            f"{actual:g} в реда")
                     else:
-                        _seen_verified.add(dup_key)
+                        _claimed[dup_key] = claimed
                         check = CitationCheck(CITE_VERIFIED, ref, quantity, actual)
 
         counts[check.status] += 1
@@ -966,7 +998,8 @@ class Match(NamedTuple):
 
     row: QuantityRow
     score: float
-    quantity_matches: bool
+    quantity_matches: bool     # числото е ЦЯЛОТО количество на реда
+    is_part: bool = False      # числото е ЧАСТ от реда (разделен между фронтове)
 
 
 def find_source(
@@ -979,8 +1012,12 @@ def find_source(
     """Намери реда, от който най-вероятно идва тази стойност.
 
     Съвпадението по КОЛИЧЕСТВО тежи повече от съвпадението по описание —
-    числото е по-специфично от думите.  Задача без съвпадащо количество не
-    се сверява, дори името да съвпада.
+    числото е по-специфично от думите.
+
+    ЧАСТ от ред също е съответствие (`is_part`), защото един ред от КСС се
+    дели между фронтовете.  Частта обаче е ПО-СЛАБО доказателство от точното
+    число: тя не може да спаси слабо име, а тежи по-малко при избора на ред.
+    Точното съвпадение остава по-силно, когато и двете са възможни.
 
     Returns:
         `Match`, или None ако нищо не отговаря достатъчно.
@@ -993,21 +1030,27 @@ def find_source(
     for row in index:
         name_score = similarity(description, row.description)
         qty_ok = False
+        is_part = False
 
         if quantity is not None and row.quantity:
             delta = abs(row.quantity - quantity) / max(abs(row.quantity), 1e-9)
             qty_ok = delta <= _QUANTITY_TOLERANCE
+            # Част от реда — но САМО при достатъчно близко име.  Иначе всяко
+            # по-малко число би „намерило" произход в произволен по-голям ред
+            # със същата мярка (777 бр. срещу ред от 1000 бр.).
+            if not qty_ok and 0 < quantity < row.quantity:
+                is_part = name_score >= _MIN_NAME_SIMILARITY
 
         if unit and row.unit and unit.lower() != row.unit.lower():
             # Различна мярка — м3 изкоп не е м тръба, дори имената да си приличат.
             continue
 
-        score = name_score + (0.5 if qty_ok else 0.0)
+        score = name_score + (0.5 if qty_ok else (0.25 if is_part else 0.0))
         if name_score < _MIN_NAME_SIMILARITY and not qty_ok:
             continue
 
         if best is None or score > best.score:
-            best = Match(row, round(score, 3), qty_ok)
+            best = Match(row, round(score, 3), qty_ok, is_part)
 
     return best
 
@@ -1200,12 +1243,20 @@ def annotate_schedule(schedule: list[dict], index: list[QuantityRow]) -> dict:
         schedule: Списък задачи (МУТИРА се на място).
         index: Индексът от `build_quantity_index`.
 
+    Разделен ред се сверява по СБОРА, не по отделната част — същото правило
+    като при `verify_citations` (`_fits_in_row`).  Жив прогон 14.08.2026: тук
+    се искаше числото да е равно на ЦЕЛИЯ ред, затова всяка част от разделен
+    ред падаше за несверена и коректен график изглеждаше недоказан.  Сборът
+    пази и обратното — две задачи по 420 на ред от 420 не са две покрития.
+
     Returns:
         {verified, unverified, total, details}
     """
     verified = 0
     unverified = 0
     details: list[dict] = []
+    #: Сбор на заявеното по (ред, клас дейност) — както в `verify_citations`.
+    claimed: dict[tuple, float] = {}
 
     for task in schedule:
         if not isinstance(task, dict):
@@ -1219,12 +1270,26 @@ def annotate_schedule(schedule: list[dict], index: list[QuantityRow]) -> dict:
             task.get("name", ""), quantity, index, unit=str(task.get("unit", ""))
         )
 
-        if match and match.quantity_matches:
+        note = None
+        ok = False
+        if match and (match.quantity_matches or match.is_part):
+            cls = activity_class(task) or str(task.get("name", "")).strip().lower()
+            key = (match.row.ref, cls)
+            total = claimed.get(key, 0.0) + quantity
+            if match.row.quantity and not _fits_in_row(total, match.row.quantity):
+                note = (f"сборът на дейностите от клас '{cls}' става {total:g} "
+                        f"при {match.row.quantity:g} в реда")
+            else:
+                claimed[key] = total
+                ok = True
+
+        if ok and match:
             task["quantity_provenance"] = {
                 "status": STATUS_EXTRACTED,
                 "source": match.row.source.describe(),
                 "matched_description": match.row.description,
                 "score": match.score,
+                "part_of_row": bool(match.is_part),
             }
             verified += 1
         else:
@@ -1240,6 +1305,7 @@ def annotate_schedule(schedule: list[dict], index: list[QuantityRow]) -> dict:
                 "name": task.get("name"),
                 "quantity": quantity,
                 "closest": match.row.description if match else None,
+                "note": note,
             })
 
     return {

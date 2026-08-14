@@ -221,10 +221,70 @@ def test_tasks_without_quantity_are_ignored(index):
 
 
 def test_unverified_details_name_the_closest_row(index):
+    """Количество НАД реда е несверено — и казва кой ред е бил най-близкият."""
     schedule = [{"id": "T2", "name": "Изкоп за тръбна траншея DN110",
-                 "quantity": 500, "unit": "м3"}]
+                 "quantity": 1500, "unit": "м3"}]
     report = annotate_schedule(schedule, index)
     assert report["details"][0]["closest"] is not None
+
+
+# ===================================================================
+# Разделен ред (жив прогон 14.08.2026)
+#
+# Един ред от КСС се дели между фронтовете.  Сверяването по СБОР е общо за
+# двете реализации — цитатната (`verify_citations`) и тази по сходство.
+# ===================================================================
+
+def test_a_part_of_a_split_row_is_verified(index):
+    """500 м³ от 892 м³ изкоп е част от разделен ред, не несъответствие."""
+    schedule = [{"id": "T2", "name": "Изкоп за тръбна траншея DN110",
+                 "quantity": 500, "unit": "м3"}]
+    annotate_schedule(schedule, index)
+    assert schedule[0]["quantity_provenance"]["status"] == STATUS_EXTRACTED
+    assert schedule[0]["quantity_provenance"]["part_of_row"] is True
+
+
+def test_all_parts_of_a_split_row_are_verified(index):
+    """Четирите фронта на един ред дават 4 сверени, не 1 сверен и 3 паднали."""
+    schedule = [{"id": f"T{i}", "name": "Изкоп за тръбна траншея DN110",
+                 "quantity": q, "unit": "м3"}
+                for i, q in enumerate([300, 292, 200, 100], 1)]
+    report = annotate_schedule(schedule, index)
+    assert report["verified"] == 4
+    assert report["unverified"] == 0
+
+
+def test_parts_summing_over_the_row_stop_being_verified(index):
+    """Сборът е защитата: 892 м³ не могат да се изкопаят два пъти по 800."""
+    schedule = [{"id": f"T{i}", "name": "Изкоп за тръбна траншея DN110",
+                 "quantity": 800, "unit": "м3"} for i in (1, 2)]
+    report = annotate_schedule(schedule, index)
+    assert report["verified"] == 1
+    assert report["unverified"] == 1
+    assert "892" in report["details"][0]["note"]
+
+
+def test_a_smaller_number_with_an_unrelated_name_is_not_a_part(index):
+    """Частта не бива да спасява слабо име — иначе всяко по-малко число минава."""
+    schedule = [{"id": "X1", "name": "Мобилизация на площадката",
+                 "quantity": 3, "unit": "бр."}]
+    report = annotate_schedule(schedule, index)
+    assert report["unverified"] == 1
+
+
+def test_both_implementations_agree_on_a_split_row(index):
+    """Двете реализации не бива пак да се разминат — това беше дефектът."""
+    from src.provenance import verify_citations
+
+    ref = next(r for r in index if r.quantity == 892).ref
+    цитирани = [{"id": f"C{i}", "name": "Изкоп за тръбна траншея DN110",
+                 "quantity": q, "unit": "м3", "source_ref": ref}
+                for i, q in enumerate([300, 292, 200, 100], 1)]
+    по_сходство = [{k: v for k, v in t.items() if k != "source_ref"}
+                   for t in цитирани]
+
+    assert verify_citations(цитирани, index)["verified"] == \
+        annotate_schedule(по_сходство, index)["verified"] == 4
 
 
 # ===================================================================
@@ -1049,3 +1109,37 @@ class TestSplitQuantityIsNotAMismatch:
         schedule = [{"id": "T1", "name": "X", "length_m": 10_000,
                      "source_ref": "КСС.xlsx!Водопровод!4"}]
         assert verify_citations(schedule, index)["mismatch"] == 1
+
+    def test_all_parts_of_one_row_are_verified(self, index):
+        """ВТОРАТА половина на дефекта (жив прогон 14.08.2026).
+
+        Първата поправка отвори „под реда е разделяне", но проверката за
+        ДУБЛИКАТ гледаше само дали (ред, клас) вече е срещан — тоест всяка
+        част СЛЕД първата пак излизаше несъвпадение.  Един ред от 420 м,
+        разделен на четири участъка, даваше 1 verified и 3 „дублирани".
+        """
+        части = [100, 150, 120, 50]                   # сборът е точно 420
+        schedule = [{"id": f"T{i}", "name": "Полагане PE DN110",
+                     "length_m": q, "source_ref": "КСС.xlsx!Водопровод!4"}
+                    for i, q in enumerate(части, 1)]
+        отчет = verify_citations(schedule, index)
+        assert отчет["mismatch"] == 0, отчет["problems"]
+        assert отчет["verified"] == 4
+
+    def test_parts_that_together_exceed_the_row_are_a_defect(self, index):
+        """Разделянето остава разделяне само докато сборът се побира в реда."""
+        schedule = [{"id": f"T{i}", "name": "Полагане PE DN110", "length_m": 300,
+                     "source_ref": "КСС.xlsx!Водопровод!4"} for i in (1, 2)]
+        отчет = verify_citations(schedule, index)
+        assert отчет["verified"] == 1 and отчет["mismatch"] == 1
+        assert "сборът" in отчет["problems"][0]["note"]
+
+    def test_different_classes_keep_their_own_sums(self, index):
+        """Изкопът и полагането на един ред не се сумират един в друг."""
+        schedule = [
+            {"id": "T1", "name": "Полагане PE DN110", "length_m": 420,
+             "source_ref": "КСС.xlsx!Водопровод!4"},
+            {"id": "T2", "name": "Изкоп за тръбна траншея", "length_m": 420,
+             "source_ref": "КСС.xlsx!Водопровод!4"},
+        ]
+        assert verify_citations(schedule, index)["mismatch"] == 0
