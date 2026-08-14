@@ -489,19 +489,53 @@ class ChatHandler:
         if not boq_index or os.getenv("PACKAGE_GENERATION", "1") == "0":
             return None
 
-        progress("Генерирам по физически участъци (пакети)...")
-        try:
-            result = self.ai.generate_schedule_packaged(
-                analysis, boq_index, num_teams=max(int(num_teams or 1), 1),
-                locations=locations, segments=segments, progress_callback=progress)
-        except Exception as exc:                       # noqa: BLE001
-            logger.warning("Пакетната генерация се провали: %s", exc, exc_info=True)
-            return None
+        # ОПИТВА, ДОКАТО НЕ ИЗЛЕЗЕ ИЗНОСИМ ГРАФИК.
+        #
+        # Серията от 14.08.2026: 21 от 40 прогона са чисти, тоест един опит е
+        # хвърляне на монета.  `tools/build_audit_package.py` отдавна опитва до
+        # 10 пъти и НАДЕЖДНО вади чист график — а приложението, което ползва
+        # потребителят, опитваше веднъж.  Оттам и усещането, че инструментът
+        # работи, а продуктът не: разликата не беше в генерацията, а в това кой
+        # повтаря опита — ние или човекът пред екрана.
+        #
+        # Повтаря се САМО неизносим резултат.  График, който е готов, се връща
+        # какъвто е — това не е търсене на по-хубав изход, а довършване на
+        # прекъснат опит.
+        опити = max(int(os.getenv("GENERATION_ATTEMPTS", "4")), 1)
+        последен = None
+        for опит in range(1, опити + 1):
+            ако_повторен = f" (опит {опит} от {опити})" if опит > 1 else ""
+            progress(f"Генерирам по физически участъци (пакети){ако_повторен}...")
+            try:
+                result = self.ai.generate_schedule_packaged(
+                    analysis, boq_index, num_teams=max(int(num_teams or 1), 1),
+                    locations=locations, segments=segments,
+                    progress_callback=progress)
+            except Exception as exc:                   # noqa: BLE001
+                logger.warning("Пакетната генерация, опит %d: %s", опит, exc,
+                               exc_info=True)
+                continue
 
-        if result.get("status") == "error":
-            logger.warning("Пакетната генерация: %s", result.get("message"))
-            return None
-        return result
+            if result.get("status") == "error":
+                logger.warning("Пакетната генерация, опит %d: %s", опит,
+                               result.get("message"))
+                continue
+
+            последен = result
+            # Липсващ флаг НЕ значи неуспех: съдим по статуса, иначе готов
+            # график се преповтаря четири пъти и се плаща четири пъти.
+            износим = result.get("exportable",
+                                 result.get("status") in ("ok", "approved"))
+            if износим:
+                if опит > 1:
+                    progress(f"Готов график от {опит}-и опит.")
+                return result
+            logger.info("Опит %d не даде износим график (%s) — повтарям",
+                        опит, result.get("status"))
+
+        # Нито един опит не е износим: връща се последният, за да види човекът
+        # КАКВО пречи, вместо да получи нищо.
+        return последен
 
     def _boq_index(self) -> list:
         """Индексът с количествени редове — за цитиране в промпта.
