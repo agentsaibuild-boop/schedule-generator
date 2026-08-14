@@ -373,8 +373,10 @@ class TestCitations:
     def test_problems_carry_an_explanation(self, index):
         schedule = [{"id": "T1", "name": "X", "length_m": 999,
                      "source_ref": "КСС.xlsx!Водопровод!4"}]
+        # 999 НАДХВЪРЛЯ реда — това е дефект.  По-малко от реда е разделяне
+        # между зони и вече не е дефект (жив прогон 14.08.2026).
         problem = verify_citations(schedule, index)["problems"][0]
-        assert "не съвпада" in problem["note"]
+        assert "надхвърля" in problem["note"]
 
 
 class TestCitationReport:
@@ -1022,3 +1024,28 @@ class TestUnitExtraction:
                  "количество": 500, "__excel_row__": 4}]
 
         assert self._index(tmp_path, rows)[0].unit == ""
+
+
+class TestSplitQuantityIsNotAMismatch:
+    """Част от ред НЕ е несъвпадение — един ред нарочно се дели между зони.
+
+    ЖИВ ПРОГОН 14.08.2026: 115 от 134 цитата излязоха „не съвпадат" и
+    приложението показа червена тревога върху коректен график.  Сравняваше се
+    количеството на ЕДНА задача с ЦЯЛОТО количество на реда: 7761 m² бордюри
+    стават 1500 + 3000 + 600 + …
+
+    Че сборът е верен, го пази `check_conservation` (Σ = КСС).
+
+    FAILURE означава: работещ график пак ще изглежда счупен.
+    """
+
+    def test_a_part_of_the_row_is_verified(self, index):
+        schedule = [{"id": "T1", "name": "X", "length_m": 100,
+                     "source_ref": "КСС.xlsx!Водопровод!4"}]
+        отчет = verify_citations(schedule, index)
+        assert отчет.get("mismatch", 0) == 0, отчет.get("problems")
+
+    def test_more_than_the_row_is_still_a_defect(self, index):
+        schedule = [{"id": "T1", "name": "X", "length_m": 10_000,
+                     "source_ref": "КСС.xlsx!Водопровод!4"}]
+        assert verify_citations(schedule, index)["mismatch"] == 1

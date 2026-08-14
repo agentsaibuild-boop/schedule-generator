@@ -1574,7 +1574,11 @@ class ScheduleBuilder:
             duration = self._as_int(task.get("duration"), 0)
 
             # --- Suspiciously long task ---
-            if duration > 365:
+            # Обобщаващата задача е СБОР, не работа: тя трае колкото децата си.
+            # Жив прогон 14.08.2026: 2346 предупреждения, повечето „СТРОИТЕЛСТВО
+            # трае 989 дни" — вярно и безполезно, а истинските предупреждения се
+            # давеха в него.
+            if duration > 365 and not self._is_summary(task):
                 warnings.append(
                     f"Задача '{name}' ({tid}) има продължителност {duration} дни (>365)."
                 )

@@ -98,7 +98,11 @@ def streamlit_server():
         cwd=str(APP_DIR),
         stdout=_log_fh,
         stderr=_log_fh,
-        env={**os.environ, **dotenv_values(APP_DIR / ".env"), "PYTHONIOENCODING": "utf-8", "APP_PASSWORD": ""},
+        env={**os.environ, **dotenv_values(APP_DIR / ".env"), "PYTHONIOENCODING": "utf-8", "APP_PASSWORD": "",
+             # Разделите и Gantt-ът се рисуват само при наличен график.
+             # Без примерния график тестовете търсят екран, който не
+             # съществува при празен старт — и точно затова падаха.
+             "UI_SMOKE_SCHEDULE": "1"},
     )
 
     for _ in range(120):
