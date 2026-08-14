@@ -47,8 +47,11 @@ def _load_resource_capacity() -> dict[str, Any]:
     return _capacity_cache
 
 
-def _task_resources(task: dict) -> list[str]:
-    """Ресурсите, които задачата заема — съставът на бригадата плюс екипа."""
+def _task_resources(task: dict, *, leveling_only: bool = False) -> list[str]:
+    """Ресурсите, които задачата заема — съставът на бригадата плюс екипа.
+
+    `leveling_only` изключва НАДЗОРНИТЕ роли.  Виж `_is_leveling_resource`.
+    """
     names: list[str] = []
     for raw in task.get("resources") or []:
         name = str(raw).strip()
@@ -57,7 +60,36 @@ def _task_resources(task: dict) -> list[str]:
     team = str(task.get("team") or "").strip()
     if team and team != "—" and team not in names:
         names.append(team)
+    if leveling_only:
+        names = [n for n in names if _is_leveling_resource(n)]
     return names
+
+
+def _is_leveling_resource(name: str) -> bool:
+    """Ограничава ли този ресурс колко работа може да върви едновременно.
+
+    ОДИТ 14.08.2026: „Ръководител работна група е hard-leveling ресурс върху
+    всичките 200 construction leaf tasks с MaxUnits=2, което превръща целия
+    проект в глобален semaphore с максимум две едновременни задачи."
+
+    Проверимо е и е точно така: 201 назначения при таван 2, докато Фронт 1 и
+    Фронт 2 имат по 3 — тоест надзорна роля отменя логиката на фронтовете.
+    Числата го затварят: 1672 задача-дни при капацитет 2 дават теоретичен
+    минимум 836 дни, тоест еталонните 660 са недостижими по конструкция,
+    независимо от мрежата.
+
+    Ръководителят НАДЗИРАВА едновременна работа, не я изпълнява — той не е
+    машина, която може да е само на едно място.  Затова надзорните роли излизат
+    от твърдото изравняване: остават назначени и видими в графика, но
+    ограничението идва от фронтовете, бригадите и техниката.
+
+    Числото НЕ се вдига на око до 6, за да улучи 660 дни: колко ръководители
+    има реално е организационен въпрос към изпълнителя, а не настройка, с която
+    да се постигне желан срок.
+    """
+    config = _load_resource_capacity()
+    надзорни = config.get("supervisory") or []
+    return str(name).strip() not in {str(n).strip() for n in надзорни}
 
 # Над този брой задачи DFS проверката за цикли не се изпълнява и графикът
 # се ОТХВЪРЛЯ (fail-closed).  DFS е O(V+E), затова лимитът е висок — реален
@@ -714,7 +746,7 @@ class ScheduleBuilder:
                     earliest = max(earliest, new_end[dep_id] + 1 + lag)
             earliest = max(earliest, 1)
 
-            resources = _task_resources(task)
+            resources = _task_resources(task, leveling_only=True)
             consumes = bool(resources) and duration > 0 and not self._is_summary(task)
 
             start = earliest
