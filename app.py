@@ -1331,6 +1331,32 @@ if user_input:
 # Schedule tabs (Table / Stats / Export) — shown below chat when schedule exists
 # ---------------------------------------------------------------------------
 schedule = _ensure_schedule_list(st.session_state.get("current_schedule"))
+
+# ПРИМЕРЕН ГРАФИК ЗА ПРОВЕРКА НА ИНТЕРФЕЙСА.  Разделите и диаграмата се
+# показват само когато има график — затова E2E тестовете, които ги търсят при
+# празен старт, падаха, а преди това се пропускаха тихо (14.08.2026: браузърът
+# липсваше в .venv и десет теста не бяха пускани месец).
+#
+# Включва се САМО с изрична променлива на средата: без нея приложението се
+# държи както винаги.  Това не е демо режим за потребителя, а стойка, на която
+# да се провери, че таблицата, статистиката, експортът и слоевете на Gantt-а
+# изобщо се рисуват.
+if not schedule and os.getenv("UI_SMOKE_SCHEDULE") == "1":
+    schedule = [
+        {"id": "T1", "name": "Изкоп — ул. Първа", "start_day": 1, "end_day": 5,
+         "duration": 5, "phase": "construction", "is_critical": True,
+         "dependencies": [], "team": "Фронт 1", "resources": ["Багер универсален"]},
+        {"id": "T2", "name": "Полагане на тръби — ул. Първа", "start_day": 6,
+         "end_day": 12, "duration": 7, "phase": "construction",
+         "is_critical": True, "dependencies": ["T1"], "team": "Фронт 1",
+         "resources": ["Водопроводчик"]},
+        {"id": "T3", "name": "Приемане на обекта (Акт 15/16)", "start_day": 13,
+         "end_day": 13, "duration": 0, "phase": "acceptance",
+         "is_milestone": True, "dependencies": ["T2"], "team": "—"},
+    ]
+    st.session_state.current_schedule = schedule
+    st.session_state.schedule_data = schedule
+
 if schedule != st.session_state.get("current_schedule"):
     st.session_state.current_schedule = schedule
     st.session_state.schedule_data = schedule
