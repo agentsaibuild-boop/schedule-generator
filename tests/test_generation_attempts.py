@@ -76,3 +76,40 @@ class TestRetryUntilExportable:
         handler = _хендлър([{"status": "approved", "schedule": {"tasks": []}}])
         _извикай(handler)
         assert handler.ai.generate_schedule_packaged.call_count == 1
+
+
+class TestTheUserSeesWhy:
+    """Причината за повторния опит е на екрана, не само в лога.
+
+    Иначе човекът гледа „генерирам..." няколко минути и не знае какво не
+    достига — а точно това е разликата между „чака" и „счупено е".
+    """
+
+    def test_the_reason_names_the_uncovered_rows(self):
+        причина = ChatHandler._why_not_exportable(
+            {"status": "needs_human_review",
+             "citation_report": {"uncovered": ["КСС!9", "КСС!12"]}})
+        assert "2" in причина and "непокрити" in причина
+
+    def test_the_reason_names_the_quantity_problem(self):
+        причина = ChatHandler._why_not_exportable(
+            {"status": "needs_human_review",
+             "conservation": {"ok": False, "over": {"КСС!9": {}}}})
+        assert "количества" in причина and "превишени" in причина
+
+    def test_there_is_always_something_to_show(self):
+        assert ChatHandler._why_not_exportable({"status": "invalid"})
+
+    def test_the_progress_message_reaches_the_user(self):
+        съобщения = []
+        handler = _хендлър([
+            {"status": "needs_human_review", "exportable": False,
+             "citation_report": {"uncovered": ["КСС!9"]}},
+            {"status": "ok", "exportable": True},
+        ])
+        handler._try_package_generation(
+            {"analysis": "x"}, [object()], num_teams=2, locations=[],
+            progress=lambda m, *_a, **_k: съобщения.append(m))
+
+        assert any("непокрити" in m for m in съобщения), \
+            "причината не стига до екрана"
