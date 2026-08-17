@@ -69,3 +69,39 @@ class TestSupervisoryIsNotASemaphore:
 
         assert all("Ръководител работна група" in t["resources"]
                    for t in резултат["schedule"])
+
+
+class TestTheGateCountsByTheSameRule:
+    """Проверката и изравняването не бива да броят по различни правила.
+
+    ИЗМЕРЕНО 17.08.2026 на детерминистичния прогон: при ТРИ фронта графикът
+    излизаше „претоварен" по „Ръководител работна група" — ограничение, което
+    планировчикът нарочно не спазва от 14.08.  Тоест гейтът отхвърляше работа
+    заради правило, което кодът е решил да няма.  При два фронта числото
+    случайно оставаше под тавана и разминаването не се виждаше.
+    """
+
+    def test_a_supervisory_overload_is_not_reported(self):
+        from src.schedule_diagnostics import _capacity_overloads
+
+        задачи = _задачи(9, ["Ръководител работна група"])
+        assert _capacity_overloads(задачи) == [], \
+            "гейтът брои ресурс, който изравняването нарочно не ограничава"
+
+    def test_a_production_overload_is_still_reported(self):
+        from src.schedule_diagnostics import _capacity_overloads
+
+        задачи = _задачи(9, ["Багер универсален"])
+        претоварени = _capacity_overloads(задачи)
+
+        assert претоварени, "истинско претоварване вече не се вижда"
+        assert претоварени[0]["resource"] == "Багер универсален"
+
+    def test_the_two_sides_agree_on_a_levelled_schedule(self):
+        """Каквото изравняването е пуснало, гейтът не бива да отхвърля."""
+        from src.schedule_diagnostics import _capacity_overloads
+
+        изравнен = ScheduleBuilder().level_resources(
+            _задачи(9, ["Ръководител работна група", "Багер универсален"]))
+
+        assert _capacity_overloads(изравнен["schedule"]) == []

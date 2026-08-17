@@ -352,8 +352,18 @@ def _capacity_overloads(tasks: list[dict]) -> list[dict]:
 
     И двата са един и същ клас грешка — гейт, чийто резултат не зависи от
     това, което проверява.
+
+    ИЗМЕРЕНО 17.08.2026: проверката и изравняването брояха по РАЗЛИЧНИ правила.
+    Изравняването изважда надзорните роли от твърдото ограничение (одит
+    14.08.2026: ръководителят НАДЗИРАВА едновременна работа, не я изпълнява),
+    а тук те се броят като всеки друг ресурс.  Следствието: при три фронта
+    графикът излиза „претоварен" по „Ръководител работна група" — ограничение,
+    което планировчикът нарочно не спазва.  Тоест гейтът отхвърляше работа
+    заради правило, което кодът е решил да няма.
+
+    Едно правило за двете страни: `_is_leveling_resource`.
     """
-    from src.schedule_builder import _load_resource_capacity
+    from src.schedule_builder import _is_leveling_resource, _load_resource_capacity
 
     config = _load_resource_capacity()
     capacity = config.get("capacity") or {}
@@ -365,6 +375,8 @@ def _capacity_overloads(tasks: list[dict]) -> list[dict]:
         if start is None or task.get("milestone"):
             continue
         for name in (task.get("resources") or []):
+            if not _is_leveling_resource(str(name)):
+                continue
             for day in range(int(start), int(end) + 1):
                 load[(str(name), day)] += 1
 
