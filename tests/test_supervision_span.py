@@ -105,3 +105,46 @@ def test_without_construction_nothing_is_invented():
 
     assert tasks[0]["end_day"] == 10
     assert notes and "няма строителни задачи" in notes[0]
+
+
+# ===================================================================
+# Надзорът се котви за ДАТИТЕ, не за реда в списъка (17.08.2026)
+# ===================================================================
+#
+# ИЗМЕРЕНО при сглобяването на пакета за одитора: надзорът получаваше SS връзка
+# към build[0] — първата задача ПО РЕД В СПИСЪКА.  Когато там се пада пътна
+# задача, тръгваща на ден 436, а `enforce_construction_span` слага надзора на
+# ден 142 (началото на строителството), графикът падаше от собствената си
+# валидация: „[SS] започва ден 142, но предшественик започва ден 436".
+#
+# FAILURE означава: подредбата на списъка пак ще решава дали графикът е
+# валиден — а тя не значи нищо за обекта.
+
+
+def test_supervision_anchors_to_the_earliest_construction_task():
+    from src.work_package import (SpatialWorkPackage, link_contract_phases,
+                                  load_chains)
+
+    задачи = [
+        {"id": "П1", "name": "настилка", "parent_id": "PKG-P", "duration": 5,
+         "start_day": 436, "end_day": 440, "dependencies": []},
+        {"id": "К1", "name": "изкоп", "parent_id": "PKG-K", "duration": 3,
+         "start_day": 142, "end_day": 144, "dependencies": []},
+        {"id": "НАДЗОР", "name": "Авторски надзор", "parent_id": "PKG-S",
+         "duration": 1, "start_day": 142, "end_day": 142, "dependencies": []},
+    ]
+    пакети = [
+        SpatialWorkPackage(id="PKG-P", network="П", chain="pavement_section"),
+        SpatialWorkPackage(id="PKG-K", network="К", chain="sewer_section"),
+        SpatialWorkPackage(id="PKG-S", network="", chain="supervision"),
+    ]
+
+    свързани, _ = link_contract_phases(задачи, пакети, load_chains())
+    надзор = next(t for t in свързани if t["id"] == "НАДЗОР")
+    ss = [d for d in (надзор.get("dependencies") or [])
+          if isinstance(d, dict) and d.get("type") == "SS"]
+
+    assert ss, "надзорът остана без начална котва"
+    assert ss[0]["predecessor_id"] == "К1", (
+        f"котвата е {ss[0]['predecessor_id']} — надзорът се върза за задача, "
+        "която тръгва по-късно от него самия")
