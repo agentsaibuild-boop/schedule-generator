@@ -518,6 +518,36 @@ class AIRouter:
             "error": True,
         }
 
+    @staticmethod
+    def _refusal_details(resp: Any, choice: Any) -> dict:
+        """Кой отказа и защо — колкото доставчикът е благоволил да каже.
+
+        ИЗМЕРЕНО 17.08.2026: 6 от 40 прогона свършваха с ~7 изходни токена за
+        две секунди.  В лога се появи и причината — „Input data may contain
+        inappropriate content", дословният отказ на платформата на DeepSeek.
+        Тоест това не е засечка на инфраструктурата, а ФИЛТЪР ЗА СЪДЪРЖАНИЕ на
+        доставчика, който обслужва модела в този момент.
+
+        OpenRouter маршрутизира един и същ модел към различни доставчици, а те
+        имат различни филтри.  Без записан доставчик отказът изглежда еднакво
+        при всички и няма как да се реши кого да изключим — затова се записва.
+        """
+        подробности = {}
+        for поле in ("provider", "model", "id"):
+            стойност = getattr(resp, поле, None)
+            if стойност:
+                подробности[поле] = стойност
+        native = getattr(choice, "native_finish_reason", None)
+        if native:
+            подробности["native_finish_reason"] = native
+        отказ = getattr(getattr(choice, "message", None), "refusal", None)
+        if отказ:
+            подробности["refusal"] = str(отказ)[:200]
+        грешка = getattr(resp, "error", None)
+        if грешка:
+            подробности["error"] = str(грешка)[:200]
+        return подробности
+
     def _openai_request(self, client: Any, kwargs: dict, max_tokens: int):
         """OpenAI-съвместима заявка — STREAMING при голям изход.
 
@@ -550,7 +580,12 @@ class AIRouter:
         resp = client.chat.completions.create(**kwargs, timeout=_API_TIMEOUT_SECONDS)
         ch = resp.choices[0]
         u = resp.usage
-        return (ch.message.content or "",
+        content = ch.message.content or ""
+        if not content.strip():
+            logger.warning(
+                "Работникът %s върна ПРАЗНО съдържание — %s", MODEL_WORKER,
+                self._refusal_details(resp, ch) or "доставчикът не казва защо")
+        return (content,
                 u.prompt_tokens if u else 0, u.completion_tokens if u else 0,
                 getattr(ch, "finish_reason", None))
 

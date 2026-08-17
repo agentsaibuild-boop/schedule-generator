@@ -729,3 +729,63 @@ def test_ocr_failure_counts_for_the_worker_when_it_is_the_same_model(monkeypatch
 
     r.ocr_pdf_page("base64")
     assert r.deepseek_available is False, "системната засечка трябва да го изключи"
+
+
+# ===================================================================
+# Кой отказа заявката (измерено 17.08.2026)
+# ===================================================================
+#
+# 6 от 40 прогона свършваха с ~7 изходни токена за две секунди.  В лога се
+# появи и причината — „Input data may contain inappropriate content", дословният
+# отказ на платформата на DeepSeek.  Тоест не е засечка на инфраструктурата, а
+# ФИЛТЪР ЗА СЪДЪРЖАНИЕ на доставчика.
+#
+# OpenRouter маршрутизира един и същ модел към различни доставчици с различни
+# филтри.  Без записан доставчик всички откази изглеждат еднакво.
+#
+# FAILURE означава: следващият отказ пак ще е седем токена без обратен адрес.
+
+
+class _Съобщение:
+    def __init__(self, content, refusal=None):
+        self.content = content
+        self.refusal = refusal
+
+
+class _Избор:
+    def __init__(self, content, refusal=None, native=None):
+        self.message = _Съобщение(content, refusal)
+        self.finish_reason = "stop"
+        self.native_finish_reason = native
+
+
+class _Отговор:
+    def __init__(self, provider=None, error=None):
+        self.provider = provider
+        self.model = "deepseek/deepseek-v4-flash"
+        self.id = "gen-123"
+        self.error = error
+
+
+def test_refusal_names_the_provider():
+    подробности = AIRouter._refusal_details(
+        _Отговор(provider="Nebius"), _Избор("", native="content_filter"))
+
+    assert подробности.get("provider") == "Nebius", "отказът е без обратен адрес"
+    assert подробности.get("native_finish_reason") == "content_filter"
+    assert подробности.get("model") == "deepseek/deepseek-v4-flash"
+
+
+def test_refusal_carries_the_providers_own_words():
+    подробности = AIRouter._refusal_details(
+        _Отговор(error="Input data may contain inappropriate content"),
+        _Избор("", refusal="filtered"))
+
+    assert "inappropriate" in подробности.get("error", "")
+    assert подробности.get("refusal") == "filtered"
+
+
+def test_a_silent_provider_does_not_crash_the_report():
+    подробности = AIRouter._refusal_details(_Отговор(), _Избор(""))
+
+    assert isinstance(подробности, dict)
