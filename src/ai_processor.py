@@ -878,6 +878,22 @@ class AIProcessor:
         for note in span_notes:
             _prog(note)
 
+        # ЗАТВАРЯНЕ НА ПРАЗНИНИТЕ (измерено 17.08.2026).  Първото изравняване
+        # мести работа НАПРЕД, а надзорът след него се свива до реалния край на
+        # строителството.  Наследниците му обаче остават на старите си дати —
+        # на детерминистичния прогон това остави 65 дни, в които на обекта не се
+        # случва нищо, а екзекутивната документация чака ресурс, който е
+        # свободен.  Втори проход връща всяка задача толкова назад, колкото
+        # зависимостите И ресурсите ѝ позволяват.
+        pulled = builder.level_resources(tasks, pull_in=True)
+        if not pulled["warnings"]:
+            преди = max((int(t.get("end_day") or 0) for t in tasks), default=0)
+            tasks = pulled["schedule"]
+            след = max((int(t.get("end_day") or 0) for t in tasks), default=0)
+            if след < преди:
+                _prog(f"Затворени празнини: срокът пада от {преди} на {след} дни.")
+            tasks, _ = enforce_construction_span(tasks)
+
         cpm = builder.compute_critical_path(tasks)
         if not cpm["warnings"]:
             tasks = cpm["schedule"]

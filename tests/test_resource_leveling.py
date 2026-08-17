@@ -224,3 +224,77 @@ def test_rollup_leaves_leaf_tasks_alone(builder):
 
     assert result["adjusted"] == []
     assert result["schedule"][0]["start_day"] == 7
+
+
+# ---------------------------------------------------------------------------
+# Затваряне на празнините (измерено 17.08.2026)
+# ---------------------------------------------------------------------------
+#
+# FAILURE означава: src/schedule_builder.py :: закъснение, влязло веднъж в
+# графика, пак няма да излиза.  На детерминистичния прогон това остави 65 дни
+# ПЪЛНА ПАУЗА — екзекутивната документация чакаше надзор, който вече беше
+# свършил, при напълно свободен ресурс.
+
+
+class TestPullIn:
+    def _двойка(self, старт_на_втората: int):
+        """A свършва на ден 5; B стои на посочения ден без причина."""
+        return [
+            {"id": "A", "name": "предшественик", "duration": 5,
+             "start_day": 1, "end_day": 5, "dependencies": [],
+             "resources": ["Багер универсален"]},
+            {"id": "B", "name": "наследник", "duration": 3,
+             "start_day": старт_на_втората,
+             "end_day": старт_на_втората + 2, "dependencies": ["A"],
+             "resources": ["Багер универсален"]},
+        ]
+
+    def test_a_stale_gap_is_closed(self):
+        резултат = ScheduleBuilder().level_resources(self._двойка(70),
+                                                     pull_in=True)
+        b = next(t for t in резултат["schedule"] if t["id"] == "B")
+
+        assert b["start_day"] == 6, (
+            "наследникът остана да чака предшественик, който е свършил — "
+            f"старт {b['start_day']} вместо 6")
+
+    def test_without_pull_in_the_gap_stays(self):
+        """Подразбирането НЕ пренарежда — първият проход само отлага."""
+        резултат = ScheduleBuilder().level_resources(self._двойка(70))
+        b = next(t for t in резултат["schedule"] if t["id"] == "B")
+
+        assert b["start_day"] == 70
+
+    def test_dependencies_are_still_unbreakable(self):
+        """Връщането назад не бива да минава пред предшественика."""
+        резултат = ScheduleBuilder().level_resources(self._двойка(2),
+                                                     pull_in=True)
+        a, b = (next(t for t in резултат["schedule"] if t["id"] == x)
+                for x in ("A", "B"))
+
+        assert b["start_day"] > a["end_day"], "FS връзката е нарушена"
+
+    def test_resources_are_still_respected(self):
+        """Ако ресурсът е зает, задачата не се връща в заетия ден."""
+        задачи = [
+            {"id": "A", "name": "заемa багера", "duration": 10,
+             "start_day": 1, "end_day": 10, "dependencies": [],
+             "resources": ["Автокран"]},
+            {"id": "B", "name": "също иска багера", "duration": 3,
+             "start_day": 60, "end_day": 62, "dependencies": ["A"],
+             "resources": ["Автокран"]},
+        ]
+        резултат = ScheduleBuilder().level_resources(
+            задачи, capacity={"Автокран": 1}, pull_in=True)
+        b = next(t for t in резултат["schedule"] if t["id"] == "B")
+
+        assert b["start_day"] >= 11, "две задачи взеха един автокран"
+
+    def test_a_task_without_predecessors_keeps_its_date(self):
+        """Дата без предшественик е решение отвън, не остатък от смятане."""
+        задачи = [{"id": "M", "name": "мобилизация", "duration": 5,
+                   "start_day": 30, "end_day": 34, "dependencies": [],
+                   "resources": ["Багер универсален"]}]
+        резултат = ScheduleBuilder().level_resources(задачи, pull_in=True)
+
+        assert резултат["schedule"][0]["start_day"] == 30

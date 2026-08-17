@@ -668,6 +668,7 @@ class ScheduleBuilder:
         capacity: dict[str, int] | None = None,
         default_capacity: int | None = None,
         horizon_days: int = 3650,
+        pull_in: bool = False,
     ) -> dict[str, Any]:
         """Разсрочи задачите така, че да не искат повече ресурс, отколкото има.
 
@@ -689,6 +690,22 @@ class ScheduleBuilder:
             capacity: {име на ресурс: брой едновременни задачи}.
             default_capacity: За ресурс извън таблицата.
             horizon_days: Предпазен таван при търсене на свободен ден.
+            pull_in: Позволи задача да се ВЪРНЕ по-рано, ако зависимостите и
+                ресурсите ѝ го позволяват.
+
+                ИЗМЕРЕНО 17.08.2026: подът на всяка задача беше собствената ѝ
+                дата отпреди изравняването, тоест закъснение веднъж влязло, не
+                излизаше.  На детерминистичния прогон това направи 65 дни ПЪЛНА
+                ПАУЗА (737–801): екзекутивната документация чакаше надзора,
+                който преди изравняването свършваше на 801, а след него — на
+                736.  Ресурсът ѝ беше свободен през цялото време, всичките ѝ
+                24 предшественика — готови.  Никой не я върна.
+
+                Затова се минава втори път СЛЕД като обхватът на надзора е
+                наложен: задача със свързани предшественици тръгва от тях, а не
+                от старата си дата.  Задача БЕЗ разрешени предшественици си
+                остава на място — нейната дата е решение отвън (мобилизация,
+                договорен старт), не остатък от предишно смятане.
 
         Returns:
             {schedule, shifted, warnings, peak} — `peak` е върховото
@@ -731,10 +748,12 @@ class ScheduleBuilder:
             span = max(duration, 1) - 1
             original = self._as_int(task.get("start_day"), 1)
 
-            earliest = original
-            for dep_id in dependency_ids(task):
-                if dep_id not in new_end:
-                    continue
+            # Подът е СОБСТВЕНАТА дата само когато не пренареждаме.  При
+            # `pull_in` задача със СВЪРЗАНИ предшественици тръгва от тях —
+            # виж защо в описанието на аргумента.
+            resolved = [d for d in dependency_ids(task) if d in new_end]
+            earliest = 1 if (pull_in and resolved) else original
+            for dep_id in resolved:
                 link_type, lag = edges.get((dep_id, tid), ("FS", 0))
                 if link_type == "SS":
                     earliest = max(earliest, new_start[dep_id] + lag)
