@@ -317,3 +317,104 @@ def test_a_pdf_reading_names_the_section_but_is_not_geometry():
 def test_geometry_from_a_drawing_file_is_trusted():
     assert _from_ai(_DRAWING, source="dwg_dxf")[0].spatial_verified
     assert _from_ai(_DRAWING, source="gis")[0].spatial_verified
+
+
+# ===================================================================
+# Възстановяването е ПРОЦЕС, а не бариера накрая (17.08.2026)
+# ===================================================================
+#
+# Проверено в човешкия еталон: стъпката „обратно засипване с уплътняване на
+# пластове, полагане и уплътняване на трошен камък" се среща 46 пъти — по
+# веднъж на участък, медиана 2 дни, разхвърляна през целия строеж.  Редът
+# „възстановяване извън траншеен изкоп" пък е една задача, която ТЕЧЕ 595 дни
+# успоредно с всичко.  Никъде няма момент, в който целият обект чака последния
+# изкоп.  Ръководителят на проекта потвърди: „не е един път накрая, а процес —
+# след всеки приключен етап се възстановява настилката".
+#
+# FAILURE означава: настилките пак ще чакат последната тръба на обекта.
+
+
+def _sections(count: int, chain: str, network: str, prefix: str,
+              refs: tuple[str, ...]) -> list[SpatialWorkPackage]:
+    """`count` участъка, всеки с ДЯЛ от същите КСС редове."""
+    return [
+        SpatialWorkPackage(
+            id=f"{prefix}{i}", network=network, chain=chain,
+            branch=f"кл. {i}",
+            items=tuple(PackageItem(ref, "pavement" if network == "П" else "pipe",
+                                    100.0, "кв. м", ref)
+                        for ref in refs))
+        for i in range(1, count + 1)
+    ]
+
+
+class TestRestorationFollowsTheStages:
+    def test_sections_sharing_rows_are_not_merged(self):
+        """Един ред в осем пакета значи осем МЕСТА, не едно място осем пъти."""
+        участъци = _sections(8, "pavement_section", "П", "П",
+                             tuple(ref for ref, _, _ in _ROWS))
+
+        слети, _ = merge_restoration_zones(участъци, spatial_authoritative=False)
+
+        assert len(слети) == 8, (
+            "участъците с разделени количества бяха слети в една зона — "
+            "възстановяването пак чака последния изкоп")
+
+    def test_rows_split_into_steps_are_still_merged(self):
+        """Класическият дефект: по един пакет на КСС ред → едно място."""
+        пакети = _pavement_packages()
+
+        слети, бележки = merge_restoration_zones(пакети,
+                                                 spatial_authoritative=False)
+
+        assert len(слети) == 1, "обектът пак се асфалтира три пъти"
+        assert бележки
+
+    def test_each_section_waits_for_its_own_wave(self):
+        """Настилка n чака вълна n от подземните работи, не всичките."""
+        from src.work_package import link_cross_discipline
+
+        тръби = _sections(4, "sewer_section", "К", "К", ("КСС.xlsx!Канал!1",))
+        настилки = _sections(4, "pavement_section", "П", "П",
+                             tuple(ref for ref, _, _ in _ROWS))
+        пакети = тръби + настилки
+        задачи = expand_packages(пакети, load_chains()).tasks
+
+        свързани = link_cross_discipline(задачи, пакети, load_chains(),
+                                         spatial_authoritative=False)
+        по_ид = {str(t.get("id")): t for t in свързани}
+
+        първа = [t for t in свързани
+                 if str(t.get("parent_id")) == "П1" and t.get("chain_step")]
+        предшественици = {
+            str(d.get("predecessor_id") if isinstance(d, dict) else d)
+            for t in първа for d in (t.get("dependencies") or [])
+        }
+        чужди = {p for p in предшественици
+                 if p.startswith("К") and not p.startswith("К1_")}
+
+        assert not чужди, (
+            f"първата настилка чака и чужди участъци: {sorted(чужди)[:5]}")
+
+    def test_the_last_restoration_still_waits_for_everything(self):
+        """Последната настилка не бива да свърши преди последния изкоп."""
+        from src.work_package import link_cross_discipline
+
+        тръби = _sections(4, "sewer_section", "К", "К", ("КСС.xlsx!Канал!1",))
+        настилки = _sections(4, "pavement_section", "П", "П",
+                             tuple(ref for ref, _, _ in _ROWS))
+        пакети = тръби + настилки
+        свързани = link_cross_discipline(
+            expand_packages(пакети, load_chains()).tasks, пакети, load_chains(),
+            spatial_authoritative=False)
+
+        последна = [t for t in свързани
+                    if str(t.get("parent_id")) == "П4" and t.get("chain_step")]
+        предшественици = {
+            str(d.get("predecessor_id") if isinstance(d, dict) else d)
+            for t in последна for d in (t.get("dependencies") or [])
+        }
+        участъци = {p.split("_")[0] for p in предшественици if p.startswith("К")}
+
+        assert участъци == {"К1", "К2", "К3", "К4"}, (
+            f"последната настилка чака само {sorted(участъци)}")
