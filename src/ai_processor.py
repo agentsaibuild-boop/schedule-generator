@@ -159,6 +159,32 @@ _SPATIAL_CHAIN_KEYS = ("sewer_section", "water_section", "pavement_section",
                        "cable_section", "structure")
 
 
+#: Отсечките, ИЗПИСАНИ в самата задача към vision модела като обяснение какво
+#: е възел и какво е отсечка.  Слаб модел ги връща обратно вместо да чете
+#: чертежа — измерено 17.08.2026: едни и същи четири „отсечки" за два различни
+#: чертежа.  Ключът е (клон, начало, край) без разредка и регистър.
+_PROMPT_EXAMPLE_SEGMENTS = frozenset({
+    ("кл.48", "рш36", "рш37"),
+    ("кл.48", "рш37", "рш38"),
+    ("кл.25-и", "от27", "от27а"),
+})
+
+
+def _is_prompt_example(segment: dict) -> bool:
+    """Дали отсечката е дословно взета от примера в задачата.
+
+    Отхвърля се САМО точната тройка.  Истински чертеж може да има клон „кл. 48"
+    и шахта „РШ 36" — еталонът ги има — затова само по клон или само по възел
+    не се съди.
+    """
+    def _ключ(стойност) -> str:
+        return "".join(str(стойност or "").split()).lower()
+
+    return (_ключ(segment.get("branch")),
+            _ключ(segment.get("start_node")),
+            _ключ(segment.get("end_node"))) in _PROMPT_EXAMPLE_SEGMENTS
+
+
 def build_packages_response_schema() -> dict:
     """JSON schema за ПАКЕТНИЯ отговор — физически участъци, не готови задачи.
 
@@ -3473,7 +3499,7 @@ class AIProcessor:
             doc.close()
 
     @staticmethod
-    def _situation_segments_are_schematic(segments: list[dict]) -> bool:
+    def _situation_segments_are_schematic(segments: list[dict]) -> bool:  # noqa: D401
         """Дали „отсечките" са схема, а не прочетен чертеж.
 
         ЖИВ ПРОГОН 2026-08-07: OCR модел без реален vision достъп връщаше
@@ -3485,15 +3511,27 @@ class AIProcessor:
 
         Признакът е числената редица в имената.  Реален квартал не се състои
         от „Първа, Втора, Трета"; образец се състои точно от това.
+
+        ВТОРИ ПРИЗНАК, измерен 17.08.2026: същият слаб модел връщаше едни и
+        същи ЧЕТИРИ отсечки за ДВА различни чертежа — и те бяха дословно
+        примерите от самата задача („кл. 48: РШ36→РШ37, РШ37→РШ38" и
+        „КЛ. 25 - И: ОТ27→ОТ27А").  Улици нямаше, затова редицата „Първа,
+        Втора" не се задействаше и измислената геометрия минаваше нататък:
+        точно тя е причината серията С отсечки да е по-слаба от серията без
+        тях.  Урокът от 07.08 важи и за ВЪЗЛИТЕ, не само за улиците.
         """
         streets = {str(s.get("street", "")).strip().lower()
                    for s in segments if str(s.get("street", "")).strip()}
-        if not streets:
-            return False
         ordinals = ("първа", "втора", "трета", "четвърта", "пета")
         hits = sum(1 for street in streets
                    if any(street.endswith(word) for word in ordinals))
-        return hits >= 2 and hits >= len(streets) / 2
+        if hits >= 2 and hits >= len(streets) / 2:
+            return True
+
+        if not segments:
+            return False
+        преписани = sum(1 for s in segments if _is_prompt_example(s))
+        return преписани >= 2 and преписани >= len(segments) / 2
 
     def extract_situation_segments(self, filepath: str) -> list[dict]:
         """Извлечи РЕАЛНИТЕ участъци от ситуационния чертеж.
