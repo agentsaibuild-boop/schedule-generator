@@ -29,6 +29,7 @@ import json
 import re
 import sys
 import xml.etree.ElementTree as ET
+from difflib import SequenceMatcher
 from datetime import date, datetime
 from pathlib import Path
 
@@ -157,6 +158,124 @@ def extract(path: Path, chain_key: str) -> list[dict]:
     return topology
 
 
+#: Вериги, които в еталона се срещат МНОГОКРАТНО — по веднъж на участък.
+#: Топологията им не се чете от един екземпляр, а се обобщава от всички.
+SECTION_CHAINS = ("sewer_section", "water_section")
+
+
+def _norm(name: str) -> str:
+    """Сравнимо име, без пунктуация и разредка."""
+    return re.sub(r"[^а-яa-z0-9]+", "", (name or "").lower())
+
+
+def _match_step(name: str, steps: list[dict], *, праг: float = 0.55) -> int | None:
+    """Коя стъпка от веригата е този ред от еталона — поединично."""
+    цел = _norm(name)
+    if not цел:
+        return None
+    оценки = [(SequenceMatcher(None, цел, _norm(s["name"])).ratio(), i)
+              for i, s in enumerate(steps)]
+    най, индекс = max(оценки)
+    return индекс if най >= праг else None
+
+
+def _assign_steps(листа: list[dict], steps: list[dict],
+                  *, дъно: float = 0.40) -> dict[int, dict]:
+    """Съпостави листата на ЕДИН участък със стъпките на веригата.
+
+    Не по глобален праг: конфигурацията е преписвана на ръка и се разминава
+    различно на всяка стъпка.  „Направа на пясъчна подложка, заваряване на
+    тръбите на терена" срещу „Заваряване на тръби на терена. Стациониране на
+    сондажната машина" дава 0.52 — под всеки праг, който другаде не бърка.
+
+    Затова съответствието е ЕДНОЗНАЧНО в рамките на участъка: най-добрите
+    двойки се вземат първи, всяка стъпка и всеки ред участват веднъж.  Така
+    една стъпка не може да отнеме реда на друга, а слабо съвпадение минава
+    само ако е единственото останало за тази стъпка.
+    """
+    двойки = sorted(
+        ((SequenceMatcher(None, _norm(лист["name"]), _norm(step["name"])).ratio(),
+          индекс_лист, индекс_стъпка)
+         for индекс_лист, лист in enumerate(листа)
+         for индекс_стъпка, step in enumerate(steps)),
+        reverse=True)
+
+    взети_листа: set[int] = set()
+    взети_стъпки: set[int] = set()
+    съответствие: dict[int, dict] = {}
+    for оценка, il, ис in двойки:
+        if оценка < дъно or il in взети_листа or ис in взети_стъпки:
+            continue
+        съответствие[ис] = листа[il]
+        взети_листа.add(il)
+        взети_стъпки.add(ис)
+    return съответствие
+
+
+def _parents(tasks: dict, order: list[str]) -> dict[str, str]:
+    """Родителят е последният предхождащ ред с по-малко ниво."""
+    родител: dict[str, str] = {}
+    стек: list[str] = []
+    for uid in order:
+        while стек and tasks[стек[-1]]["level"] >= tasks[uid]["level"]:
+            стек.pop()
+        if стек:
+            родител[uid] = стек[-1]
+        стек.append(uid)
+    return родител
+
+
+def extract_sections(path: Path, chain_key: str) -> tuple[list[dict], int]:
+    """Топология на верига, която се повтаря на всеки участък.
+
+    Всеки участък е един екземпляр на веригата.  Връзката между две съседни
+    стъпки се чете ПО ДАТИТЕ за всеки екземпляр поотделно, а после се обобщава:
+    типът е мнозинството, лагът е медианата.  Един участък може да е нетипичен
+    (спряна вода, чакане на оператор); четиридесет и шест не могат.
+
+    Returns:
+        (топология, брой намерени екземпляра)
+    """
+    config = json.loads(CONFIG.read_text(encoding="utf-8"))
+    steps = config["chains"][chain_key]["steps"]
+
+    tasks, order = load_tasks(path)
+    родител = _parents(tasks, order)
+
+    под_родител: dict[str, list[dict]] = {}
+    for uid in order:
+        task = tasks[uid]
+        if task["summary"] or not task["start"]:
+            continue
+        под_родител.setdefault(родител.get(uid, "-"), []).append(task)
+
+    групи = {p: _assign_steps(листа, steps) for p, листа in под_родител.items()}
+    пълни = [g for g in групи.values() if len(g) == len(steps)]
+
+    наблюдения: dict[int, list[tuple[str, int]]] = {}
+    for група in пълни:
+        for позиция in range(1, len(steps)):
+            вид, лаг = relation(група[позиция - 1], група[позиция])
+            наблюдения.setdefault(позиция, []).append((вид, лаг))
+
+    топология: list[dict] = []
+    for позиция, step in enumerate(steps):
+        запис = {"position": позиция, "name": step["name"],
+                 "days": float(step.get("median_days") or 0),
+                 "predecessor": None, "type": None, "lag_days": 0,
+                 "declared_code": None, "instances": len(пълни)}
+        видяно = наблюдения.get(позиция) or []
+        if видяно:
+            типове = [t for t, _ in видяно]
+            вид = "SS" if типове.count("SS") > len(типове) / 2 else "FS"
+            лагове = sorted(l for t, l in видяно if t == вид)
+            запис.update(predecessor=позиция - 1, type=вид,
+                         lag_days=лагове[len(лагове) // 2] if лагове else 0)
+        топология.append(запис)
+
+    return топология, len(пълни)
+
+
 def serial_span(topology: list[dict]) -> float:
     return sum(step["days"] for step in topology)
 
@@ -198,11 +317,24 @@ def write_into_config(chain_key: str, topology: list[dict]) -> int:
         step["lag_days"] = extracted["lag_days"]
         written += 1
 
-    config["chains"][chain_key]["_topology_note"] = (
-        "Връзките са ИЗВЛЕЧЕНИ от човешкия график по датите, не по кода на "
-        "типа (одит 10.08.2026, P0.2).  Без тях 23-те стъпки дават 245 дни "
-        "последователно; със застъпванията — около 120, както е в еталона."
-    )
+    if chain_key in SECTION_CHAINS:
+        екземпляри = topology[0].get("instances", 0) if topology else 0
+        config["chains"][chain_key]["_topology_note"] = (
+            f"Връзките са ИЗВЛЕЧЕНИ по датите от {екземпляри} участъка в "
+            "човешкия график (17.08.2026), не по кода на типа.  Типът е "
+            "мнозинството, лагът — медианата: един участък може да е нетипичен, "
+            f"{екземпляри} не могат.  Забележимото е, че застъпване почти няма — "
+            "човекът държи участъците толкова КЪСИ (технологичното ограничение "
+            "за открит изкоп), че всяка стъпка е 1–3 дни и няма какво да се "
+            "застъпва.  Паралелността му идва от много участъци наведнъж, не от "
+            "разтегляне на стъпките."
+        )
+    else:
+        config["chains"][chain_key]["_topology_note"] = (
+            "Връзките са ИЗВЛЕЧЕНИ от човешкия график по датите, не по кода на "
+            "типа (одит 10.08.2026, P0.2).  Без тях 23-те стъпки дават 245 дни "
+            "последователно; със застъпванията — около 120, както е в еталона."
+        )
     CONFIG.write_text(json.dumps(config, ensure_ascii=False, indent=1) + "\n",
                       encoding="utf-8")
     return written
@@ -211,12 +343,20 @@ def write_into_config(chain_key: str, topology: list[dict]) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mspdi", help="човешкият график (.xml, не .mpp)")
-    parser.add_argument("--chain", default="design", choices=sorted(PHASE_BY_CHAIN))
+    parser.add_argument("--chain", default="design",
+                        choices=sorted(set(PHASE_BY_CHAIN) | set(SECTION_CHAINS)))
     parser.add_argument("--write", action="store_true",
                         help="запиши връзките в config/tech_chains.json")
     args = parser.parse_args()
 
-    topology = extract(Path(args.mspdi), args.chain)
+    if args.chain in SECTION_CHAINS:
+        topology, екземпляри = extract_sections(Path(args.mspdi), args.chain)
+        print(f"намерени пълни екземпляра на веригата: {екземпляри}\n")
+        if not екземпляри:
+            print("нито един участък не съвпадна по имена — нищо не се пише")
+            return 1
+    else:
+        topology = extract(Path(args.mspdi), args.chain)
 
     print(f"{'#':>3} {'дни':>6} {'връзка':>10} {'лаг':>5} {'код':>4}  стъпка")
     for step in topology:
