@@ -178,6 +178,16 @@ def _metrics(run: int, result: dict, elapsed: float,
         "valid": bool(validation.get("valid")),
         "val_errors": len(validation.get("errors") or []),
         "parse_errors": len(result.get("parse_errors") or []),
+        # ТЕКСТЪТ, не само броят (17.08.2026).  Контролната серия показа два
+        # прогона с ФАТАЛНИ бележки при парсването — изхвърлена работа — и
+        # въпросът „каква точно" остана без отговор, защото записът пазеше
+        # число.  Фаталните са малко и си заслужават мястото; останалите се
+        # режат на 40, за да не подуят файла.
+        "fatal_parse_errors": [
+            str(e) for e in (result.get("parse_errors") or [])
+            if "пропуснат" in str(e) or "не е ред от КСС" in str(e)],
+        "parse_notes": [str(e)[:200]
+                        for e in (result.get("parse_errors") or [])][:40],
         "cost": result.get("total_cost", 0.0),
         "seconds": round(elapsed, 1),
         "leveling_shifted": (result.get("leveling") or {}).get("shifted", 0),
