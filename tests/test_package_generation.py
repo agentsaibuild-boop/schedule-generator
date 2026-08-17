@@ -397,3 +397,81 @@ def test_salvage_is_not_fooled_by_braces_inside_strings():
 
     assert len(salvaged) == 1
     assert salvaged[0]["street"] == "ул. {А}"
+
+
+# ===================================================================
+# Празният отговор е ЗАСЕЧКА, не резултат (измерено 17.08.2026)
+# ===================================================================
+#
+# Шест от 40 живи прогона свършиха така: работникът връща ~7 изходни токена за
+# две секунди — валиден JSON с НУЛА участъка — и прогонът се отчиташе като
+# грешка веднага, без нито един повторен опит.  Точно отдолу обаче НЕГОДНОТО
+# разделяне се пита още веднъж; по-лошият случай получаваше по-малко търпение
+# от по-лекия.
+#
+# Проверката в `ai_router._request_with_empty_retry` не го хваща: тя гледа за
+# празен НИЗ, а тук низът е непразен и се разчита без грешка.  Празнотата е
+# смислова, не синтактична.
+#
+# FAILURE означава: една засечка на доставчика пак ще струва цял прогон.
+
+
+class _Работник:
+    """Връща подадените отговори по ред; брои заявките."""
+
+    def __init__(self, *отговори: str) -> None:
+        self._отговори = list(отговори)
+        self.calls = 0
+        self.deepseek_available = True
+        self.anthropic_available = False
+
+    def chat(self, messages, system_prompt, **kwargs) -> dict:
+        self.calls += 1
+        съдържание = self._отговори[min(self.calls - 1, len(self._отговори) - 1)]
+        return {"content": съдържание, "model": "тест",
+                "usage": {"input_tokens": 10, "output_tokens": 7},
+                "cost": 0.0, "fallback": False, "truncated": False}
+
+
+ПРАЗЕН = '{"packages": []}'
+ГОДЕН = json.dumps({"packages": [{
+    "id": "К1", "name": "кл. 1 от РШ 1 до РШ 2", "network": "К",
+    "branch": "кл. 1", "start_node": "РШ 1", "end_node": "РШ 2",
+    "items": [{"source_ref": "КСС.xlsx!Канализация!11", "quantity": 1000.0}],
+}]}, ensure_ascii=False)
+
+
+def _генерирай(работник, monkeypatch, опити="2"):
+    monkeypatch.setenv("EMPTY_PACKAGES_RETRIES", опити)
+    monkeypatch.setenv("PARTITION_RETRIES", "0")
+    monkeypatch.setenv("PACKAGE_REPAIR_ROUNDS", "0")
+    return AIProcessor(router=работник).generate_schedule_packaged(
+        {"analysis": "реконструкция"}, [PIPES], num_teams=1)
+
+
+def test_zero_packages_is_asked_again(monkeypatch):
+    работник = _Работник(ПРАЗЕН, ГОДЕН)
+
+    резултат = _генерирай(работник, monkeypatch)
+
+    assert работник.calls >= 2, (
+        "нулата участъци мина за отговор — прогонът се губи от една засечка")
+    assert резултат.get("status") != "error", резултат.get("message")
+
+
+def test_it_gives_up_after_the_configured_attempts(monkeypatch):
+    """Търпението е с таван — иначе засечка на доставчика върти безкрайно."""
+    работник = _Работник(ПРАЗЕН)
+
+    резултат = _генерирай(работник, monkeypatch, опити="2")
+
+    assert работник.calls == 3, f"направени {работник.calls} заявки"
+    assert резултат["status"] == "error"
+
+
+def test_a_good_first_answer_is_not_asked_twice(monkeypatch):
+    работник = _Работник(ГОДЕН)
+
+    _генерирай(работник, monkeypatch)
+
+    assert работник.calls == 1, "питаме пак, при положение че отговорът е годен"

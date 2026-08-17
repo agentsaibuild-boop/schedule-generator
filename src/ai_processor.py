@@ -714,12 +714,41 @@ class AIProcessor:
         packages, parse_errors = packages_from_ai(
             parsed, boq_index=boq_index, chains=chains, segments=segments,
             spatial_source=spatial_source)
+        cost = result.get("cost", 0.0)
+
+        # ПРАЗНИЯТ ОТГОВОР Е ЗАСЕЧКА, НЕ РЕЗУЛТАТ (измерено 17.08.2026).
+        #
+        # Шест от 40 прогона свършиха така: работникът връща ~7 изходни токена
+        # за две секунди — валиден JSON с НУЛА участъка — и прогонът се отчиташе
+        # като грешка веднага, без нито един повторен опит.  Точно отдолу обаче
+        # НЕГОДНОТО разделяне се пита още веднъж; тоест по-лошият случай
+        # получаваше по-малко търпение от по-лекия.
+        #
+        # Проверката за празен отговор в `ai_router._request_with_empty_retry`
+        # не го хваща: тя гледа за празен НИЗ, а тук низът е непразен и се
+        # разчита без грешка.  Празнотата е смислова, не синтактична.
+        for опит in range(1, max(int(os.getenv("EMPTY_PACKAGES_RETRIES", "2")
+                                     or 0), 0) + 1):
+            if packages:
+                break
+            _prog(f"Моделът върна нула участъка — питам пак "
+                  f"(опит {опит}).")
+            повторно = self.router.chat(
+                [{"role": "user", "content": искане}], system_prompt,
+                max_tokens=gen_max_tokens(),
+                response_schema=build_packages_response_schema())
+            if повторно.get("error") or повторно.get("truncated"):
+                break
+            cost += повторно.get("cost", 0.0)
+            packages, parse_errors = packages_from_ai(
+                AIRouter.parse_json_response(повторно["content"]),
+                boq_index=boq_index, chains=chains, segments=segments,
+                spatial_source=spatial_source)
+
         if not packages:
             return {"status": "error",
                     "message": "Моделът не върна използваеми пакети.",
-                    "parse_errors": parse_errors}
-
-        cost = result.get("cost", 0.0)
+                    "parse_errors": parse_errors, "cost": cost}
 
         # ГЕЙТ ЗА САМОТО РАЗДЕЛЯНЕ (жив прогон 14.08.2026).  Досега приемахме
         # каквато и геометрия да върне моделът и разбирахме, че е негодна, чак
