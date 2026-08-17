@@ -102,7 +102,18 @@ def generate_clean_schedule(project: Path, attempts: int = 10) -> dict:
     from src.ai_router import AIRouter
     from src.provenance import build_quantity_index
 
-    prep = json.loads((RUNS_DIR / "_подготовка.json").read_text(encoding="utf-8"))
+    # Подготовката е артефакт на ДРУГ инструмент (`rerun_series`).  На
+    # 17.08.2026 тя беше извадена от обращение, защото съдържаше отсечки,
+    # преписани от промпта вместо прочетени от чертежа — и сглобяването падна
+    # с FileNotFoundError, след като документите вече бяха написани.  Пакетът
+    # за одитора не бива да зависи от това дали някой друг е пускал серия.
+    кеш = RUNS_DIR / "_подготовка.json"
+    if not кеш.exists():
+        print("  подготовката липсва — правя я наново (анализ + чертежи)...")
+        sys.path.insert(0, str(ROOT / "tools"))
+        from rerun_series import _prepare
+        _prepare(project)
+    prep = json.loads(кеш.read_text(encoding="utf-8"))
     ai = AIProcessor(router=AIRouter())
     boq_index = build_quantity_index(project)
 
