@@ -8,12 +8,26 @@ pytestmark = pytest.mark.e2e
 EXPORT_TIMEOUT = 30000
 
 
+#: Приложението възстановява предишната сесия при старт — чат и график — и при
+#: голям график това трае осезаемо.  Измерено 17.08.2026: разделите се появяват
+#: след повече от 30 секунди и двата експортни теста падаха с „Експорт не е
+#: видим", което чете като изтрит раздел.  Разделът си беше там.
+TABS_TIMEOUT = 90000
+
+#: Разделите на Streamlit НЕ са <button>.  Днешната версия ги рисува като
+#: `[data-testid="stTab"]` с `role="tab"`, затова старият селектор
+#: `button[role="tab"]` връщаше нула — човек вижда раздела на екрана, а тестът
+#: чака вечно и после съобщава „Експорт не е видим".  Измерено 17.08.2026.
+TAB = '[data-testid="stTab"]'
+
+
+
 def _go_to_export_tab(page):
     """Навигира до Export таба."""
-    export_tab = page.locator('button[role="tab"]', has_text="Експорт")
-    export_tab.wait_for(state="visible", timeout=30000)
-    export_tab.click()
-    page.wait_for_timeout(1000)
+    export_tab = page.locator(TAB, has_text="Експорт")
+    export_tab.first.wait_for(state="visible", timeout=TABS_TIMEOUT)
+    export_tab.first.click()
+    page.wait_for_timeout(1500)
 
 
 def test_pdf_generates_and_download_appears(app_page):

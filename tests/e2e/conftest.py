@@ -142,9 +142,36 @@ def app_page(page, streamlit_server):
         time.sleep(1)
     page.goto(streamlit_server, wait_until="domcontentloaded", timeout=120000)
     page.wait_for_selector('[data-testid="stApp"]', timeout=30000)
+    _sign_in(page)
     page.get_by_text("AI Статус").wait_for(state="visible", timeout=60000)
     page.wait_for_timeout(5000)
     return page
+
+
+def _sign_in(page) -> None:
+    """Мини входа, ако `APP_PASSWORD` е зададена.
+
+    ИЗМЕРЕНО 17.08.2026: шест от десетте E2E теста падаха с „Експорт не е
+    видим", „Gantt не се рисува", „секция Документация липсва" — и това четеше
+    като изтрит интерфейс.  Приложението обаче има парола (`app.py`, гейтът
+    завършва със `st.stop()`), а стойката не се логваше: тестовете описваха
+    екрана за вход, не приложението.
+
+    Паролата идва от същия `.env`, с който се вдига сървърът — тя не се пише
+    в кода и не се доставя с пакета.  Без нея гейтът го няма и входът се
+    прескача, тоест проверката работи и на машина без парола.
+    """
+    парола = (dotenv_values(APP_DIR / ".env") or {}).get("APP_PASSWORD") or ""
+    if not парола:
+        return
+    поле = page.get_by_label("Парола")
+    try:
+        поле.wait_for(state="visible", timeout=10000)
+    except Exception:
+        return                      # вече е влязло (сесията се пази)
+    поле.fill(парола)
+    page.get_by_role("button", name="Влез").click()
+    page.wait_for_timeout(3000)
 
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
