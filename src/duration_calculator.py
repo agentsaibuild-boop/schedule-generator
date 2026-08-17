@@ -183,6 +183,14 @@ _PAVERS_RE = re.compile(r"унипаваж|плочи|тротоарн\w*\s+пл
 _KERB_RE = re.compile(r"бордюр", re.IGNORECASE)
 _AREA_UNITS = frozenset({"кв.м", "кв. м", "м2", "м²", "m2", "квм", "sq.m"})
 
+#: Бетонов кожух около тръбата.  КСС го дава в обем, при това с мярка
+#: „m3/m'" — кубици на линеен метър, изписани като едно цяло („1,04m3*71,64m").
+_ENCASEMENT_RE = re.compile(r"кожух|обетонир|бетонова\s+обвивк", re.IGNORECASE)
+_VOLUME_UNITS = frozenset({
+    "куб.м", "куб. м", "м3", "м³", "m3", "m³", "кубм", "cu.m",
+    "m3/m'", "m3/m", "м3/м", "м3/м'",
+})
+
 # Кирилски букви, визуално идентични с латински.  Ползват се за поправяне
 # на OCR грешки при разпознаване на материала — виж `normalize_homoglyphs`.
 _HOMOGLYPHS: dict[str, str] = {
@@ -686,6 +694,31 @@ def calculate_task_duration(
                 float(rate), area_key,
             )
         return DurationResult(None, "площна дейност без норма в конфига",
+                              code=CODE_NOT_PARAMETRIC)
+
+    # --- Обемни: бетонов кожух около тръбата ---
+    #
+    # ИЗМЕРЕНО 17.08.2026: трите реда „Бетонов кожух за тръба DN 500/700/1000"
+    # излизаха NOT_PARAMETRIC и получаваха медианата от шаблона — 3 дни.  Тоест
+    # 84.7 м³ и 6.93 м³ струваха еднакво време, а обемът не значеше нищо.
+    #
+    # В еталона кожухът няма своя задача: той е вътре в стъпката за полагане и
+    # само три от 46-те участъка го носят — техните стъпки траят 18, 36 и 4 дни
+    # при медиана 3.  Оттам е изведена нормата (виж `_derivation` в конфига).
+    if _ENCASEMENT_RE.search(name) and isinstance(quantity, (int, float)) \
+            and not isinstance(quantity, bool) and quantity > 0 \
+            and unit in _VOLUME_UNITS:
+        vol_cfg = cfg.get("volume_productivities", {}) if isinstance(cfg, dict) else {}
+        entry = vol_cfg.get("concrete_encasement")
+        rate = entry.get("effective_rate") if isinstance(entry, dict) else None
+        if isinstance(rate, (int, float)) and rate > 0:
+            return DurationResult(
+                count_duration(quantity, rate),
+                f"бетонов кожух: {quantity:g} м³ ÷ {rate:g} м³/ден "
+                "[concrete_encasement]",
+                float(rate), "concrete_encasement",
+            )
+        return DurationResult(None, "бетонов кожух без норма в конфига",
                               code=CODE_NOT_PARAMETRIC)
 
     # --- Линейни не-тръбни: бордюри (кв.цена на метър, но НЕ тръба) ---

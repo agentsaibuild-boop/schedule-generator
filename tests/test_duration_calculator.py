@@ -748,3 +748,59 @@ class TestConditionFactors:
                 "soil": "loose"}
         base = calculate_task_duration(task).days
         assert calculate_task_duration(task, apply_conditions=True).days <= base
+
+
+# ===================================================================
+# Бетонов кожух — обемна норма, изведена от еталона (17.08.2026)
+# ===================================================================
+#
+# ИЗМЕРЕНО: трите реда „Бетонов кожух за тръба DN 500/700/1000" излизаха
+# NOT_PARAMETRIC и получаваха медианата от шаблона — 3 дни.  Тоест 84.7 м³ и
+# 6.93 м³ струваха еднакво време, а обемът не значеше нищо.
+#
+# FAILURE означава: обемните дейности пак ще получават продължителност от
+# шаблона вместо от количеството си, и срокът няма да зависи от това колко
+# бетон има за изливане.
+
+
+def _кожух(quantity, unit="m3/m'", name="Полагане — Бетонов кожух за тръба DN 1000"):
+    """Задачата, както я ражда веригата; `min_days=1` е както в конвейера."""
+    return calculate_task_duration(
+        {"name": name, "quantity": quantity, "unit": unit}, min_days=1)
+
+
+def test_encasement_duration_follows_the_volume():
+    малък = _кожух(6.93)
+    голям = _кожух(84.7)
+
+    assert малък.days and голям.days, "кожухът пак е без сметната норма"
+    assert голям.days > малък.days, (
+        f"84.7 м³ и 6.93 м³ дават еднакво време ({голям.days} срещу {малък.days})")
+
+
+def test_encasement_uses_the_configured_rate():
+    from src.duration_calculator import load_productivities
+
+    норма = (load_productivities().get("volume_productivities", {})
+             .get("concrete_encasement", {}).get("effective_rate"))
+    резултат = _кожух(80.0)
+
+    assert норма, "нормата липсва в config/productivities.json"
+    assert резултат.rate == pytest.approx(float(норма))
+    assert резултат.days == 5           # 80 ÷ 16.5 = 4.85 → 5
+
+
+def test_encasement_is_marked_as_calculated_not_guessed():
+    резултат = _кожух(84.7)
+
+    assert резултат.code == "CALCULATED", f"кожухът се отчита като недоказан: {резултат.code}"
+    assert "кожух" in (резултат.reason or "").lower()
+
+
+def test_a_volume_row_that_is_not_encasement_is_left_alone():
+    """Нормата важи за кожуха, не за всяка кубатура."""
+    резултат = calculate_task_duration(
+        {"name": "Изкоп на земни маси", "quantity": 500.0, "unit": "м3"},
+        min_days=1)
+
+    assert резултат.days is None

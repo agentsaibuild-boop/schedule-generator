@@ -1,64 +1,253 @@
 {
-  "version": "0.5",
-  "_source": "knowledge/skills/references/productivities.md — верифицирана таблица v0.4; PP канализация добавена v0.5 по полево правило на изпълнителя (2026-08).",
-  "_note": "Единствен НОРМАТИВЕН източник за детерминистично ДОКАЗАНИТЕ продължителности. Чете се от src/duration_calculator.py. effective_rate е ЕДИНСТВЕНАТА стойност, използвана за duration (урок #16): drill_rate/dig_rate са технически скорости на отделна операция, НЕ на цикъла. AI-предложена стойност за задача без приложимо правило остава NOT_PROVEN. Под strict политика NOT_PROVEN блокира експорта; под provisional (по подразбиране)/lenient графикът е експортируем, а недоказаните излизат като видими export_blockers (не се блокират тихо).",
-  "_provenance_v0_5": {
-    "_disclaimer": "Долните норми са ПОЛЕВИ правила на изпълнителя (2026-08), НЕ лабораторно/научно потвърдени. confidence=provisional до преглед.",
-    "operation_scope": "По конвенция (урок #16) effective_rate = ПЪЛНИЯТ цикъл, ограничен от най-бавната операция (изкоп→подложка→полагане→връзки→засипване). За PP/PE-new изпълнителят даде стойността в същия контекст (ефективна м/ден), но ТОЧНИЯТ обхват на включените операции (укрепване? изпитване? възстановяване?) НЕ е изрично потвърден — да се потвърди преди подписване.",
-    "entries": {
-      "PP_Ф300_800": {"rate": 12, "unit": "м/ден", "source_type": "contractor_field_rule", "source_date": "2026-08-04", "source_owner": "изпълнител (роля/документ да се впише)", "project_type": "urban_mixed_sewer", "crew_size": null, "shift_hours": null, "confidence": "provisional", "reviewed_by": ""},
-      "PP_over_800": {"rate": 6, "unit": "м/ден", "source_type": "contractor_field_rule", "source_date": "2026-08-04", "project_type": "urban_mixed_sewer", "crew_size": null, "confidence": "provisional", "reviewed_by": ""},
-      "PE_Ф200_350": {"rate": 40, "unit": "м/ден", "source_type": "contractor_field_rule", "source_date": "2026-08-04", "project_type": "urban_distribution_network", "crew_size": null, "confidence": "provisional", "reviewed_by": ""},
-      "SVO": {"rate": 4, "unit": "бр/ден", "source_type": "contractor_field_rule", "source_date": "2026-08-04", "confidence": "provisional", "reviewed_by": ""},
-      "SKO": {"rate": 4, "unit": "бр/ден", "source_type": "contractor_field_rule", "source_date": "2026-08-04", "confidence": "provisional", "reviewed_by": ""},
-      "asphalt_restoration": {"rate": 150, "unit": "м²/ден", "source_type": "range_selection", "range": "100-300", "basis": "малък градски обект", "confidence": "provisional", "reviewed_by": ""},
-      "pavers_unipavage": {"rate": 80, "unit": "м²/ден", "source_type": "derived", "basis": "15-30 м²/работник × crew_size 4", "crew_size": 4, "confidence": "provisional", "reviewed_by": ""},
-      "kerb_road": {"rate": 20, "unit": "м/ден", "source_type": "range_selection", "range": "15-30", "basis": "пътен бордюр 15/25/50 на бригада", "confidence": "provisional", "reviewed_by": ""}
-    }
-  },
-  "productivities": {
-    "DN90_PE_open": {"dig_rate": 57.6, "effective_rate": 12, "unit": "м/ден"},
-    "DN110_PE_open": {"dig_rate": 55.2, "effective_rate": 13, "unit": "м/ден"},
-    "DN160_PE_open": {"dig_rate": 52.8, "effective_rate": 14, "unit": "м/ден"},
-    "DN90_PE_HDD": {"drill_rate": 56, "effective_rate": 12, "unit": "м/ден"},
-    "DN110_PE_HDD": {"drill_rate": 60, "effective_rate": 13, "unit": "м/ден"},
-    "DN125_PE_HDD": {"drill_rate": 65, "effective_rate": 14, "unit": "м/ден"},
-    "DN315_PVC_open": {"dig_rate": 48, "effective_rate": 12, "unit": "м/ден"},
-    "DN400_PVC_open": {"dig_rate": 45, "effective_rate": 11, "unit": "м/ден"},
-    "DN500_PE_open": {"dig_rate": 48, "effective_rate": 15, "unit": "м/ден"},
-    "DN630_open": {"dig_rate": 35, "effective_rate": 9, "unit": "м/ден"},
-    "DN300_CI_open": {"dig_rate": 10.5, "effective_rate": 8, "unit": "м/ден"},
-    "DN200_PE_open": {"effective_rate": 40, "unit": "м/ден", "_src": "полево правило: PE Ф200-350=40 (2026-08)"},
-    "DN225_PE_open": {"effective_rate": 40, "unit": "м/ден", "_src": "полево правило: PE Ф200-350=40 (2026-08)"},
-    "DN250_PE_open": {"effective_rate": 40, "unit": "м/ден", "_src": "полево правило: PE Ф200-350=40 (2026-08)"},
-    "DN280_PE_open": {"effective_rate": 40, "unit": "м/ден", "_src": "полево правило: PE Ф200-350=40 (2026-08)"},
-    "DN315_PE_open": {"effective_rate": 40, "unit": "м/ден", "_src": "полево правило: PE Ф200-350=40 (2026-08)"},
-    "DN350_PE_open": {"effective_rate": 40, "unit": "м/ден", "_src": "полево правило: PE Ф200-350=40 (2026-08)"},
-    "DN300_PP_open": {"effective_rate": 12, "unit": "м/ден", "_src": "полево правило: Ф300-800=12 (2026-08)"},
-    "DN400_PP_open": {"effective_rate": 12, "unit": "м/ден", "_src": "полево правило: Ф300-800=12 (2026-08)"},
-    "DN500_PP_open": {"effective_rate": 12, "unit": "м/ден", "_src": "полево правило: Ф300-800=12 (2026-08)"},
-    "DN600_PP_open": {"effective_rate": 12, "unit": "м/ден", "_src": "полево правило: Ф300-800=12 (2026-08)"},
-    "DN700_PP_open": {"effective_rate": 12, "unit": "м/ден", "_src": "полево правило: Ф300-800=12 (2026-08)"},
-    "DN800_PP_open": {"effective_rate": 12, "unit": "м/ден", "_src": "полево правило: Ф300-800=12 (2026-08)"},
-    "DN1000_PP_open": {"effective_rate": 6, "unit": "м/ден", "_src": "полево правило: Ф>800=6 (2026-08)"},
-    "DN1200_PP_open": {"effective_rate": 6, "unit": "м/ден", "_src": "полево правило: Ф>800=6 (2026-08)"}
-  },
-  "area_productivities": {
-    "asphalt_restoration": {"effective_rate": 150, "unit": "м²/ден", "_src": "полево, градски обект 100-300, избрано 150 (2026-08)"},
-    "pavers_unipavage": {"effective_rate": 80, "unit": "м²/ден", "_src": "15-30 м²/работник × бригада 4 = 80 (2026-08)"}
-  },
-  "linear_productivities": {
-    "kerb_road": {"effective_rate": 20, "unit": "м/ден", "_src": "пътен бордюр 15/25/50, диапазон 15-30, избрано 20 (2026-08)"}
-  },
-  "terrain_factors": {
-    "asphalt": 0.75,
-    "dirt_road": 1.0,
-    "forest": 0.6
-  },
-  "disinfection_days": {
-    "DN90_110_PE_short": 2,
-    "mixed_DN_large": 4,
-    "DN300_CI_forest": 6,
-    "DN500_PE": 4
+ "version": "0.5",
+ "_source": "knowledge/skills/references/productivities.md — верифицирана таблица v0.4; PP канализация добавена v0.5 по полево правило на изпълнителя (2026-08).",
+ "_note": "Единствен НОРМАТИВЕН източник за детерминистично ДОКАЗАНИТЕ продължителности. Чете се от src/duration_calculator.py. effective_rate е ЕДИНСТВЕНАТА стойност, използвана за duration (урок #16): drill_rate/dig_rate са технически скорости на отделна операция, НЕ на цикъла. AI-предложена стойност за задача без приложимо правило остава NOT_PROVEN. Под strict политика NOT_PROVEN блокира експорта; под provisional (по подразбиране)/lenient графикът е експортируем, а недоказаните излизат като видими export_blockers (не се блокират тихо).",
+ "_provenance_v0_5": {
+  "_disclaimer": "Долните норми са ПОЛЕВИ правила на изпълнителя (2026-08), НЕ лабораторно/научно потвърдени. confidence=provisional до преглед.",
+  "operation_scope": "По конвенция (урок #16) effective_rate = ПЪЛНИЯТ цикъл, ограничен от най-бавната операция (изкоп→подложка→полагане→връзки→засипване). За PP/PE-new изпълнителят даде стойността в същия контекст (ефективна м/ден), но ТОЧНИЯТ обхват на включените операции (укрепване? изпитване? възстановяване?) НЕ е изрично потвърден — да се потвърди преди подписване.",
+  "entries": {
+   "PP_Ф300_800": {
+    "rate": 12,
+    "unit": "м/ден",
+    "source_type": "contractor_field_rule",
+    "source_date": "2026-08-04",
+    "source_owner": "изпълнител (роля/документ да се впише)",
+    "project_type": "urban_mixed_sewer",
+    "crew_size": null,
+    "shift_hours": null,
+    "confidence": "provisional",
+    "reviewed_by": ""
+   },
+   "PP_over_800": {
+    "rate": 6,
+    "unit": "м/ден",
+    "source_type": "contractor_field_rule",
+    "source_date": "2026-08-04",
+    "project_type": "urban_mixed_sewer",
+    "crew_size": null,
+    "confidence": "provisional",
+    "reviewed_by": ""
+   },
+   "PE_Ф200_350": {
+    "rate": 40,
+    "unit": "м/ден",
+    "source_type": "contractor_field_rule",
+    "source_date": "2026-08-04",
+    "project_type": "urban_distribution_network",
+    "crew_size": null,
+    "confidence": "provisional",
+    "reviewed_by": ""
+   },
+   "SVO": {
+    "rate": 4,
+    "unit": "бр/ден",
+    "source_type": "contractor_field_rule",
+    "source_date": "2026-08-04",
+    "confidence": "provisional",
+    "reviewed_by": ""
+   },
+   "SKO": {
+    "rate": 4,
+    "unit": "бр/ден",
+    "source_type": "contractor_field_rule",
+    "source_date": "2026-08-04",
+    "confidence": "provisional",
+    "reviewed_by": ""
+   },
+   "asphalt_restoration": {
+    "rate": 150,
+    "unit": "м²/ден",
+    "source_type": "range_selection",
+    "range": "100-300",
+    "basis": "малък градски обект",
+    "confidence": "provisional",
+    "reviewed_by": ""
+   },
+   "pavers_unipavage": {
+    "rate": 80,
+    "unit": "м²/ден",
+    "source_type": "derived",
+    "basis": "15-30 м²/работник × crew_size 4",
+    "crew_size": 4,
+    "confidence": "provisional",
+    "reviewed_by": ""
+   },
+   "kerb_road": {
+    "rate": 20,
+    "unit": "м/ден",
+    "source_type": "range_selection",
+    "range": "15-30",
+    "basis": "пътен бордюр 15/25/50 на бригада",
+    "confidence": "provisional",
+    "reviewed_by": ""
+   }
   }
+ },
+ "productivities": {
+  "DN90_PE_open": {
+   "dig_rate": 57.6,
+   "effective_rate": 12,
+   "unit": "м/ден"
+  },
+  "DN110_PE_open": {
+   "dig_rate": 55.2,
+   "effective_rate": 13,
+   "unit": "м/ден"
+  },
+  "DN160_PE_open": {
+   "dig_rate": 52.8,
+   "effective_rate": 14,
+   "unit": "м/ден"
+  },
+  "DN90_PE_HDD": {
+   "drill_rate": 56,
+   "effective_rate": 12,
+   "unit": "м/ден"
+  },
+  "DN110_PE_HDD": {
+   "drill_rate": 60,
+   "effective_rate": 13,
+   "unit": "м/ден"
+  },
+  "DN125_PE_HDD": {
+   "drill_rate": 65,
+   "effective_rate": 14,
+   "unit": "м/ден"
+  },
+  "DN315_PVC_open": {
+   "dig_rate": 48,
+   "effective_rate": 12,
+   "unit": "м/ден"
+  },
+  "DN400_PVC_open": {
+   "dig_rate": 45,
+   "effective_rate": 11,
+   "unit": "м/ден"
+  },
+  "DN500_PE_open": {
+   "dig_rate": 48,
+   "effective_rate": 15,
+   "unit": "м/ден"
+  },
+  "DN630_open": {
+   "dig_rate": 35,
+   "effective_rate": 9,
+   "unit": "м/ден"
+  },
+  "DN300_CI_open": {
+   "dig_rate": 10.5,
+   "effective_rate": 8,
+   "unit": "м/ден"
+  },
+  "DN200_PE_open": {
+   "effective_rate": 40,
+   "unit": "м/ден",
+   "_src": "полево правило: PE Ф200-350=40 (2026-08)"
+  },
+  "DN225_PE_open": {
+   "effective_rate": 40,
+   "unit": "м/ден",
+   "_src": "полево правило: PE Ф200-350=40 (2026-08)"
+  },
+  "DN250_PE_open": {
+   "effective_rate": 40,
+   "unit": "м/ден",
+   "_src": "полево правило: PE Ф200-350=40 (2026-08)"
+  },
+  "DN280_PE_open": {
+   "effective_rate": 40,
+   "unit": "м/ден",
+   "_src": "полево правило: PE Ф200-350=40 (2026-08)"
+  },
+  "DN315_PE_open": {
+   "effective_rate": 40,
+   "unit": "м/ден",
+   "_src": "полево правило: PE Ф200-350=40 (2026-08)"
+  },
+  "DN350_PE_open": {
+   "effective_rate": 40,
+   "unit": "м/ден",
+   "_src": "полево правило: PE Ф200-350=40 (2026-08)"
+  },
+  "DN300_PP_open": {
+   "effective_rate": 12,
+   "unit": "м/ден",
+   "_src": "полево правило: Ф300-800=12 (2026-08)"
+  },
+  "DN400_PP_open": {
+   "effective_rate": 12,
+   "unit": "м/ден",
+   "_src": "полево правило: Ф300-800=12 (2026-08)"
+  },
+  "DN500_PP_open": {
+   "effective_rate": 12,
+   "unit": "м/ден",
+   "_src": "полево правило: Ф300-800=12 (2026-08)"
+  },
+  "DN600_PP_open": {
+   "effective_rate": 12,
+   "unit": "м/ден",
+   "_src": "полево правило: Ф300-800=12 (2026-08)"
+  },
+  "DN700_PP_open": {
+   "effective_rate": 12,
+   "unit": "м/ден",
+   "_src": "полево правило: Ф300-800=12 (2026-08)"
+  },
+  "DN800_PP_open": {
+   "effective_rate": 12,
+   "unit": "м/ден",
+   "_src": "полево правило: Ф300-800=12 (2026-08)"
+  },
+  "DN1000_PP_open": {
+   "effective_rate": 6,
+   "unit": "м/ден",
+   "_src": "полево правило: Ф>800=6 (2026-08)"
+  },
+  "DN1200_PP_open": {
+   "effective_rate": 6,
+   "unit": "м/ден",
+   "_src": "полево правило: Ф>800=6 (2026-08)"
+  }
+ },
+ "area_productivities": {
+  "asphalt_restoration": {
+   "effective_rate": 150,
+   "unit": "м²/ден",
+   "_src": "полево, градски обект 100-300, избрано 150 (2026-08)"
+  },
+  "pavers_unipavage": {
+   "effective_rate": 80,
+   "unit": "м²/ден",
+   "_src": "15-30 м²/работник × бригада 4 = 80 (2026-08)"
+  }
+ },
+ "linear_productivities": {
+  "kerb_road": {
+   "effective_rate": 20,
+   "unit": "м/ден",
+   "_src": "пътен бордюр 15/25/50, диапазон 15-30, избрано 20 (2026-08)"
+  }
+ },
+ "terrain_factors": {
+  "asphalt": 0.75,
+  "dirt_road": 1.0,
+  "forest": 0.6
+ },
+ "disinfection_days": {
+  "DN90_110_PE_short": 2,
+  "mixed_DN_large": 4,
+  "DN300_CI_forest": 6,
+  "DN500_PE": 4
+ },
+ "volume_productivities": {
+  "concrete_encasement": {
+   "effective_rate": 16.5,
+   "unit": "м³/ден",
+   "_src": "ИЗВЕДЕНА от еталонния човешки график (17.08.2026), не полево правило на изпълнителя.",
+   "_derivation": "В еталона бетоновият кожух НЯМА своя задача — той е вътре в стъпката за полагане на участъка, и само 3 от 46-те канализационни участъка го носят. Техните стъпки за полагане траят 18, 36 и 4 дни, при медиана 3 дни за участък без кожух. Приписаното на кожуха е 58 − 3×3 = 49 дни за 807.53 м³ (74.5056 + 55.428 + 677.6 от КСС) → 16.5 м³/ден.",
+   "_assumption": "Допуска се, че НЕкожуховата част на тези три участъка трае колкото медианата. Ако те са били по-обемни и по друга причина, нормата е занижена — тоест срокът излиза по-дълъг, а не по-къс.",
+   "confidence": "derived"
+  }
+ }
 }
