@@ -159,6 +159,7 @@ def test_exported_xml_declares_capacity():
     import xml.etree.ElementTree as ET
 
     from src.export_xml import export_to_mspdi_xml
+    from src.schedule_builder import _load_resource_capacity
 
     schedule = [{"id": "A", "name": "Изкоп", "duration": 2, "start_day": 1,
                  "end_day": 2, "dependencies": [], "team": "Фронт 1",
@@ -169,8 +170,13 @@ def test_exported_xml_declares_capacity():
     units = {r.findtext(f"{ns}Name"): r.findtext(f"{ns}MaxUnits")
              for r in root.iter(f"{ns}Resource")}
 
-    assert units["Багер универсален"] == "2.0"
-    assert units["Фронт 1"] == "3.0"
+    # Числата НЕ се заковават тук: те се мерят от еталонния график
+    # (`tools/extract_resource_capacity.py`) и се менят с него.  Проверимото
+    # е тъждеството — XML-ът да обявява това, с което е смятано, иначе MS
+    # Project преизчислява по друга наличност и показва друг срок.
+    capacity = _load_resource_capacity()["capacity"]
+    assert units["Багер универсален"] == f"{float(capacity['Багер универсален'])}"
+    assert units["Фронт 1"] == f"{float(capacity['Фронт 1'])}"
 
 
 # ---------------------------------------------------------------------------
