@@ -632,3 +632,100 @@ def test_cost_deepseek_still_cheap():
     r = make_router()
     c = r._calculate_cost("deepseek-chat", 1_000_000, 1_000_000)
     assert abs(c - 0.70) < 0.01, c
+
+
+# ===================================================================
+# Работникът се изключва за сесията само при СИСТЕМНА засечка —
+# по ВСИЧКИ пътища, не само по генериращия (одит 17.08.2026)
+# ===================================================================
+#
+# FAILURE означава: src/ai_router.py :: една преходна грешка при проверката,
+# при прилагането на корекции или при OCR пак ще прехвърля цялата останала
+# сесия — включително генерирането — на контрольора, който е 5–25 пъти
+# по-скъп, без това да личи в изхода.
+
+def test_verify_failure_does_not_disable_the_worker():
+    """Проверката е РЕЗЕРВНИЯТ път на работника — една засечка не го изключва."""
+    from unittest.mock import MagicMock
+
+    r = make_router()
+    r.anthropic_available = False       # контрольорът е извън строя
+    r.deepseek_available = True
+    r._verify_with_model = MagicMock(side_effect=RuntimeError("засечка"))
+
+    r.verify_schedule("{}", "правила")
+
+    assert r.deepseek_available is True, "работникът е изключен след ЕДИН провал"
+
+
+def test_verify_failures_disable_the_worker_only_when_systemic():
+    from unittest.mock import MagicMock
+
+    r = make_router()
+    r.anthropic_available = False
+    r.deepseek_available = True
+    r._verify_with_model = MagicMock(side_effect=RuntimeError("засечка"))
+
+    for _ in range(2):
+        r.verify_schedule("{}", "правила")
+    assert r.deepseek_available is True
+
+    r.verify_schedule("{}", "правила")
+    assert r.deepseek_available is False, "системната засечка трябва да го изключи"
+
+
+def test_corrections_failure_does_not_disable_the_worker():
+    from unittest.mock import MagicMock
+
+    r = make_router()
+    r.deepseek_available = True
+    r.anthropic_available = True
+    r._apply_with_model = MagicMock(side_effect=RuntimeError("засечка"))
+
+    r.apply_corrections("{}", [{"task_id": 1, "fix": "x"}])
+
+    assert r.deepseek_available is True, "работникът е изключен след ЕДИН провал"
+
+
+def test_ocr_failure_of_a_separate_vision_model_spares_the_worker(monkeypatch):
+    """`OCR_MODEL` без vision достъп проваля ВСЯКА страница.
+
+    Това не казва нищо за работника, който с текста се справя — а преди
+    поправката отнасяше и генерирането със себе си още на първата страница.
+    """
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr("src.ai_router.MODEL_OCR", "vision/друг-модел")
+    r = make_router()
+    r.deepseek_available = True
+    r.anthropic_available = True
+    r._ocr_deepseek = MagicMock(side_effect=RuntimeError("няма vision"))
+    r._ocr_anthropic = MagicMock(return_value="текст")
+
+    for _ in range(5):
+        assert r.ocr_pdf_page("base64") == "текст"
+
+    assert r.deepseek_available is True, "OCR моделът е изключил работника"
+    assert r.ocr_available is False, "провалящият се OCR модел се пробва вечно"
+    assert r._ocr_anthropic.call_count == 5, "резервният път не се е задействал"
+
+
+def test_ocr_failure_counts_for_the_worker_when_it_is_the_same_model(monkeypatch):
+    """Без зададен `OCR_MODEL` OCR-ът върви през самия работник — тогава
+    провалите му са негови и след третия го изключват."""
+    from unittest.mock import MagicMock
+    from src.ai_router import MODEL_WORKER as _worker
+
+    monkeypatch.setattr("src.ai_router.MODEL_OCR", _worker)
+    r = make_router()
+    r.deepseek_available = True
+    r.anthropic_available = True
+    r._ocr_deepseek = MagicMock(side_effect=RuntimeError("засечка"))
+    r._ocr_anthropic = MagicMock(return_value="текст")
+
+    for _ in range(2):
+        r.ocr_pdf_page("base64")
+    assert r.deepseek_available is True
+
+    r.ocr_pdf_page("base64")
+    assert r.deepseek_available is False, "системната засечка трябва да го изключи"

@@ -249,6 +249,14 @@ class AIRouter:
         # работника за цялата сесия — само този брояч решава кога е системно.
         self._worker_failures: int = 0
 
+        # OCR моделът е ОТДЕЛЕН от работника, когато е зададен `OCR_MODEL`
+        # (работникът е text-only, vision минава през друг модел).  Затова и
+        # достъпността му се брои отделно: модел без реален vision достъп се
+        # проваля при ВСЯКА страница, а това не бива да изключва работника,
+        # който с текста се справя.
+        self._ocr_failures: int = 0
+        self.ocr_available: bool = True
+
         self.usage_log: list[dict] = []
 
         # Cumulative usage persistence (across sessions)
@@ -396,6 +404,44 @@ class AIRouter:
             self.fallback_active = True
             self.fallback_source = "both"
 
+    def _note_worker_failure(self, where: str, exc: BaseException,
+                             *, to_controller: bool = True) -> None:
+        """Отчети ЕДИН провал на работника; изключи го само ако е системен.
+
+        Правилото беше въведено в `chat()` (12.08.2026), но останалите три пътя
+        — проверка, прилагане на корекции и OCR — още вдигаха
+        `deepseek_available = False` при първата засечка.  Ефектът е същият и
+        оттам: една преходна грешка в който и да е от тях прехвърля ЦЯЛАТА
+        по-нататъшна сесия, включително генерирането, на контрольора, който е
+        5–25 пъти по-скъп, без това да личи в изхода.
+
+        Затова правилото е едно и живее на едно място.
+
+        `to_controller` казва дали тази заявка наистина се поема от контрольора.
+        При проверката на графика работникът е РЕЗЕРВАТА (контрольорът е пробван
+        пръв), тоест няма къде да се падне — там записът не бива да твърди
+        прехвърляне, което не се е случило.
+        """
+        self._worker_failures += 1
+        logger.warning(
+            "Работникът %s се провали при %s (%s) — %s (%d-и пореден провал "
+            "от %d, след които работникът се изключва за сесията).",
+            MODEL_WORKER, where, exc,
+            "заявката минава през контрольора, който е чувствително по-скъп"
+            if to_controller else "резервен път за тази заявка няма",
+            self._worker_failures, _WORKER_FAILURES_BEFORE_DISABLE)
+        if self._worker_failures >= _WORKER_FAILURES_BEFORE_DISABLE:
+            logger.error(
+                "Работникът %s се изключва за сесията след %d поредни провала "
+                "— ОТСЕГА ВСИЧКО минава през контрольора, който е чувствително "
+                "по-скъп.", MODEL_WORKER, self._worker_failures)
+            self.deepseek_available = False
+            self._update_fallback_state()
+
+    def _note_worker_success(self) -> None:
+        """Нулирай брояча — провалите се броят само ПОРЕДНИ."""
+        self._worker_failures = 0
+
     # ------------------------------------------------------------------
     # Chat (Worker = DeepSeek, fallback = Anthropic)
     # ------------------------------------------------------------------
@@ -434,7 +480,7 @@ class AIRouter:
             try:
                 result = self._chat_deepseek(messages, system_prompt, max_tokens=max_tokens,
                                              response_schema=response_schema)
-                self._worker_failures = 0
+                self._note_worker_success()
                 return result
             except Exception as exc:
                 # ЕДНА ЗАСЕЧКА НЕ ИЗКЛЮЧВА РАБОТНИКА ЗА ЦЯЛАТА СЕСИЯ.
@@ -451,21 +497,7 @@ class AIRouter:
                 # изключва чак след `_WORKER_FAILURES_BEFORE_DISABLE` поредни
                 # провала, тоест когато засечката наистина е системна (изтекъл
                 # ключ, свършил кредит), а не преходна.
-                self._worker_failures += 1
-                logger.warning(
-                    "Работникът %s се провали (%s) — заявката минава през "
-                    "контрольора (%d-и пореден провал от %d, след които "
-                    "работникът се изключва за сесията).",
-                    MODEL_WORKER, exc, self._worker_failures,
-                    _WORKER_FAILURES_BEFORE_DISABLE)
-                if self._worker_failures >= _WORKER_FAILURES_BEFORE_DISABLE:
-                    logger.error(
-                        "Работникът %s се изключва за сесията след %d поредни "
-                        "провала — ОТСЕГА ВСИЧКО минава през контрольора, "
-                        "който е чувствително по-скъп.",
-                        MODEL_WORKER, self._worker_failures)
-                    self.deepseek_available = False
-                    self._update_fallback_state()
+                self._note_worker_failure("генериране", exc)
 
         # Fallback to Anthropic
         if self.anthropic_available:
@@ -799,16 +831,18 @@ class AIRouter:
         # Fallback to DeepSeek
         if self.deepseek_available:
             try:
-                return self._verify_with_model(
+                verdict = self._verify_with_model(
                     "deepseek", system_prompt, user_message
                 )
+                self._note_worker_success()
+                return verdict
             except JSONContractError as exc:
+                # Моделът отговори — API-то работи.  Не е провал на работника.
                 logger.error("DeepSeek verify: неизползваем отговор — %s", exc)
                 parse_failures.append(f"DeepSeek: {exc}")
             except Exception as exc:
-                logger.error("DeepSeek fallback verify also failed: %s", exc)
-                self.deepseek_available = False
-                self._update_fallback_state()
+                self._note_worker_failure("проверка на графика", exc,
+                                          to_controller=False)
 
         if parse_failures:
             # Разграничено от „моделите са недостъпни": тук те отговарят,
@@ -925,11 +959,12 @@ class AIRouter:
         # Try DeepSeek first
         if self.deepseek_available:
             try:
-                return self._apply_with_model("deepseek", messages, full_system, schedule_json)
+                applied = self._apply_with_model(
+                    "deepseek", messages, full_system, schedule_json)
+                self._note_worker_success()
+                return applied
             except Exception as exc:
-                logger.warning("DeepSeek corrections failed: %s", exc)
-                self.deepseek_available = False
-                self._update_fallback_state()
+                self._note_worker_failure("прилагане на корекции", exc)
 
         # Fallback to Anthropic
         if self.anthropic_available:
@@ -1236,16 +1271,38 @@ class AIRouter:
             "Отговори САМО с извлечения текст, без коментари."
         )
 
-        # Try DeepSeek first
-        if self.deepseek_available:
+        # Try DeepSeek (или зададения OCR модел) first
+        ocr_is_worker = MODEL_OCR == MODEL_WORKER
+        if self.ocr_available and (self.deepseek_available or not ocr_is_worker):
             try:
-                return self._ocr_deepseek(
+                text = self._ocr_deepseek(
                     image_base64, ocr_user_prompt, full_ocr_system, media_type=media_type
                 )
+                self._ocr_failures = 0
+                if ocr_is_worker:
+                    self._note_worker_success()
+                return text
             except Exception as exc:
-                logger.warning("DeepSeek OCR failed: %s", exc)
-                self.deepseek_available = False
-                self._update_fallback_state()
+                if ocr_is_worker:
+                    self._note_worker_failure("OCR", exc)
+                else:
+                    # Отделен vision модел: провалът му НЕ казва нищо за
+                    # работника.  Типичната причина е точно тази — `OCR_MODEL`
+                    # без реален vision достъп; тогава пада всяка страница и
+                    # преди тази промяна отнасяше и генерирането със себе си.
+                    self._ocr_failures += 1
+                    logger.warning(
+                        "OCR моделът %s се провали (%s) — страницата минава "
+                        "през контрольора (%d-и пореден провал от %d).",
+                        MODEL_OCR, exc, self._ocr_failures,
+                        _WORKER_FAILURES_BEFORE_DISABLE)
+                    if self._ocr_failures >= _WORKER_FAILURES_BEFORE_DISABLE:
+                        logger.error(
+                            "OCR моделът %s се изключва за сесията след %d "
+                            "поредни провала — провери дали има vision достъп. "
+                            "ОТСЕГА OCR минава през контрольора.",
+                            MODEL_OCR, self._ocr_failures)
+                        self.ocr_available = False
 
         # Fallback to Anthropic
         if self.anthropic_available:
