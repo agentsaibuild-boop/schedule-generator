@@ -934,3 +934,106 @@ class TestExactDecimalConservation:
         пакети, _ = normalize_over_allocation(self._пакети([1244.73] * 15), [Row()])
         сбор = sum(i.quantity for p in пакети for i in p.items)
         assert abs(сбор - 18671.0) < 1e-9, f"остатък {сбор - 18671.0:+.4f}"
+
+
+# ===================================================================
+# Редове, които моделът не пое и след повторните питания (17.08.2026)
+# ===================================================================
+#
+# ИЗМЕРЕНО върху 18 живи прогона: водещата причина график да не е чист са
+# непокрити редове, а начело са трите „Бетонов кожух за тръба DN 500/700/1000"
+# — липсват в 7 от 18.  Същите три бяха отбелязани и на 06.08.2026.
+#
+# FAILURE означава: работа от КСС пак ще изчезва от графика, защото моделът не
+# я е цитирал — при положение че кой участък може да я поеме следва от класа на
+# реда и от диаметъра в описанието му, а те са наши данни.
+
+
+class _Ред:
+    """Ред от КСС — колкото полета ползва `assign_orphan_rows`."""
+
+    def __init__(self, ref, description, quantity, unit="m", record_id="r1"):
+        self.ref = ref
+        self.description = description
+        self.quantity = quantity
+        self.unit = unit
+        self.record_id = record_id
+
+
+def _sewer(pkg_id: str, quantity: float, dn: int | None = None):
+    return SpatialWorkPackage(
+        id=pkg_id, network="К", chain="sewer_section", branch=f"кл. {pkg_id}",
+        dn=dn,
+        items=(PackageItem("КСС.xlsx!Канал!9", "laying", quantity, "m", "тръби"),))
+
+
+class TestOrphanRows:
+    def test_an_unclaimed_row_is_split_across_capable_packages(self):
+        from src.work_package import assign_orphan_rows, load_chains
+
+        пакети = [_sewer("К1", 300.0), _sewer("К2", 100.0)]
+        ред = _Ред("КСС.xlsx!Канал!18", "Бетонов кожух за тръба DN 1000", 400.0,
+                   "m3/m'")
+
+        нови, бележки = assign_orphan_rows(пакети, [ред], load_chains())
+        поето = {p.id: sum(float(i.quantity) for i in p.items
+                           if str(i.source_ref) == str(ред.ref))
+                 for p in нови}
+
+        assert sum(поето.values()) == pytest.approx(400.0),             "сборът не е равен на реда от КСС"
+        assert поето["К1"] > поето["К2"],             "разделено по брой, а не пропорционално на количествата"
+        assert бележки and "ОТ КОДА" in бележки[0],             "произходът на разпределението не се вижда в описа"
+
+    def test_the_diameter_narrows_the_candidates(self):
+        """Кожух за DN 1000 не бива да пада върху участък DN 160."""
+        from src.work_package import assign_orphan_rows, load_chains
+
+        пакети = [_sewer("К1", 100.0, dn=1000), _sewer("К2", 100.0, dn=160)]
+        ред = _Ред("КСС.xlsx!Канал!18", "Бетонов кожух за тръба DN 1000", 50.0,
+                   "m3/m'")
+
+        нови, бележки = assign_orphan_rows(пакети, [ред], load_chains())
+        поето = {p.id: sum(float(i.quantity) for i in p.items
+                           if str(i.source_ref) == str(ред.ref))
+                 for p in нови}
+
+        assert поето["К1"] == pytest.approx(50.0)
+        assert поето["К2"] == 0.0, "кожухът падна и върху друг диаметър"
+        assert "DN 1000" in бележки[0]
+
+    def test_a_row_the_model_did_take_is_left_alone(self):
+        from src.work_package import assign_orphan_rows, load_chains
+
+        пакети = [_sewer("К1", 300.0)]
+        ред = _Ред("КСС.xlsx!Канал!9", "Изграждане на канализация", 300.0)
+
+        нови, бележки = assign_orphan_rows(пакети, [ред], load_chains())
+
+        assert бележки == [], "кодът пипна ред, който моделът вече е поел"
+        assert len(нови[0].items) == 1
+
+    def test_a_row_no_chain_can_cover_is_reported_not_forced(self):
+        """Без подходяща верига редът остава непокрит — не се напъхва насила."""
+        from src.work_package import assign_orphan_rows, load_chains
+
+        пакети = [_sewer("К1", 100.0)]
+        ред = _Ред("КСС.xlsx!Разни!1", "Нещо, което не е строителна работа",
+                   5.0, "бр.")
+
+        нови, бележки = assign_orphan_rows(пакети, [ред], load_chains())
+        поето = [i for p in нови for i in p.items if str(i.source_ref) == str(ред.ref)]
+
+        assert поето == [] and бележки == []
+
+    def test_the_split_is_exact_to_the_last_decimal(self):
+        """Закръглението не бива да чупи гейта за Σ = КСС."""
+        from src.work_package import assign_orphan_rows, load_chains
+
+        пакети = [_sewer(f"К{i}", 7.0) for i in range(1, 4)]
+        ред = _Ред("КСС.xlsx!Канал!16", "Бетонов кожух за тръба DN 500", 74.5056, "m3/m'")
+
+        нови, _ = assign_orphan_rows(пакети, [ред], load_chains())
+        сбор = sum(float(i.quantity) for p in нови for i in p.items
+                   if str(i.source_ref) == str(ред.ref))
+
+        assert сбор == pytest.approx(74.5056, abs=1e-9)

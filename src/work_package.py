@@ -958,6 +958,109 @@ def normalize_over_allocation(
     return adjusted, notes
 
 
+#: „DN 500", „DN500", „ф500" — диаметърът, изписан в описанието на реда.
+_DN_IN_TEXT_RE = re.compile(r"(?:DN|ДН|ф)\s*(\d{2,4})", re.IGNORECASE)
+
+
+def assign_orphan_rows(
+    packages: list[SpatialWorkPackage],
+    boq_index: Iterable[Any],
+    chains: dict[str, Any] | None = None,
+) -> tuple[list[SpatialWorkPackage], list[str]]:
+    """Разпредели редовете, които моделът НЕ е поел и след повторните питания.
+
+    ИЗМЕРЕНО 17.08.2026 върху 18 живи прогона: водещата причина график да не е
+    чист са непокрити редове, а начело са трите „Бетонов кожух за тръба DN
+    500/700/1000" — липсват в 7 от 18.  Същите три бяха отбелязани и на
+    06.08.2026 с думите „моделът прави работата, но не цитира реда".
+
+    Досега след двата опита кодът се отказваше и ги отчиташе като непокрити.
+    Но кой участък може да поеме такъв ред НЕ е преценка — то е следствие от
+    класа на реда и от диаметъра, изписан в самото описание, а и двете са наши,
+    детерминистични данни.  Затова тук редът се разделя между участъците, които
+    МОГАТ да го изпълнят, пропорционално на големината им.
+
+    Пропорцията е по количество, не по брой: участък с 300 м тръба поема повече
+    кожух от участък с 30 м.  Когато описанието сочи диаметър, кандидатите се
+    стесняват до участъците с този диаметър — иначе кожух за DN 1000 би паднал
+    и върху участък DN 160.
+
+    Разпределението тук е на КОДА, не на модела, и всяка бележка го казва —
+    така описът на произхода остава честен.
+
+    Returns:
+        (пакети, бележки) — по една бележка на разпределен ред.
+    """
+    from src.provenance import _coverer_class
+
+    cfg = chains if chains is not None else load_chains()
+    chain_defs = cfg.get("chains") or {}
+    covers = {
+        key: {c for step in chain.get("steps") or [] for c in step.get("covers") or []}
+        for key, chain in chain_defs.items()
+    }
+
+    поети = {str(item.source_ref) for p in packages for item in p.items}
+    result = list(packages)
+    notes: list[str] = []
+
+    for row in boq_index:
+        ref = str(getattr(row, "ref", "") or "")
+        want = getattr(row, "quantity", None)
+        if not ref or ref in поети:
+            continue
+        if not isinstance(want, (int, float)) or isinstance(want, bool) or not want:
+            continue
+
+        клас = _coverer_class(row)
+        if not клас:
+            continue
+
+        кандидати = [p for p in result if клас in covers.get(p.chain, set())]
+        if not кандидати:
+            continue
+
+        описание = str(getattr(row, "description", "") or "")
+        съвпадение = _DN_IN_TEXT_RE.search(описание)
+        по_диаметър = ""
+        if съвпадение:
+            dn = int(съвпадение.group(1))
+            стеснени = [p for p in кандидати if p.dn == dn]
+            if стеснени:
+                кандидати = стеснени
+                по_диаметър = f" с DN {dn}"
+
+        тегла = [sum(abs(float(i.quantity)) for i in p.items) or 1.0
+                 for p in кандидати]
+        общо = sum(тегла)
+        дялове = [round(float(want) * т / общо, 6) for т in тегла]
+        # Остатъкът отива в последния: сборът трябва да е ТОЧНО количеството
+        # от реда, инак гейтът за Σ=КСС пада заради закръгление.
+        дялове[-1] = round(float(want) - sum(дялове[:-1]), 6)
+
+        by_id = {p.id: i for i, p in enumerate(result)}
+        for pkg, дял in zip(кандидати, дялове):
+            if дял <= 0:
+                continue
+            позиция = by_id[pkg.id]
+            текущ = result[позиция]
+            нов = PackageItem(
+                source_ref=ref, activity_class=клас, quantity=дял,
+                unit=str(getattr(row, "unit", "") or ""),
+                description=описание,
+                source_record_id=str(getattr(row, "record_id", "") or ""),
+            )
+            result[позиция] = replace(текущ, items=текущ.items + (нов,))
+
+        notes.append(
+            f"РАЗПРЕДЕЛЕНО ОТ КОДА: {ref} ({want} "
+            f"{str(getattr(row, 'unit', '') or '')}) — моделът не го пое и след "
+            f"повторните питания; разделен между {len(кандидати)} участъка"
+            f"{по_диаметър}, пропорционално на количествата им")
+
+    return result, notes
+
+
 def reroute_uncoverable_items(
     packages: list[SpatialWorkPackage],
     chains: dict[str, Any] | None = None,

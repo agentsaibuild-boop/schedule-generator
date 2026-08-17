@@ -571,7 +571,8 @@ class AIProcessor:
                                       check_conservation,
                                       conservation_messages, expand_packages,
                                       link_cross_discipline, load_chains,
-                                      allocation_ledger, contract_packages,
+                                      allocation_ledger, assign_orphan_rows,
+                                      contract_packages,
                                       enforce_construction_span,
                                       link_contract_phases,
                                       merge_restoration_zones,
@@ -800,6 +801,22 @@ class AIProcessor:
         # пропорционално В ДВЕТЕ ПОСОКИ — общото е факт от документа,
         # пропорцията е преценка на модела.  Клониране (двоен сбор) и голям
         # недостиг (пропуснат участък) остават блокиращи.
+        # ПОСЛЕДНА ДЕТЕРМИНИСТИЧНА СТЪПКА (измерено 17.08.2026 върху 18 живи
+        # прогона): водещата причина график да не е чист са непокрити редове, а
+        # начело са трите „Бетонов кожух за тръба DN 500/700/1000" — липсват в
+        # 7 от 18.  След двете питания кодът се отказваше и ги отчиташе.
+        #
+        # Но КОЙ участък може да поеме такъв ред не е преценка: то следва от
+        # класа на реда и от диаметъра в описанието му, а те са наши данни.
+        # Затова остатъкът се разделя от кода, пропорционално, и всяка бележка
+        # казва, че разпределението е негово, а не на модела.
+        packages, orphans = assign_orphan_rows(packages, boq_index, chains)
+        if orphans:
+            _prog(f"Разпределени от кода {len(orphans)} реда, които моделът "
+                  f"не пое.")
+            parse_errors.extend(orphans)
+            conservation = check_conservation(packages, boq_index)
+
         packages, trims = normalize_over_allocation(packages, boq_index)
         if trims:
             _prog(f"Изравнени {len(trims)} количества до КСС.")
