@@ -165,6 +165,36 @@ _MAX_TOKENS_LESSON = 1024      # lesson verification (short JSON response)
 _MIN_SYSTEM_PROMPT_LEN = 100   # minimum viable knowledge-aware system prompt
 _API_TIMEOUT_SECONDS = 120     # timeout for all AI API calls (prevents Streamlit freeze)
 
+#: ТАВАН ПО СТЕНЕН ЧАСОВНИК за един стрийм.
+#:
+#: ИЗМЕРЕНО 18.08.2026, серия 4, прогон 1: заявка към работника виси ШЕЙСЕТ
+#: МИНУТИ и чак тогава излиза „Upstream error from DigitalOcean: stream
+#: failed".  HTTP timeout-ът от 600 s не я хвана и не е сгрешен — доставчикът
+#: праща keepalive-и, всеки от тях е получени байтове, всеки нулира read
+#: timeout-а, а изходен текст не идва.  Тоест по-дълъг read timeout НЕ помага
+#: срещу такова забиване; помага само таван върху целия поток.
+#:
+#: 1200 s е избрано над най-дългата НАБЛЮДАВАНА законна генерация (961 s,
+#: серия 3 прогон 6, при таван 48 000 токена) и далеч под часа, който тази
+#: заявка изяде.  Стойността се вижда и се мени през средата, защото зависи
+#: от тавана на изхода.
+_STREAM_MAX_SECONDS = int(os.getenv("STREAM_MAX_SECONDS", "1200"))
+
+
+class StreamStalled(RuntimeError):
+    """Потокът тече, но не ражда текст — доставчикът праща keepalive и мълчи.
+
+    Частичното съдържание се носи ЗА ДИАГНОСТИКА, не за употреба: JSON-ът на
+    прекъснат поток е отрязан, а следващото стъпало на стълбата има реален шанс
+    да върне цял отговор.  Ако някога решим да го разчитаме, това е мястото,
+    от което да се вземе — но днес НЕ се използва и това е нарочно.
+    """
+
+    def __init__(self, message: str, partial: str = "", seconds: float = 0.0):
+        super().__init__(message)
+        self.partial = partial
+        self.seconds = seconds
+
 # ---------------------------------------------------------------------------
 # Verification system prompt template
 # ---------------------------------------------------------------------------
@@ -581,7 +611,27 @@ class AIRouter:
             parts: list[str] = []
             tin = tout = 0
             finish = None
-            for chunk in client.chat.completions.create(**kw):
+            започна = time.monotonic()
+            поток = client.chat.completions.create(**kw)
+            for chunk in поток:
+                # Проверката е ТУК, а не на HTTP слоя: keepalive-ът на
+                # доставчика е получени байтове и нулира read timeout-а
+                # безкрайно.  Затова пък събужда този цикъл — и тогава
+                # часовникът казва истината.
+                изтекли = time.monotonic() - започна
+                if изтекли > _STREAM_MAX_SECONDS:
+                    затвори = getattr(поток, "close", None)
+                    if callable(затвори):
+                        затвори()
+                    частично = "".join(parts)
+                    logger.warning(
+                        "Потокът към %s тече %.0f s и е дал %d знака — "
+                        "прекъсвам и падам на следващото стъпало.",
+                        kwargs.get("model", "?"), изтекли, len(частично))
+                    raise StreamStalled(
+                        f"потокът мълча {изтекли:.0f} s (таван "
+                        f"{_STREAM_MAX_SECONDS} s)",
+                        partial=частично, seconds=изтекли)
                 if getattr(chunk, "choices", None):
                     ch0 = chunk.choices[0]
                     delta = getattr(ch0, "delta", None)
