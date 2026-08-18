@@ -241,7 +241,8 @@ def _amounts(entries: Any) -> list[dict]:
 
 
 def _run_series(prep: dict, number: int, label: str,
-                use_segments: bool, repair_rounds: int, runs: int) -> list[dict]:
+                use_segments: bool, repair_rounds: int, runs: int,
+                манифест: dict | None = None) -> list[dict]:
     os.environ["PACKAGE_REPAIR_ROUNDS"] = str(repair_rounds)
     segments = prep["segments"] if use_segments else None
 
@@ -313,6 +314,8 @@ def _run_series(prep: dict, number: int, label: str,
 
         record = _metrics(run, result, time.monotonic() - started,
                           prep["boq_index"])
+        record["manifest_id"] = (манифест or {}).get("manifest_id", "")
+        record["git_commit"] = (манифест or {}).get("git_commit", "")
         record.update(usage)
         records.append(record)
         mark = "✓" if record["clean"] else ("~" if record["exportable"] else "·")
@@ -341,6 +344,16 @@ def main() -> int:
         raise SystemExit(f"{project} няма папка converted/")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # ОТПЕЧАТЪК НА ВЕРСИЯТА (одит 18.08.2026, P0.1).  Без него не може машинно
+    # да се каже кой прогон е от коя версия — и точно затова пакетът два пъти
+    # смеси документи от една версия с прогони от друга.
+    from src.audit_manifest import write_manifest
+    манифест = write_manifest(OUT_DIR)
+    print(f"Версия: {манифест['manifest_id']} "
+          f"(commit {манифест['git_commit']}"
+          + (", РАБОТНОТО ДЪРВО Е МРЪСНО" if манифест["git_dirty"] else "")
+          + ")")
     print(f"Проект: {project}")
     prep = _prepare(project)
     print(f"КСС: {len(prep['boq_index'])} реда с количество\n")
@@ -357,7 +370,7 @@ def main() -> int:
               f"(отсечки: {'да' if use_segments else 'не'}, "
               f"авто-поправки: {repair_rounds})")
         records = _run_series(prep, number, label, use_segments,
-                              repair_rounds, args.runs)
+                              repair_rounds, args.runs, манифест)
 
         clean = sum(1 for r in records if r.get("clean"))
         but_for_input = sum(1 for r in records if r.get("clean_but_for_input"))

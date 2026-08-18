@@ -442,6 +442,33 @@ def main() -> int:
         if src.exists():
             shutil.copy2(src, folder / name)
 
+    # ГЕЙТ ЗА ВЕРСИЯТА (одит 18.08.2026, P0.1).
+    #
+    # „Документите казват, че template_applicability_ok е твърд флаг, но в 0/40
+    # прогона го има.  Следователно 15/40 не е clean rate на текущата версия."
+    # Одиторът го установи на ръка два дни подред; тук пакетът си го проверява
+    # сам и КАЗВА какво носи, вместо да мълчи.
+    from src.audit_manifest import write_manifest
+
+    манифест = write_manifest(folder)
+    print(f"Версия на пакета: {манифест['manifest_id']} "
+          f"(commit {манифест['git_commit']}"
+          + (", РАБОТНОТО ДЪРВО Е МРЪСНО" if манифест["git_dirty"] else "")
+          + ")")
+
+    версии_на_прогоните = set()
+    без_версия = 0
+    for run_file in sorted(RUNS_DIR.glob("серия-[1-4]-*.json")):
+        for запис in json.loads(run_file.read_text(encoding="utf-8")):
+            ид = запис.get("manifest_id")
+            версии_на_прогоните.add(ид) if ид else None
+            без_версия += 0 if ид else 1
+    if без_версия or версии_на_прогоните != {манифест["manifest_id"]}:
+        print("  ⚠ ПРОГОНИТЕ НЕ СА ОТ ТАЗИ ВЕРСИЯ: "
+              + (f"{без_версия} без отпечатък; " if без_версия else "")
+              + f"намерени версии: {sorted(версии_на_прогоните) or 'няма'}.")
+        print("    Пакетът остава СМЕСЕН — числата в него описват друга версия.")
+
     print("Технически материали...")
     shutil.copy2(ROOT / "config" / "tech_chains.json", tech)
     shutil.copy2(ROOT / "config" / "resource_capacity.json", tech)

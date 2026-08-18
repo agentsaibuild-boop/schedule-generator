@@ -160,7 +160,7 @@ def extract(path: Path, chain_key: str) -> list[dict]:
 
 #: Вериги, които в еталона се срещат МНОГОКРАТНО — по веднъж на участък.
 #: Топологията им не се чете от един екземпляр, а се обобщава от всички.
-SECTION_CHAINS = ("sewer_section", "water_section")
+SECTION_CHAINS = ("sewer_section", "water_section", "water_section_hdd")
 
 
 def _norm(name: str) -> str:
