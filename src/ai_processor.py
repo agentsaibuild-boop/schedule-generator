@@ -716,35 +716,59 @@ class AIProcessor:
             ),
         }]
 
-        system_prompt = self.build_system_prompt(query=analysis_text)
-        искане = messages[0]["content"]
-        result = self.router.chat(
-            messages, system_prompt,
-            max_tokens=gen_max_tokens(),
-            response_schema=build_packages_response_schema())
-
-        if result.get("error"):
-            return {"status": "error", "message": result["content"]}
-        if result.get("truncated"):
-            return {"status": "error", "truncated": True,
-                    "message": "Отговорът беше отрязан — разделете проекта на етапи."}
-
-        parsed = AIRouter.parse_json_response(result["content"])
-        # ИЗТОЧНИКЪТ НА ГЕОМЕТРИЯ решава какво може да се твърди с нея
-        # (одит 10.08.2026).  Прочетеното от PDF е ЕТИКЕТ: става за име на
-        # участък, не за зониране, зависимости или доказателство за
-        # покритие.  Днес друг източник няма, тоест това е `suggested`.
+        # ИЗТОЧНИКЪТ НА ГЕОМЕТРИЯ се решава ПРЕДИ да се харчи заявка (одит
+        # 10.08.2026; преработено 18.08.2026).  Прочетеното от PDF е ЕТИКЕТ:
+        # става за име на участък, не за зониране, зависимости или
+        # доказателство за покритие.
         from src.spatial_source import (SpatialSource, describe,
                                         is_authoritative)
         spatial_source = (SpatialSource.PDF_SUGGESTIONS_ONLY if segments
                           else SpatialSource.NONE)
         spatial_authoritative = is_authoritative(spatial_source)
-        # КАЗВА СЕ НА ГЛАС (18.08.2026).  `describe` стоеше написан от
-        # 10.08.2026 и НЕ се викаше никъде: програмата знаеше, че участъците ѝ
-        # не са геометрия, и не го съобщаваше на никого.  Мълчаливото знание е
-        # същото като липсващото — човекът отсреща вижда „кл. 1" и предполага
-        # прочетено трасе.
-        _prog(describe(spatial_source))
+
+        # БЕЗ АВТОРИТЕТНА ГЕОМЕТРИЯ МОДЕЛЪТ НЕ СЕ ПИТА ИЗОБЩО.
+        #
+        # Измерено на 18.08.2026 върху 30 живи прогона на един и същ търг:
+        # моделът връща между 22 и 132 пакета, а всичките 21 провала са в
+        # получаването на използваем отговор (6 мъртви прогона, 7 счупени
+        # JSON-а, 8 пъти Σ ≠ КСС).  Нито един структурен инвариант надолу по
+        # веригата не пада.  Причината не е промптът, а информацията: КСС няма
+        # разчленяване (0 от 28 реда носят идентификатор на участък), а
+        # класификацията кодът я прави сам (28 от 28).  Тоест искахме от
+        # модела да СЪЧИНИ данни, които ги няма във входа.
+        #
+        # Изключва се с DETERMINISTIC_BATCHES=0 — тогава се пита пак моделът.
+        детерминистично = (
+            not spatial_authoritative
+            and os.getenv("DETERMINISTIC_BATCHES", "1") not in ("0", "false", "")
+        )
+        if детерминистично:
+            from src.execution_batches import allocate_execution_batches
+
+            _prog(describe(spatial_source))
+            разпределение = allocate_execution_batches(boq_index)
+            for бележка in разпределение["notes"]:
+                _prog(бележка)
+            parsed = {"packages": разпределение["packages"]}
+            result = {"cost": 0.0, "model": "детерминистичен код (без модел)"}
+            искане = ""
+        else:
+            system_prompt = self.build_system_prompt(query=analysis_text)
+            искане = messages[0]["content"]
+            result = self.router.chat(
+                messages, system_prompt,
+                max_tokens=gen_max_tokens(),
+                response_schema=build_packages_response_schema())
+
+            if result.get("error"):
+                return {"status": "error", "message": result["content"]}
+            if result.get("truncated"):
+                return {"status": "error", "truncated": True,
+                        "message": "Отговорът беше отрязан — разделете проекта "
+                                   "на етапи."}
+
+            parsed = AIRouter.parse_json_response(result["content"])
+            _prog(describe(spatial_source))
 
         packages, parse_errors = packages_from_ai(
             parsed, boq_index=boq_index, chains=chains, segments=segments,

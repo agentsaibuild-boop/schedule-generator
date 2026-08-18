@@ -15,6 +15,8 @@ FAILURE означава: едрината на графика пак ще за�
 
 from __future__ import annotations
 
+import pytest
+
 import json
 import sys
 from pathlib import Path
@@ -30,6 +32,18 @@ from src.work_package import (  # noqa: E402
     partition_diagnosis,
 )
 
+
+@pytest.fixture(autouse=True)
+def пита_модела(monkeypatch):
+    """Този файл проверява ПЪТЯ ПРЕЗ МОДЕЛА и трябва да го каже изрично.
+
+    От 18.08.2026 без авторитетна геометрия моделът НЕ се пита изобщо:
+    участъците ги прави `src/execution_batches.py`, защото КСС не съдържа
+    разчленяване, а 30 живи прогона дадоха 22–132 пакета за един и същ вход.
+    Пътят през модела остава за случая с ПРОЧЕТЕНА геометрия и за аварийно
+    връщане с `DETERMINISTIC_BATCHES=0` — и точно него описва този файл.
+    """
+    monkeypatch.setenv("DETERMINISTIC_BATCHES", "0")
 
 class _Ред:
     """Ред от КСС — само каквото диагнозата ползва."""
