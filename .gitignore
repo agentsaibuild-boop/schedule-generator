@@ -46,6 +46,13 @@ tests/e2e/screenshots/
 # извлечените количества/текст от тръжните документи.  НЕ в git.
 converted/
 
+# ...С ЕДНО ИЗКЛЮЧЕНИЕ: анонимизираната fixture (одит 07.08.2026).  Одиторът
+# поиска да може сам да пресметне Σ allocated = КСС и получи само присъдата ни.
+# Написахме fixture-а и тест към него — но правилото по-горе го изяде и той
+# НИКОГА не е влизал в пакета.  Няма клиентски данни в него; това е смисълът му.
+!tests/fixtures/**/converted/
+!tests/fixtures/**/converted/**
+
 # Note: These files ARE tracked (needed for installer):
 #   install.bat, start.bat, update.bat
 #   .env.example, .env.company.example
