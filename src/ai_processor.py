@@ -593,6 +593,7 @@ class AIProcessor:
         """
         from src.provenance import format_boq_for_prompt
         from src.schedule_builder import ScheduleBuilder
+        from src.segment_scale import scale_segment_overhead
         from src.work_package import (applied_resolutions, assign_fronts,
                                       check_conservation,
                                       conservation_messages, expand_packages,
@@ -926,6 +927,18 @@ class AIProcessor:
         tasks = duration_report["schedule"]
         _recomputed = duration_report["summary"]["recomputed"]
         _prog(f"Продължителности от нормите: {_recomputed} от {len(tasks)} задачи.")
+
+        # ОВЪРХЕДЪТ НА УЧАСТЪКА СЕ МАЩАБИРА (одит 07.08.2026, P1; измерено
+        # 18.08.2026).  Задължителна стъпка, за която КСС няма отделен ред —
+        # изкопът и дезинфекцията са вътре в тръбния ред — оставаше на
+        # медианата от еталона.  Медианата е наблюдавана върху ЕДИН участък,
+        # затова разделянето на участък УДВОЯВАШЕ овърхеда вместо да го
+        # запази: 8 → 14 участъка даваше +252 задача-дни само от този
+        # механизъм.  Тук стъпката се мери спрямо еталонния участък по
+        # стъпките, които имат доказана продължителност.
+        tasks, scale_notes = scale_segment_overhead(tasks, packages, chains)
+        for note in scale_notes:
+            _prog(note)
 
         scheduled = builder.reschedule(tasks)
         tasks = scheduled["schedule"]
