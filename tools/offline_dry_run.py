@@ -175,6 +175,12 @@ def main() -> int:
                         help="участъци на верига")
     parser.add_argument("--teams", type=int, default=2)
     parser.add_argument("--xml", default="", help="запиши MSPDI тук")
+    parser.add_argument("--bundle", default="",
+                        help="папка за ЦЕЛИЯ комплект от една версия: график, "
+                             "опис, диагностика, сравнение на календарите и "
+                             "audit_manifest.json")
+    parser.add_argument("--reference", default="",
+                        help="еталонен MSPDI за сравнението на календарите")
     # Договорният обхват НЕ идва от КСС: проектирането и авторският надзор се
     # създават само когато поръчката е инженеринг.  Затова текстът на анализа
     # мени `contract_scope_complete` — при неутрален текст графикът законно
@@ -253,6 +259,73 @@ def main() -> int:
             print("\nXML: експортът не върна нищо")
             return 1
         print(f"\nXML: {target} ({len(payload)} байта)")
+
+    if args.bundle:
+        # ЦЕЛИЯТ КОМПЛЕКТ ОТ ЕДНА ВЕРСИЯ (одит 18.08.2026, P0.4).
+        #
+        # „От ZIP-а самостоятелно не може да се изпълни: input fixture ->
+        # current code -> 642-day XML."  Прав е — досега този инструмент
+        # печаташе числа на екрана и по желание един XML, а всичко останало се
+        # сглобяваше отделно и по различно време.  Оттам и смесеният пакет.
+        #
+        # Тук излизат ЗАЕДНО: графикът, описът, диагностиката и сравнението на
+        # календарите, всеки с един и същ `manifest_id`.
+        from src.audit_manifest import write_manifest
+        from src.export_xml import export_to_mspdi_xml
+        from src.schedule_diagnostics import concurrency_report, duration_report
+        from src.work_package import format_allocation_ledger
+
+        папка = Path(args.bundle)
+        манифест = write_manifest(папка, artifact="offline_dry_run")
+        ид = манифест["manifest_id"]
+        print(f"\nКомплект: {папка}  (версия {ид})")
+
+        xml_път = папка / "график.xml"
+        payload = export_to_mspdi_xml(tasks, "Детерминистичен прогон",
+                                      filename=str(xml_път))
+        if not payload:
+            print("  XML: експортът не върна нищо")
+            return 1
+
+        (папка / "опис-на-разпределението.md").write_text(
+            format_allocation_ledger(result.get("ledger") or [],
+                                     result.get("resolutions") or []),
+            encoding="utf-8")
+
+        диагностика = {
+            "manifest_id": ид,
+            "структурни_флагове": {k: v for k, v in flags.items()
+                                   if isinstance(v, (bool, int, float))},
+            "чист": is_clean(flags),
+            "срок": duration_report(tasks),
+            "едновременност": concurrency_report(tasks),
+            "задачи": len(tasks),
+            "пакети": len(result.get("packages") or []),
+        }
+        (папка / "диагностика.json").write_text(
+            json.dumps(диагностика, ensure_ascii=False, indent=1), encoding="utf-8")
+
+        # Сравнението с еталона е част от комплекта, а не отделно упражнение —
+        # точно защото сгрешеното сравнение веднъж вече мина за резултат.
+        сравнение: dict = {"manifest_id": ид, "нашият": None, "еталон": None}
+        try:
+            sys.path.insert(0, str(ROOT / "tools"))
+            from compare_calendars import обобщи
+
+            сравнение["нашият"] = обобщи(xml_път)
+            ако = Path(args.reference) if args.reference else None
+            if ако and ако.exists():
+                сравнение["еталон"] = обобщи(ако)
+        except Exception as exc:                          # noqa: BLE001
+            сравнение["грешка"] = str(exc)[:200]
+        (папка / "сравнение-на-календарите.json").write_text(
+            json.dumps(сравнение, ensure_ascii=False, indent=1, default=str),
+            encoding="utf-8")
+
+        print(f"  график.xml ({len(payload)} байта)")
+        for име in ("опис-на-разпределението.md", "диагностика.json",
+                    "сравнение-на-календарите.json", "audit_manifest.json"):
+            print(f"  {име}")
 
     return 0 if is_clean(flags) else 1
 
