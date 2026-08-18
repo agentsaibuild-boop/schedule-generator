@@ -371,7 +371,30 @@ def _build_tasks(
     ET.SubElement(root_task, "ID").text = "0"
     ET.SubElement(root_task, "Name").text = project_name
     ET.SubElement(root_task, "OutlineLevel").text = "0"
-    ET.SubElement(root_task, "Duration").text = "PT0H0M0S"
+    # ФАЙЛЪТ ОПИСВА САМ СЕБЕ СИ.  Коренът стоеше без начало, край и с
+    # Duration = PT0H — тоест външен четец не можеше да каже колко трае
+    # графикът, без да пресмята задачите му.  Човешкият еталон носи
+    # Start/Finish и Duration = PT6240H (780 × 8 ч) точно тук, и именно това
+    # позволява сравнение по календар.
+    #
+    # НЕЗАВИСИМ ОДИТ 17.08.2026: сравнението „650 срещу 558" беше сгрешено
+    # частично и защото нашият файл не обявява собствената си продължителност,
+    # та тя се извеждаше отстрани и по чужда календарна основа.
+    def _цяло(стойност, по_подразбиране: int) -> int:
+        try:
+            return int(float(стойност))
+        except (TypeError, ValueError):
+            return по_подразбиране
+
+    _край = max(
+        (_цяло(t.get("end_day"), 0)
+         or _цяло(t.get("start_day"), 1) + max(1, _цяло(t.get("duration"), 0)) - 1
+         for t in flat_tasks), default=1)
+    _край = max(int(_край), 1)
+    ET.SubElement(root_task, "Start").text = start_dt.strftime("%Y-%m-%dT08:00:00")
+    ET.SubElement(root_task, "Finish").text = _working_day_to_date(
+        start_dt, _край, calendar_type).strftime("%Y-%m-%dT17:00:00")
+    ET.SubElement(root_task, "Duration").text = f"PT{_край * 8}H0M0S"
     ET.SubElement(root_task, "DurationFormat").text = "5"
     ET.SubElement(root_task, "Manual").text = "0"
     ET.SubElement(root_task, "Summary").text = "1"
