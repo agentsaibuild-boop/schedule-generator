@@ -420,7 +420,7 @@ def packages_from_ai(
             network=network or "К",
             # Методът на полагане се чете от количествата, не от шаблона —
             # виж `trenchless_chain`.
-            chain=trenchless_chain(chain, items),
+            chain=structure_chain(trenchless_chain(chain, items), items),
             name=name,
             branch=str(raw.get("branch") or "").strip() or parsed["branch"],
             street=str(raw.get("street") or "").strip(),
@@ -640,6 +640,37 @@ _TRENCHLESS_RE = re.compile(
 
 #: Веригата за водопровод по открит изкоп → нейният безизкопен вариант.
 _TRENCHLESS_CHAIN = {"water_section": "water_section_hdd"}
+
+
+#: Класове, които описват ТОЧКА или съоръжение, а не трасе.
+_POINT_CLASSES = frozenset({"manhole"})
+#: Класове, които доказват, че пакетът е трасе.
+_LINEAR_CLASSES = frozenset({"laying", "cable"})
+
+
+def structure_chain(chain: str, items: Iterable[PackageItem]) -> str:
+    """Пакет само от точкови количества върви по веригата за СЪОРЪЖЕНИЕ.
+
+    НЕЗАВИСИМ ОДИТ 18.08.2026: „водомерна шахта не може да получи пълната
+    тръбна верига; монолитна РШ ползва structure/node семантика."  Флагът
+    `template_applicability_ok` го хваща — но само да го хване не стига: този
+    търг има СЕДЕМ точкови реда (СВО, водомерна шахта, СКО, УО единичен и
+    двоен, преливна шахта, монолитна РШ) и когато моделът им даде собствени
+    пакети, всеки получаваше изкоп, полагане, изпитване на налягане и
+    дезинфекция за нещо, което не е трасе.
+
+    Измерено: така НИТО ЕДИН жив прогон не можеше да излезе чист.
+
+    Веригата `structure` съществува точно за това (покрива excavation, manhole,
+    transport).  Пакет с поне едно линейно количество си остава трасе — тук се
+    мести само онова, което няма нито метър.
+    """
+    класове = {item.activity_class for item in items}
+    if not класове or (класове & _LINEAR_CLASSES):
+        return chain
+    if класове <= _POINT_CLASSES | {"excavation", "transport", "backfill"}:
+        return "structure"
+    return chain
 
 
 def trenchless_chain(chain: str, items: Iterable[PackageItem]) -> str:
