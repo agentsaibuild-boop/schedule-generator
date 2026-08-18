@@ -445,12 +445,33 @@ def main() -> int:
     print("Технически материали...")
     shutil.copy2(ROOT / "config" / "tech_chains.json", tech)
     shutil.copy2(ROOT / "config" / "resource_capacity.json", tech)
-    shutil.copy2(ROOT / "tools" / "rerun_series.py", tech)
-    shutil.copy2(ROOT / "tools" / "anonymize_kss.py", tech)
+    # СКРИПТОВЕТЕ, С КОИТО БРИЙФЪТ ТВЪРДИ, ЧЕ МОЖЕ ДА БЪДЕ ПОВТОРЕН.
+    #
+    # НЕЗАВИСИМ ОДИТ 17.08.2026, P0.3: „Брийфът казва, че разделът може да се
+    # повтори с offline_dry_run.py, extract_resource_capacity.py и
+    # extract_chain_topology.py.  Тези файлове НЕ са в ZIP-а.  Техническото
+    # README допълнително обещава extract_chains.py и extract.py — и те не са."
+    #
+    # Прав е.  Пакет, който сочи команда, а не носи командата, не е проверим.
+    # Затова списъкът вече е ЕДИН и липсата спира сглобяването, вместо да мълчи.
+    задължителни = ("rerun_series.py", "anonymize_kss.py", "offline_dry_run.py",
+                    "extract_resource_capacity.py", "extract_chain_topology.py",
+                    "compare_calendars.py")
+    липсват = []
+    for name in задължителни:
+        src = ROOT / "tools" / name
+        if src.exists():
+            shutil.copy2(src, tech)
+        else:
+            липсват.append(name)
     for name in ("extract.py", "extract_chains.py"):
         src = source_chains / "технически" / name
         if src.exists():
             shutil.copy2(src, tech)
+    if липсват:
+        raise SystemExit(
+            "Липсват скриптове, които пакетът обещава: " + ", ".join(липсват)
+            + " — поправи списъка или добави файловете.")
 
     fixture_dst = tech / "анонимизиран-КСС" / "converted"
     fixture_dst.mkdir(parents=True, exist_ok=True)
