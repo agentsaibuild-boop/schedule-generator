@@ -602,6 +602,7 @@ class AIProcessor:
                                       contract_packages,
                                       enforce_construction_span,
                                       link_contract_phases,
+                                      number_execution_batches,
                                       merge_restoration_zones,
                                       normalize_over_allocation, packages_from_ai,
                                       partition_diagnosis,
@@ -733,10 +734,17 @@ class AIProcessor:
         # (одит 10.08.2026).  Прочетеното от PDF е ЕТИКЕТ: става за име на
         # участък, не за зониране, зависимости или доказателство за
         # покритие.  Днес друг източник няма, тоест това е `suggested`.
-        from src.spatial_source import SpatialSource, is_authoritative
+        from src.spatial_source import (SpatialSource, describe,
+                                        is_authoritative)
         spatial_source = (SpatialSource.PDF_SUGGESTIONS_ONLY if segments
                           else SpatialSource.NONE)
         spatial_authoritative = is_authoritative(spatial_source)
+        # КАЗВА СЕ НА ГЛАС (18.08.2026).  `describe` стоеше написан от
+        # 10.08.2026 и НЕ се викаше никъде: програмата знаеше, че участъците ѝ
+        # не са геометрия, и не го съобщаваше на никого.  Мълчаливото знание е
+        # същото като липсващото — човекът отсреща вижда „кл. 1" и предполага
+        # прочетено трасе.
+        _prog(describe(spatial_source))
 
         packages, parse_errors = packages_from_ai(
             parsed, boq_index=boq_index, chains=chains, segments=segments,
@@ -901,6 +909,10 @@ class AIProcessor:
         # Без тях готовият файл съдържа само СТРОИТЕЛСТВО и нула milestone-и.
         with_design = "инженеринг" in str(analysis_text).lower()
         packages = packages + contract_packages(chains, with_design=with_design)
+
+        # Пак, защото зонирането и разделянето по-горе раждат нови пакети:
+        # номерацията се пресмята от нулата и е безопасна за повтаряне.
+        packages = number_execution_batches(packages)
 
         expansion = expand_packages(packages, chains)
         tasks = link_cross_discipline(

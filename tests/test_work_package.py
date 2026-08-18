@@ -193,6 +193,9 @@ def test_expand_builds_wbs_hierarchy():
     pkg = SpatialWorkPackage(
         id="P1", network="К", chain="sewer_section", street="ул. Първа",
         branch="кл. 48", start_node="РШ 36", end_node="РШ 40",
+        # Възлите в името значат ПРОЧЕТЕНА геометрия — от 18.08.2026
+        # непотвърдените не излизат навън и премисата трябва да е изрична.
+        spatial_verified=True,
         items=(PackageItem("КСС!К!4", "laying", 300.0, "m"),),
     )
 

@@ -36,7 +36,7 @@ from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,15 @@ class SpatialWorkPackage:
     material: str = ""
     front: str = ""                   # реален фронт/екип, не етикет
     items: tuple[PackageItem, ...] = ()
+    #: Готовото име за показване, когато геометрията НЕ е потвърдена.
+    #
+    # Без възли „кл. 48 от РШ 36 до РШ 37" и „кл. 48 от РШ 37 до РШ 38" се
+    # свиват до едно и също „кл. 48" — и това е вярно, защото двете
+    # подразделения са измислени.  Но два реда с едно име не са два участъка
+    # за никого, който чете графика.  Затова `number_execution_batches`
+    # различава пакетите по това, което НАИСТИНА ги дели — мрежата и редът на
+    # изпълнение — и оставя готовия резултат тук.
+    batch_label: str = ""
     #: Дали улицата и възлите са ПОТВЪРДЕНИ от ситуационния чертеж.
     #
     # Пакет за одитора 10.08.2026: при прогон БЕЗ чертеж моделът пак попълва
@@ -121,12 +130,36 @@ class SpatialWorkPackage:
 
     @property
     def label(self) -> str:
-        """Име за WBS реда — както в еталона: клон + от възел + до възел."""
-        if self.name:
-            return self.name
+        """Име за WBS реда — както в еталона: клон + от възел + до възел.
+
+        ВЪЗЛИТЕ ИЗЛИЗАТ САМО КОГАТО СА ПОТВЪРДЕНИ (одит 10.08.2026, P1.1;
+        проверено и поправено 18.08.2026).  Дотогава този метод лепеше
+        `start_node`/`end_node`, без изобщо да гледа `spatial_verified` — тоест
+        пакет със съчинени възли се изписваше ДОСЛОВНО като пакет с прочетена
+        геометрия: „кл. 1 от КШ 1 до КШ 2".  Тези имена стигаха до задачите, до
+        WBS-а и до изнесения MS Project файл, където никой отвън не може да ги
+        различи от документ.
+
+        Свободното `name` също идва право от модела, затова и то минава през
+        същата проверка — иначе твърдението просто сменя полето, през което
+        излиза.
+        """
+        from src.spatial_source import strip_node_claim
+
+        if self.spatial_verified:
+            if self.name:
+                return self.name
+        elif self.batch_label:
+            return self.batch_label
+        elif self.name:
+            return strip_node_claim(self.name) or f"Участък {self.id}"
         # Както в еталона: водещ е КЛОНЪТ („кл. 48 от РШ 36 до Пр. Ш 1").
         # Улицата е резервният идентификатор, не добавка към клона.
         head = self.branch or self.street or f"Участък {self.id}"
+        if not self.spatial_verified:
+            # Клонът и улицата остават: при `suggested` те са законно име,
+            # прочетено от чертеж.  Двойката възли — не.
+            return strip_node_claim(head) or f"Участък {self.id}"
         if self.start_node and self.end_node:
             return f"{head} от {self.start_node} до {self.end_node}"
         return head
@@ -218,6 +251,15 @@ def parse_package_name(name: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # От отговора на модела към пакети
 # ---------------------------------------------------------------------------
+
+#: Как се чете мрежата в име на участък.  „кл. 1" се повтаря между мрежите на
+#: всеки обект — без това двата реда не се различават в графика.
+_NETWORK_LABEL = {
+    "В": "водопровод",
+    "К": "канализация",
+    "П": "настилки",
+    "ЕЛ": "кабели",
+}
 
 # Коя верига обслужва коя мрежа, когато моделът не е казал изрично.
 _CHAIN_BY_NETWORK = {
@@ -436,7 +478,10 @@ def packages_from_ai(
             items=tuple(items),
         ))
 
-    return packages, errors
+    # Етапите се номерират ТУК, преди `partition_diagnosis` да ги преброи:
+    # без възли пакетите по един клон се изписват еднакво, а еднаквите имена
+    # са един от трите ѝ признака за изродено разделяне.
+    return number_execution_batches(packages), errors
 
 
 def _row_pipe_spec(row: Any) -> tuple[int | None, str]:
@@ -1260,6 +1305,73 @@ def _is_linear_row(row: Any) -> bool:
     unit = str(getattr(row, "unit", "") or "").strip().lower().replace("'", "")
     unit = unit.replace("²", "2").replace("³", "3").rstrip(".")
     return unit in _LINEAR_UNITS
+
+
+
+def number_execution_batches(
+    packages: Sequence[SpatialWorkPackage],
+) -> list[SpatialWorkPackage]:
+    """Прави имената на непотвърдените пакети различими — честно.
+
+    ЗАЩО.  Щом възлите не могат да бъдат твърдени, имената се свиват до клона:
+    „кл. 48 от РШ 36 до РШ 37" и „кл. 48 от РШ 37 до РШ 38" стават едно и също
+    „кл. 48".  А `partition_diagnosis` с право брои еднаквите имена за признак
+    на изродено разделяне: „два пакета с едно име не са два различни участъка
+    за никого, който чете графика".
+
+    Отговорът НЕ е да върнем съчинените възли, а да различим пакетите по
+    това, което НАИСТИНА ги дели, в този ред:
+
+      1. МРЕЖАТА — „кл. 1" на водопровода и „кл. 1" на канализацията са два
+         различни клона с еднакъв номер; това се случва на всеки обект;
+      2. РЕДЪТ НА ИЗПЪЛНЕНИЕ — когато и мрежата не ги дели, значи са етапи по
+         един и същи клон: „кл. 48 — етап 1 от 2".
+
+    Нито едното не твърди геометрия.  Точно това е `ExecutionBatch` на
+    одитора, отделен от `PhysicalSegment`.
+
+    Пакетите с потвърдена геометрия НЕ се пипат: те са трасета и се именуват
+    като такива.  Пресмята се от нулата при всяко викане, за да може да се
+    приложи пак след по-късно разделяне.
+    """
+    from src.spatial_source import strip_node_claim
+
+    основи: dict[int, str] = {}
+    по_основа: dict[str, list[int]] = {}
+    for индекс, pkg in enumerate(packages):
+        if pkg.spatial_verified:
+            continue
+        основа = (strip_node_claim(pkg.name or "")
+                  or strip_node_claim(pkg.branch or pkg.street or "")
+                  or f"Участък {pkg.id}")
+        основи[индекс] = основа
+        по_основа.setdefault(основа.lower(), []).append(индекс)
+
+    имена: dict[int, str] = {}
+    for индекси in по_основа.values():
+        if len(индекси) == 1:
+            имена[индекси[0]] = основи[индекси[0]]
+            continue
+        # 1. дели ли ги мрежата
+        по_мрежа: dict[str, list[int]] = {}
+        for индекс in индекси:
+            по_мрежа.setdefault(packages[индекс].network, []).append(индекс)
+        много_мрежи = len(по_мрежа) > 1
+        for мрежа, група in по_мрежа.items():
+            етикет = _NETWORK_LABEL.get(мрежа, мрежа)
+            for пореден, индекс in enumerate(група, 1):
+                име = основи[индекс]
+                if много_мрежи:
+                    име = f"{име} ({етикет})"
+                # 2. и ако пак не ги дели — редът на изпълнение
+                if len(група) > 1:
+                    име = f"{име} — етап {пореден} от {len(група)}"
+                имена[индекс] = име
+
+    return [
+        replace(pkg, batch_label=имена[i]) if i in имена else pkg
+        for i, pkg in enumerate(packages)
+    ]
 
 
 def partition_diagnosis(

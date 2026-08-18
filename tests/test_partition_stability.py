@@ -42,9 +42,14 @@ class _Ред:
 
 
 def _пакет(pid, *, items, network="К", name="", start="", end=""):
+    # Пакет, на който този файл ДАВА двойка възли, е такъв с прочетена
+    # геометрия — иначе възлите не биха съществували.  Казва се изрично,
+    # защото от 18.08.2026 непотвърдените възли не напускат програмата и
+    # мълчаливото подразбиране би направило тестовете тук неверни по премиса.
     return SpatialWorkPackage(
         id=pid, network=network, chain="sewer_section", name=name,
         start_node=start, end_node=end,
+        spatial_verified=bool(start and end),
         items=tuple(PackageItem(source_ref=r, activity_class="laying", quantity=q)
                     for r, q in items))
 
@@ -242,3 +247,39 @@ class TestTheNextAttemptLearnsFromThisOne:
         текст = ChatHandler._feedback_for_next_attempt(
             {"packages": [1, 2], "conservation": {"ok": True}}, 1)
         assert текст.strip() == "Опит 1 раздели обекта на 2 участъка."
+
+
+class TestBatchesWithoutGeometryAreStillDistinct:
+    """Без потвърдени възли пакетите по един клон се именуват като ЕТАПИ.
+
+    Иначе и двата се свиват до „кл. 48" — а еднаквите имена са признак за
+    изродено разделяне, тоест поправката срещу съчинените възли би вдигнала
+    фалшива тревога срещу самата себе си.
+    """
+
+    def test_two_batches_on_one_branch_do_not_collide(self):
+        from src.work_package import number_execution_batches
+
+        пакети = number_execution_batches([
+            _пакет("P1", items=[("КСС!1", 400.0)], name="кл. 48 от РШ 36 до РШ 37"),
+            _пакет("P2", items=[("КСС!1", 500.0)], name="кл. 48 от РШ 37 до РШ 38"),
+        ])
+
+        имена = [p.label for p in пакети]
+        assert имена == ["кл. 48 — етап 1 от 2", "кл. 48 — етап 2 от 2"]
+        assert not any("РШ" in име for име in имена)
+
+    def test_such_a_partition_is_not_called_degenerate(self):
+        from src.work_package import number_execution_batches
+
+        index = [_Ред("КСС!1", 1200.0), _Ред("КСС!2", 800.0)]
+        пакети = number_execution_batches([
+            _пакет("P1", items=[("КСС!1", 400.0), ("КСС!2", 300.0)],
+                   name="кл. 48 от РШ 36 до РШ 37"),
+            _пакет("P2", items=[("КСС!1", 500.0), ("КСС!2", 500.0)],
+                   name="кл. 48 от РШ 37 до РШ 38"),
+            _пакет("P3", items=[("КСС!1", 300.0)],
+                   name="кл. 49 от РШ 38 до РШ 39"),
+        ])
+
+        assert partition_diagnosis(пакети, index)["ok"] is True
