@@ -44,6 +44,7 @@ __all__ = [
 #: тях значи, че файлът изглежда готов, но не издържа проверка отвън.
 HARD_STRUCTURAL_FLAGS = (
     "template_complete",
+    "template_applicability_ok",
     "contract_scope_complete",
     "all_leaves_reach_terminal",
     "resource_capacity_ok",
@@ -279,6 +280,8 @@ def structural_flags(
 
     флагове = {
         "template_complete": _template_complete(packages, chains, tasks),
+        "template_applicability_ok": not _template_applicability(packages),
+        "template_applicability": _template_applicability(packages)[:5],
         "contract_scope_complete": _REQUIRED_PHASES <= set(spans),
         "terminal_count": len(terminals),
         "all_leaves_reach_terminal": len(reaches) == len(leaves),
@@ -307,7 +310,8 @@ def structural_flags(
 #: строителство, което го няма.
 _VACUOUS_WHEN_EMPTY = (
     "all_leaves_reach_terminal", "summary_rollup_ok", "supervision_span_ok",
-    "resource_capacity_ok", "template_complete", "contract_scope_complete",
+    "resource_capacity_ok", "template_complete", "template_applicability_ok",
+    "contract_scope_complete",
     "quantity_conservation_ok", "source_ref_fully_resolvable",
 )
 
@@ -340,6 +344,75 @@ def _mark_unevaluated(флагове: dict[str, Any], tasks: list[dict]) -> dict
     флагове["flag_states"] = състояния
     флагове["evaluated"] = оценим
     return флагове
+
+
+#: Вериги, които описват ЛИНЕЙНО трасе: тяхната работа има смисъл само когато
+#: пакетът наистина полага нещо по дължина.
+_LINEAR_CHAINS = frozenset({"sewer_section", "water_section",
+                            "water_section_hdd", "cable_section"})
+
+#: Класът, който доказва, че пакетът е трасе, а не точка.
+_LINEAR_CLASSES = frozenset({"laying", "cable"})
+
+
+def _template_applicability(packages: Iterable[Any]) -> list[str]:
+    """Приложима ли е веригата за съдържанието на пакета — не само пълна.
+
+    НЕЗАВИСИМ ОДИТ 17.08.2026: „`template_complete` може да е true за ГРЕШНО
+    ИЗБРАН template.  Кабелна дейност може да има пълна sewer chain и пак
+    template_complete=true."
+
+    Прав е, и разликата е съществена: `template_complete` пита „изпълнени ли са
+    всички стъпки на веригата", а не „тази верига има ли работа тук".  Точка —
+    водомерна шахта, монолитна РШ — прекарана през пълната тръбна верига,
+    получава изкоп, полагане, изпитване на налягане и дезинфекция за нещо,
+    което не е трасе.  Всички стъпки присъстват, гейтът мълчи, а графикът
+    описва работа, която обектът няма.
+
+    Затова тук се проверява ОБРАТНАТА посока: линейна верига върху пакет без
+    нито едно линейно количество.  Класовете, чието място е в друга верига, се
+    местят по-рано (`reroute_uncoverable_items`) — този флаг хваща онова, което
+    остава след тях.
+
+    Returns:
+        Списък с нарушенията; празен, когато няма.
+    """
+    нарушения: list[str] = []
+    for pkg in packages:
+        верига = str(getattr(pkg, "chain", "") or "")
+        if верига not in _LINEAR_CHAINS:
+            continue
+        класове = {str(getattr(item, "activity_class", "") or "")
+                   for item in (getattr(pkg, "items", None) or ())}
+        ако_има = класове & _LINEAR_CLASSES
+        if not класове or ако_има:
+            continue
+        нарушения.append(
+            f"пакет {getattr(pkg, 'id', '?')}: верига {верига!r} е за трасе, а "
+            f"пакетът носи само {sorted(класове)} — точка/съоръжение, прекарано "
+            "през линейна верига")
+
+    # ВТОРИ ПРИЗНАК: клас, чието място е в ДРУГА верига.  Кабел в канална
+    # верига е първият от трите случая на одитора — той минава горната
+    # проверка, защото кабелът също е линеен, но каналната верига му дава
+    # изпитване за непропускливост и CCTV, каквито кабел не търпи.
+    from src.work_package import _HOME_CHAIN_BY_CLASS
+
+    for pkg in packages:
+        верига = str(getattr(pkg, "chain", "") or "")
+        if not верига:
+            continue
+        for item in (getattr(pkg, "items", None) or ()):
+            клас = str(getattr(item, "activity_class", "") or "")
+            дом = _HOME_CHAIN_BY_CLASS.get(клас)
+            if дом and дом != верига:
+                нарушения.append(
+                    f"пакет {getattr(pkg, 'id', '?')}: количество от клас "
+                    f"{клас!r} стои във верига {верига!r}, а мястото му е "
+                    f"{дом!r}")
+                break
+
+    return нарушения
 
 
 def _capacity_overloads(tasks: list[dict]) -> list[dict]:

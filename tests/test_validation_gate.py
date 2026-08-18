@@ -367,3 +367,60 @@ def test_bad_numeric_start_end_is_invalid(field, bad):
     task[field] = bad
     _SB().recompute_durations([dict(task)])              # не бива да хвърля
     assert _SB().validate_schedule([dict(task)])["valid"] is False
+
+
+# ===================================================================
+# template_applicability_ok — веригата има ли работа тук (17.08.2026)
+# ===================================================================
+#
+# НЕЗАВИСИМ ОДИТ: „`template_complete` може да е true за ГРЕШНО ИЗБРАН template.
+# Кабелна дейност може да има пълна sewer chain и пак template_complete=true."
+#
+# Разликата е съществена: `template_complete` пита „изпълнени ли са всички
+# стъпки на веригата", а не „тази верига има ли работа тук".  Водомерна шахта,
+# прекарана през пълната тръбна верига, получава изкоп, полагане, изпитване на
+# налягане и дезинфекция за нещо, което не е трасе — всички стъпки присъстват,
+# гейтът мълчи, а графикът описва работа, която обектът няма.
+#
+# FAILURE означава: напълно разгънат ГРЕШЕН шаблон пак ще минава за чист.
+
+from src.schedule_diagnostics import _template_applicability  # noqa: E402
+from src.work_package import PackageItem, SpatialWorkPackage  # noqa: E402
+
+
+def _пакет(pid: str, chain: str, класове: list[str]) -> SpatialWorkPackage:
+    return SpatialWorkPackage(
+        id=pid, network="К", chain=chain,
+        items=tuple(PackageItem(f"КСС.xlsx!Лист!{i}", клас, 10.0, "бр.", "ред")
+                    for i, клас in enumerate(класове)))
+
+
+class TestTemplateApplicability:
+    def test_cable_in_a_sewer_chain_is_caught(self):
+        """Кабелът не търпи изпитване за непропускливост и CCTV."""
+        assert _template_applicability([_пакет("ЕЛ1", "sewer_section", ["cable"])])
+
+    def test_a_chamber_does_not_get_the_full_pipe_chain(self):
+        """Водомерна шахта е ТОЧКА, не трасе."""
+        assert _template_applicability([_пакет("В9", "water_section", ["manhole"])])
+
+    def test_a_monolithic_manhole_is_caught(self):
+        assert _template_applicability(
+            [_пакет("К9", "sewer_section", ["manhole", "excavation"])])
+
+    def test_a_real_pipe_section_passes(self):
+        assert _template_applicability(
+            [_пакет("К1", "sewer_section", ["laying", "manhole", "excavation"])]) == []
+
+    def test_each_class_in_its_own_chain_passes(self):
+        пакети = [_пакет("ЕЛ1", "cable_section", ["cable"]),
+                  _пакет("П1", "pavement_section", ["pavement"]),
+                  _пакет("С1", "structure", ["manhole", "excavation"])]
+
+        assert _template_applicability(пакети) == []
+
+    def test_the_flag_is_hard(self):
+        """Не е диагностика — графикът не е чист без него."""
+        from src.schedule_diagnostics import HARD_STRUCTURAL_FLAGS
+
+        assert "template_applicability_ok" in HARD_STRUCTURAL_FLAGS
