@@ -497,8 +497,16 @@ def concurrency_report(tasks: Iterable[dict]) -> dict[str, Any]:
     """
     листа = [t for t in _leaves(list(tasks))
              if not t.get("is_milestone") and t.get("type") != "milestone"]
+    # ФАЗАТА СЕ ЧЕТЕ ОТ `wbs_root`, както я чете `phase_spans` — не от `phase`.
+    #
+    # НЕЗАВИСИМ ОДИТ 17.08.2026: „concurrency_construction_span_days == total_days,
+    # докато phase_days['construction'] е различно."  Прав е и причината е тук:
+    # филтърът приемаше и задача БЕЗ фаза за строителна, а нашите задачи носят
+    # `wbs_root`, не `phase`.  Тоест празното поле пускаше проектирането,
+    # надзора и приемането вътре и показателят мереше целия проект под името
+    # на строителството.
     строителни = [t for t in листа
-                  if str(t.get("phase") or "").lower() in ("", "construction")
+                  if str(t.get("wbs_root") or "").lower() == "construction"
                   or "строит" in str(t.get("phase") or "").lower()]
     редове = строителни or листа
     if not редове:
