@@ -28,9 +28,29 @@ pytestmark = pytest.mark.skipif(
     shutil.which("git") is None, reason="git не е наличен")
 
 
+def _clean_env(**extra: str) -> dict:
+    """Средата БЕЗ променливите на git.
+
+    ОТКРИТО 18.08.2026: hook-ът пуска pytest ВЪТРЕ в `git commit`, а git слага
+    `GIT_DIR`, `GIT_INDEX_FILE` и `GIT_WORK_TREE` в средата на всичко, което
+    вика.  Тези тестове правят СВОИ временни repo-та; наследената `GIT_DIR`
+    ги отвежда обратно към истинското и 12 от тях падат.  Следствието не е
+    козметично: pre-commit hook-ът блокираше ВСЕКИ комит на машина, на която
+    е инсталиран — тоест защитата срещу изтичане на клиентски данни се
+    заобикаляше на ръка, за да може изобщо да се работи.
+
+    FAILURE на `test_temp_repos_ignore_inherited_git_env` означава, че тази
+    изолация пак я няма.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(extra)
+    return env
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=repo, capture_output=True,
-                          text=True, encoding="utf-8", errors="replace")
+                          text=True, encoding="utf-8", errors="replace",
+                          env=_clean_env())
 
 
 def _scan(repo: Path, *args: str) -> int:
@@ -38,7 +58,7 @@ def _scan(repo: Path, *args: str) -> int:
     return subprocess.run(
         [sys.executable, str(SCAN), *args],
         cwd=repo, capture_output=True, text=True,
-        encoding="utf-8", errors="replace").returncode
+        encoding="utf-8", errors="replace", env=_clean_env()).returncode
 
 
 @pytest.fixture()
@@ -107,7 +127,7 @@ def test_git_error_outside_repo_is_operational_error(tmp_path: Path):
     rc = subprocess.run(
         [sys.executable, str(SCAN), "--staged", str(tmp_path / "deny.txt")],
         cwd=tmp_path, capture_output=True, text=True,
-        encoding="utf-8", errors="replace").returncode
+        encoding="utf-8", errors="replace", env=_clean_env()).returncode
     assert rc == 3
 
 
@@ -130,7 +150,7 @@ def _hook_repo(repo: Path) -> Path:
 
 def _run_hook(repo: Path) -> subprocess.CompletedProcess:
     """Изпълни РЕАЛНИЯ hooks/pre-commit (само скана)."""
-    env = dict(os.environ)
+    env = _clean_env()
     env["PRECOMMIT_SKIP_TESTS"] = "1"
     # осигури, че `python`/`python3` се резолвва (hook-ът ги търси)
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
@@ -240,7 +260,7 @@ def test_real_hook_fails_closed_on_git_show_error(repo: Path, tmp_path: Path):
         'for a in "$@"; do [ "$a" = "show" ] && exit 128; done\n'
         'PATH="$REAL_PATH" exec git "$@"\n', encoding="utf-8")
     (shim / "git").chmod(0o755)
-    env = dict(os.environ)
+    env = _clean_env()
     env["PRECOMMIT_SKIP_TESTS"] = "1"
     env["REAL_PATH"] = str(Path(sys.executable).parent) + os.pathsep + real_path
     env["PATH"] = str(shim) + os.pathsep + env["REAL_PATH"]
@@ -272,9 +292,33 @@ def test_ci_orchestration_two_channels(repo: Path):
     _git(repo, "add", "tools/security_scan.py")
     dl = _deny(repo)
     # канал 1: pathname за ВСИЧКИ (git ls-files) — трябва да хване token-ИМЕТО
-    names = subprocess.run(["git", "ls-files"], cwd=repo, capture_output=True,
+    names = subprocess.run(["git", "ls-files"], cwd=repo, env=_clean_env(),
+                           capture_output=True,
                            text=True, encoding="utf-8").stdout.split()
     ch1 = subprocess.run([sys.executable, str(SCAN), "--names-only", dl, *names],
+                         env=_clean_env(),
                          cwd=repo, capture_output=True, text=True,
                          encoding="utf-8", errors="replace").returncode
     assert ch1 == 2                                  # token-ИМЕ хванато по канал 1
+
+
+def test_temp_repos_ignore_inherited_git_env(repo: Path, monkeypatch):
+    """Hook-ът пуска pytest ВЪТРЕ в `git commit` — средата носи GIT_DIR.
+
+    Ако тя се наследи, всяко `git` в тези тестове сочи към ИСТИНСКОТО repo
+    вместо към временното и 12 теста падат.  Следствието беше, че pre-commit
+    hook-ът блокираше всеки комит на машина, на която е инсталиран.
+    """
+    monkeypatch.setenv("GIT_DIR", str(Path.cwd() / ".git"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(Path.cwd() / ".git" / "index"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(Path.cwd()))
+
+    (repo / "note.md").write_text("чисто", encoding="utf-8")
+    _git(repo, "add", "note.md")
+
+    изброени = _git(repo, "diff", "--cached", "--name-only").stdout.split()
+    assert изброени == ["note.md"], (
+        f"временното repo вижда {изброени} — наследената GIT_DIR го е "
+        "отвела към истинското")
+    assert not any(k.startswith("GIT_") for k in _clean_env()), (
+        "_clean_env пропуска променливи на git")
