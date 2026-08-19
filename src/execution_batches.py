@@ -88,6 +88,33 @@ def _network_of(ref: str) -> str:
     return ""
 
 
+#: Точкови класове — брой, не метри.
+_ТОЧКОВИ = frozenset({"manhole"})
+
+
+def _клас(row: Any) -> str | None:
+    from src.provenance import _coverer_class
+    return _coverer_class(row)
+
+
+def _самостоятелно_съоръжение(row: Any) -> bool:
+    """Дали позицията се лее на място от ОТДЕЛЕН екип.
+
+    Разделението идва от еталона, не от догадка: СКО и УО ги няма там като
+    отделни задачи (правят се в съставната стъпка на участъка), а „Водомерна
+    шахта" стои като своя задача.  Списъкът е в `config/tech_chains.json`,
+    ключ `standalone_structures`, с обосновката до него.
+    """
+    import re
+
+    from src.work_package import load_chains
+
+    шаблони = ((load_chains() or {}).get("standalone_structures") or {}).get(
+        "patterns") or []
+    описание = str(getattr(row, "description", "") or "")
+    return any(re.search(ш, описание, re.IGNORECASE) for ш in шаблони)
+
+
 def split_exactly(total: float, parts: int) -> list[float]:
     """Раздели на `parts` дяла, чийто сбор е ТОЧНО `total`.
 
@@ -143,8 +170,41 @@ def allocate_execution_batches(
         кофи.setdefault(верига, []).append(row)
 
     packages: list[dict] = []
-    for верига, редове in sorted(кофи.items()):
+    for верига, всички in sorted(кофи.items()):
         мрежа = _CHAIN_NETWORK[верига]
+
+        # СЪОРЪЖЕНИЯТА СА ОТДЕЛНА РАБОТА, ОТ ОТДЕЛЕН ЕКИП (19.08.2026).
+        #
+        # Шахтите — улични оттоци, преливна, монолитни РШ — не ги прави
+        # бригадата на тръбите.  Идва отделна група, която върши само това, а
+        # работата ѝ ВЪРВИ УСПОРЕДНО с трасето.  Затова я няма и в еталонния
+        # график като отделен ред: тя не движи срока.
+        #
+        # Дотук те попадаха в стъпката за полагане, на фронта на тръбната
+        # бригада, и я държаха заета.  Измерено на този търг: ЕДНА преливна
+        # шахта, разцепена на осемте етапа, изяждаше 8 × 17 = 136 бригадо-дни
+        # от екипа, който полага тръбите — за позиция, която дори няма норма.
+        #
+        # И не се разцепва: шахтата е БРОЙ, не метри.  Една осма от шахта не е
+        # нищо на обекта, а само начин подът от един ден да се плати осем пъти.
+        точкови = [r for r in всички
+                   if _клас(r) in _ТОЧКОВИ and _самостоятелно_съоръжение(r)]
+        линейни = [r for r in всички if r not in точкови]
+
+        for н, row in enumerate(точкови, 1):
+            packages.append({
+                "id": f"С{мрежа}{н}",
+                "name": str(getattr(row, "description", "") or "").strip()
+                        or f"Съоръжение {н}",
+                "network": мрежа,
+                "chain": "structure",
+                "items": [{"source_ref": str(row.ref),
+                           "quantity": float(row.quantity)}],
+            })
+
+        редове = линейни
+        if not редове:
+            continue
         етапи: list[dict] = [
             {
                 "id": f"{мрежа}{i + 1}",
