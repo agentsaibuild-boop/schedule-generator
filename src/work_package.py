@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
@@ -718,6 +719,26 @@ def structure_chain(chain: str, items: Iterable[PackageItem]) -> str:
     return chain
 
 
+def declared_laying_method() -> str:
+    """Методът, ОБЯВЕН за този търг: „hdd" или „open" (празно = не е обявен).
+
+    Изборът между открит изкоп и сондаж е решение на процедурата, не находка в
+    описанието на количествата.  Измерено 19.08.2026: човешкият еталон за
+    Илиянци съдържа 23 безизкопни задачи — точно колкото са водопроводните
+    участъци, тоест ЦЕЛИЯТ водопровод е сондиран, за 36 екипо-дни.  Ние го
+    моделирахме с открит изкоп: 247 задача-дни, седем пъти повече, и това беше
+    цялата разлика при водопровода (407 наши дни срещу 190 негови).
+
+    А КСС мълчи за метода — редовете казват само „Реконструкция на
+    разпределителната мрежа".  Значи не може да се извади от текста; трябва да
+    бъде КАЗАН, както се казват сроковете за проектиране и строителство.
+
+    Приложението трябва да пита работника при качване на проекта.  Дотогава се
+    чете от средата, за да може да се мери.
+    """
+    return str(os.getenv("LAYING_METHOD", "") or "").strip().lower()
+
+
 def trenchless_chain(chain: str, items: Iterable[PackageItem]) -> str:
     """Открит изкоп или сондаж — решава ТЪРГЪТ, не шаблонът и не моделът.
 
@@ -738,6 +759,11 @@ def trenchless_chain(chain: str, items: Iterable[PackageItem]) -> str:
     """
     target = _TRENCHLESS_CHAIN.get(chain)
     if not target:
+        return chain
+    обявен = declared_laying_method()
+    if обявен in ("hdd", "сондаж", "безизкопно", "trenchless"):
+        return target
+    if обявен in ("open", "открит", "изкоп"):
         return chain
     for item in items:
         if item.activity_class == "laying" and _TRENCHLESS_RE.search(
@@ -2318,8 +2344,16 @@ def link_contract_phases(
         task["dependencies"] = deps
         return True
 
-    spatial = {"sewer_section", "water_section", "pavement_section",
-               "cable_section", "structure"}
+    # `water_section_hdd` ВЛИЗА (поправено 19.08.2026).  Липсваше, и когато
+    # търгът обяви сондаж, целият водопровод оставаше извън този списък: не
+    # получаваше портата „след откриване на площадката" и тръгваше в ден 1 —
+    # преди проектирането.  Надзорът, който се котви за най-ранната строителна
+    # задача, го следваше и графикът падаше от собствената си валидация.
+    #
+    # Веригата съществува от 10.08.2026, но дотогава никой търг не я беше
+    # избирал, затова пропускът не се виждаше.
+    spatial = {"sewer_section", "water_section", "water_section_hdd",
+               "pavement_section", "cable_section", "structure"}
     build = [t for t in out
              if pkg_chain.get(str(t.get("parent_id") or "")) in spatial
              and not t.get("is_summary")]

@@ -163,3 +163,38 @@ class TestCountsAreNotSplitBelowOneUnit:
 
         assert len(пакети) == 8
         assert all(p["items"][0]["quantity"] < 1182.0 for p in пакети)
+
+
+class TestStructureCrewsAreTheirOwnPeople:
+    """Съоръженията ги прави ОТДЕЛНА група, не общият парк.
+
+    Изпълнителят, 19.08.2026: „тези шахти се изграждат от допълнителни екипи,
+    които не са част от тези за полагане на тръбите, кабелите и настилките".
+
+    Дотук единайсетте шахти се биеха за същите 11 строителни работници, които
+    трябват и на полагането, и на настилките: 81 от 187 заявки за тях идваха
+    оттук, при ЕДНО съоръжение в еталона.
+    """
+
+    def test_structure_resources_do_not_share_the_general_pool(self):
+        from src.work_package import load_chains
+
+        вериги = load_chains()["chains"]
+        съоръжение = {r for st in вериги["structure"]["steps"]
+                      for r in (st.get("crew") or [])}
+        трасе = {r for st in вериги["sewer_section"]["steps"]
+                 for r in (st.get("crew") or [])}
+
+        assert съоръжение, "веригата за съоръжение няма екип"
+        assert not (съоръжение & трасе), (
+            f"съоръженията делят хора с трасето: {sorted(съоръжение & трасе)}")
+
+    def test_they_have_their_own_availability(self):
+        from src.schedule_builder import _headcount
+
+        състав = _headcount()
+        свои = [к for к in състав if "(съоръжения)" in к]
+
+        assert свои, "съоръженските ресурси ги няма в наличността"
+        for к in свои:
+            assert състав[к]["налични"] >= състав[к]["на_задача"]
