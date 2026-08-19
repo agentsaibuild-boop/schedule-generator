@@ -214,7 +214,8 @@ def main() -> int:
     ai = AIProcessor(router=router)
 
     result = ai.generate_schedule_packaged(
-        {"analysis": args.analysis}, boq_index, num_teams=args.teams)
+        {"analysis": args.analysis}, boq_index, num_teams=args.teams,
+        project_path=project)
 
     status = result.get("status")
     # Външният слой връща графика в `schedule.tasks`; вътрешният — в `tasks`.

@@ -568,6 +568,7 @@ class AIProcessor:
         segments: list[dict] | None = None,
         progress_callback: Any | None = None,
         feedback: str = "",
+        project_path: Any | None = None,
     ) -> dict:
         """Генерирай ПАКЕТИ (физически участъци), после ги разгъни в задачи.
 
@@ -715,6 +716,23 @@ class AIProcessor:
                 "Отговори в JSON с ключ `packages`."
             ),
         }]
+
+        # ПРОЧЕТЕН ЛИ Е ЦЕЛИЯТ КСС (19.08.2026).  `quantity_conservation_ok`
+        # сверява разпределеното срещу ИНДЕКСИРАНОТО — ред, който четецът
+        # никога не е видял, липсва и от двете страни и мълчаливият пропуск
+        # изглежда точно като изряден график.  Затова се отчита изрично.
+        try:
+            from src.provenance import audit_unread_rows
+            прочит = audit_unread_rows(project_path) if project_path else None
+        except Exception:                            # pragma: no cover
+            прочит = None
+        if прочит and (прочит["unread"] or прочит["no_quantity"]):
+            _prog(f"ВНИМАНИЕ: {len(прочит['unread'])} реда с число не станаха "
+                  f"позиция, {len(прочит['no_quantity'])} са с описание, но "
+                  "без разпознато количество — КСС може да не е прочетен цял.")
+            for случай in (прочит["unread"] + прочит["no_quantity"])[:3]:
+                _prog(f"   {случай['лист']} ред {случай['ред']}: "
+                      f"{случай['причина']}")
 
         # ИЗТОЧНИКЪТ НА ГЕОМЕТРИЯ се решава ПРЕДИ да се харчи заявка (одит
         # 10.08.2026; преработено 18.08.2026).  Прочетеното от PDF е ЕТИКЕТ:
@@ -1225,6 +1243,7 @@ class AIProcessor:
         segments: list[dict] | None = None,
         progress_callback: Any | None = None,
         feedback: str = "",
+        project_path: Any | None = None,
     ) -> dict:
         """Пакетната генерация, приведена към СТАНДАРТНИЯ резултат на pipeline-а.
 
@@ -1242,7 +1261,7 @@ class AIProcessor:
         result = self.generate_packages(
             analysis, boq_index, num_teams=num_teams, locations=locations,
             segments=segments, progress_callback=progress_callback,
-            feedback=feedback)
+            feedback=feedback, project_path=project_path)
         if result["status"] == "error":
             return {"status": "error", "message": result.get("message", ""),
                     "packaged": True, "parse_errors": result.get("parse_errors", [])}

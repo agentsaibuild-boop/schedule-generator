@@ -435,26 +435,36 @@ def _capacity_overloads(tasks: list[dict]) -> list[dict]:
     заради правило, което кодът е решил да няма.
 
     Едно правило за двете страни: `_is_leveling_resource`.
+
+    ИЗМЕРЕНО 19.08.2026, същият клас: и КОЙ заема ресурса трябва да се брои
+    еднакво.  Таванът в `resource_capacity.json` е извлечен от еталона, където
+    една задача е един участък, една стъпка; нашите задачи са по един КСС ред,
+    затова заетостта се държи от БРИГАДАТА НА УЧАСТЪКА, не от отделния ред.
+    Изравняването го прави; ако тук се брояха задачи, гейтът щеше да отхвърля
+    точно графиците, които изравняването е сметнало за изпълними.
     """
-    from src.schedule_builder import _is_leveling_resource, _load_resource_capacity
+    from src.schedule_builder import (_is_leveling_resource,
+                                      _load_resource_capacity, _occupancy_key)
 
     config = _load_resource_capacity()
     capacity = config.get("capacity") or {}
     default = int(config.get("default", 2) or 2)
 
-    load: dict[tuple[str, int], int] = defaultdict(int)
+    load: dict[tuple[str, int], set[str]] = defaultdict(set)
     for task in _leaves(tasks):
         start, end = _start(task), _end(task)
         if start is None or task.get("milestone"):
             continue
+        заемател = _occupancy_key(task)
         for name in (task.get("resources") or []):
             if not _is_leveling_resource(str(name)):
                 continue
             for day in range(int(start), int(end) + 1):
-                load[(str(name), day)] += 1
+                load[(str(name), day)].add(заемател)
 
     overloads: list[dict] = []
-    for (name, day), used in load.items():
+    for (name, day), заематели in load.items():
+        used = len(заематели)
         limit = int(capacity.get(name, default))
         if used > limit:
             overloads.append({"resource": name, "day": day,

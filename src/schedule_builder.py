@@ -65,6 +65,61 @@ def _task_resources(task: dict, *, leveling_only: bool = False) -> list[str]:
     return names
 
 
+
+def _occupancy_key(task: dict) -> str:
+    """Кой ЗАЕМА ресурса — бригадата на участъка, не отделният ред от КСС.
+
+    ИЗМЕРЕНО 19.08.2026, и това е грешка в МЕРНАТА ЕДИНИЦА, не в числата.
+    `resource_capacity.json` брои ЕДНОВРЕМЕННИ ЗАДАЧИ и е извлечен от
+    еталонния график, където една задача е един участък, една стъпка.  Нашите
+    задачи са по-ситни: разделяме стъпката на по една задача за КСС ред, за да
+    може всяка да доказва своя ред.  Затова шестте слота на „Ръководител
+    работна група" в еталона значат „шест УЧАСТЪКА вървят", а при нас значеха
+    „шест РЕДА ОТ КСС вървят" — един и същи таван, дванайсет пъти по-малко
+    напредък.
+
+    Следствието се виждаше на око: задачи, чиито предшественици са готови на
+    ден 239, тръгваха на ден 589 — 350 дни чакане за ресурс, който физически
+    е свободен.  Един участък отнемаше 517 дни при 70 дни работа в него.
+
+    Единицата е БРИГАДАТА ЗА ОПЕРАЦИЯ, минаваща по маршрута.  Строежът на
+    линеен обект е поточна линия: багерът копае участък 1, после минава на 2,
+    докато в 1 полагат тръбите; когато полагането мине в 2, в 1 засипват.
+    Процесът не спира — всяка бригада върви напред и не чака съседната.
+
+    Затова ключът е (мрежа, операция, бригада): всички изкопи на един фронт
+    са ЕДНА багерна бригада, която ги прави един след друг, а полагането е
+    друга бригада, която върви зад нея.  Вътре в участъка редът се пази от
+    самите зависимости (изкоп → полагане → засипка), не от заетостта.
+
+    Опитаните преди ключове и защо не стават:
+      * задачата (както беше) — 12 паралелни реда от КСС заемаха 12
+        ръководители, тоест 12 бригади там, където има 6;
+      * (участък, бригада) — 32 бригади, всяка чакаща ред: 1047 дни;
+      * бригадата сама — тя владее целия участък от трасирането до CCTV и
+        не пуска, докато не свърши: 943 дни, при 63% чакане вътре.
+
+    И ОБРАТНОТО СЪЩО Е ВЯРНО, иначе поправката става по-лоша от дефекта: щом
+    бригадата е една, тя прави ЕДНО нещо в даден ден.  Първият опит само
+    сподели слота и махна всичко, което държеше редовете подредени — излезе
+    връх от 37 едновременни задачи при шест бригади, тоест една бригада на
+    шест места наведнъж, и срокът падна на 496 дни.  Затова заемателят се
+    брои и като собствен ресурс с капацитет 1.
+    """
+    бригада = str(task.get("crew_id") or task.get("team") or "").strip()
+    операция = str(task.get("chain_step") or "").strip()
+    мрежа = str(task.get("network") or "").strip()
+    if операция and бригада and бригада != "—":
+        # Багерът не чака полагането: щом свърши изкопа на един участък,
+        # минава на следващия, а зад него вървят тръбите и засипката.
+        return f"{мрежа}|{операция}|{бригада}"
+    if бригада and бригада != "—":
+        return бригада
+    # Задача без бригада (проектиране, приемане, надзор) заема сама себе си —
+    # там паралелността се урежда от собствените ѝ ресурси.
+    return f"~{_task_key(task)}"
+
+
 def _is_leveling_resource(name: str) -> bool:
     """Ограничава ли този ресурс колко работа може да върви едновременно.
 
@@ -736,7 +791,11 @@ class ScheduleBuilder:
             for link in dependency_links(task):
                 edges[(link.predecessor_id, tid)] = (link.type, link.lag_days)
 
-        usage: dict[tuple[str, int], int] = defaultdict(int)
+        # Кои бригади държат ресурса на този ден — множество, не брояч:
+        # две задачи на един участък не са две бригади.
+        usage: dict[tuple[str, int], set[str]] = defaultdict(set)
+        #: Кои дни бригадата вече е заета — тя прави едно нещо наведнъж.
+        busy: dict[str, set[int]] = defaultdict(set)
         new_start: dict[str, int] = {}
         new_end: dict[str, int] = {}
         shifted: list[dict] = []
@@ -767,14 +826,19 @@ class ScheduleBuilder:
 
             resources = _task_resources(task, leveling_only=True)
             consumes = bool(resources) and duration > 0 and not self._is_summary(task)
+            occupant = _occupancy_key(task)
 
             start = earliest
             if consumes:
                 limit = earliest + horizon_days
                 while start <= limit:
-                    if all(usage[(r, day)] < table.get(r, fallback)
-                           for r in resources
-                           for day in range(start, start + span + 1)):
+                    дни = range(start, start + span + 1)
+                    свободна_бригада = all(day not in busy[occupant] for day in дни)
+                    има_ресурс = all(
+                        occupant in usage[(r, day)]
+                        or len(usage[(r, day)]) < table.get(r, fallback)
+                        for r in resources for day in дни)
+                    if свободна_бригада and има_ресурс:
                         break
                     start += 1
                 else:
@@ -785,9 +849,11 @@ class ScheduleBuilder:
 
             end = start if duration <= 0 else start + span
             if consumes:
+                for day in range(start, end + 1):
+                    busy[occupant].add(day)
                 for r in resources:
                     for day in range(start, end + 1):
-                        usage[(r, day)] += 1
+                        usage[(r, day)].add(occupant)
 
             if start != original:
                 shifted.append({"id": tid, "name": task.get("name"),
@@ -798,8 +864,8 @@ class ScheduleBuilder:
             new_end[tid] = end
 
         peak: dict[str, int] = defaultdict(int)
-        for (resource, _), count in usage.items():
-            peak[resource] = max(peak[resource], count)
+        for (resource, _), заематели in usage.items():
+            peak[resource] = max(peak[resource], len(заематели))
 
         return {"schedule": updated, "shifted": shifted, "warnings": warnings,
                 "peak": dict(peak), "capacity": table, "default_capacity": fallback}

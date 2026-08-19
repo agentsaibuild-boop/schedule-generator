@@ -353,6 +353,109 @@ def build_quantity_index(base_path: str | Path) -> list[QuantityRow]:
     return index
 
 
+
+#: Колони, чиито числа НЕ са количество: служебният ред на конвертора и
+#: поредният номер на позицията.  Без това одитът вдига тревога за всеки ред
+#: от обобщаващия лист — там „числата" са 1, 2, 3.
+_НЕ_СА_КОЛИЧЕСТВО = ("__excel_row__", "№", "no", "n", "#", "поз", "позиция")
+
+#: Думи, по които се познава ред „Общо"/заглавие — там числа има, но работа няма.
+_НЕ_Е_ПОЗИЦИЯ = ("общо", "всичко", "total", "сума", "ддс", "ед.цена", "ед. цена",
+                 "обща цена", "стойност", "ед. мярка", "ед.мярка", "количество",
+                 "диаметър", "недопустими")
+
+
+def audit_unread_rows(base_path: str | Path) -> dict[str, Any]:
+    """Кои редове от КСС програмата е ВИДЯЛА, но не е взела — и защо.
+
+    ЗАЩО.  Гейтът `quantity_conservation_ok` сверява разпределеното срещу
+    ИНДЕКСИРАНОТО.  Ред, който четецът никога не е видял, липсва и от двете
+    страни на сметката — тоест мълчаливият пропуск изглежда точно като
+    изряден график.  Това е единственият начин цялата верига да бъде вярна и
+    въпреки това да не описва обекта.
+
+    Четенето е евристично по необходимост: този търг слага количеството в
+    колона E на два листа, в D на третия и в C на четвъртия, а мярката ту в
+    своя клетка, ту в заглавния ред.  Проверено 19.08.2026 — на ТОЗИ файл
+    всичките 28 реда излизат верни.  Следващият търг обаче е друг файл.
+
+    Затова тук не се гадае, а се ОТЧИТА: ред с число, който не е станал
+    позиция, се показва с причината.  Заглавията и редовете „Общо" се
+    разпознават и не се броят за пропуск.
+
+    Returns:
+        {"unread": [...], "no_quantity": [...], "indexed": n, "sheets": n} —
+        `unread` е ред с число, но без описание; `no_quantity` е ред с
+        описание, от който не е взето количество, макар да има числа.
+    """
+    converted = Path(base_path) / "converted"
+    if not converted.exists():
+        return {"unread": [], "no_quantity": [], "indexed": 0, "sheets": 0}
+
+    непрочетени: list[dict] = []
+    без_количество: list[dict] = []
+    взети = 0
+    листове = 0
+
+    for jf in sorted(converted.glob("*.json")):
+        if jf.name == "_manifest.json":
+            continue
+        try:
+            data = json.loads(jf.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        document = data.get("source_file", jf.stem)
+        for sheet in data.get("sheets") or []:
+            листове += 1
+            име = sheet.get("name", "")
+            for offset, row in enumerate(sheet.get("rows") or []):
+                if not isinstance(row, dict):
+                    continue
+                числа = [
+                    v for k, v in row.items()
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and float(v) > 0
+                    and str(k).strip().lower() not in _НЕ_СА_КОЛИЧЕСТВО]
+                текстове = " ".join(str(v) for v in row.values()
+                                    if isinstance(v, str)).lower()
+                if not числа:
+                    continue
+                if any(дума in текстове for дума in _НЕ_Е_ПОЗИЦИЯ):
+                    continue
+
+                _, описание = _pick(row, _DESC_KEYS)
+                описание = str(описание or "").strip()
+                if not _looks_like_description(описание):
+                    for val in row.values():
+                        кандидат = str(val or "").strip()
+                        if (len(кандидат) > len(описание)
+                                and _looks_like_description(кандидат)):
+                            описание = кандидат
+
+                ред = row.get("__excel_row__")
+                къде = {"документ": document, "лист": име,
+                        "ред": ред if isinstance(ред, int) else offset + 2,
+                        "числа": числа[:4]}
+                if not описание:
+                    непрочетени.append({**къде, "причина": "няма описание в реда"})
+                    continue
+                _, количество = _pick(row, _QTY_KEYS, prefer_numeric=True)
+                if _number(количество) is None:
+                    без_количество.append(
+                        {**къде, "описание": описание[:60],
+                         "причина": "описание има, количество не е разпознато"})
+                else:
+                    взети += 1
+
+    if непрочетени or без_количество:
+        logger.warning(
+            "КСС: %d реда с число без описание, %d с описание но без разпознато "
+            "количество — виж `audit_unread_rows`",
+            len(непрочетени), len(без_количество))
+    return {"unread": непрочетени, "no_quantity": без_количество,
+            "indexed": взети, "sheets": листове}
+
+
 def format_boq_for_prompt(index: list[QuantityRow], max_rows: int = 400) -> str:
     """Изобрази количествените редове като таблица с ЦИТИРУЕМИ идентификатори.
 
