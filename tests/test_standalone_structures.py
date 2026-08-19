@@ -53,7 +53,6 @@ def _по_вериги(редове, етапи=8):
 @pytest.mark.parametrize("описание", [
     "Преливна шахта",
     "Индивидуална монолитна РШ",
-    "Водомерна шахта",
 ])
 def test_a_cast_in_place_structure_gets_its_own_package(описание):
     по = _по_вериги([ТРАСЕ, _Ред(описание, 1.0)])
@@ -67,6 +66,11 @@ def test_a_cast_in_place_structure_gets_its_own_package(описание):
     ("СКО смесена канализационна мрежа", 180.0),
     ("УО единичен", 100.0),
     ("УО двоен", 60.0),
+    # Шахта е, но НЕ е за отделния екип — проверено в два независими източника:
+    # човешкият график (UID 6427, „Водомерна шахта" = 5 дни, ЛИСТОВА задача) и
+    # тръжната таблица на изпълнителя („бр 1 | 5 d | 154 d → 158 d | ЕВ1").
+    # Прави я водопроводната бригада, за пет дни, в ЕДНА задача.
+    ("Водомерна шахта", 1.0),
 ])
 def test_route_connections_stay_with_the_pipe_crew(описание, количество):
     """Еталонът ги прави в съставната стъпка на участъка, не в кофраж."""
@@ -117,3 +121,37 @@ def test_the_rule_lives_in_the_config_not_in_the_code():
 
     assert блок.get("patterns"), "правилото го няма в config/tech_chains.json"
     assert блок.get("_note"), "правилото няма записана обосновка"
+
+
+class TestCountsAreNotSplitBelowOneUnit:
+    """Една шахта не се разцепва на осем осмини.
+
+    Количеството оставаше вярно, а работата ставаше измислена: една водомерна
+    шахта излизаше като осем задачи по един ден вместо една от пет.
+    """
+
+    def test_a_single_unit_lands_in_one_batch(self):
+        пакети = allocate_execution_batches(
+            [ТРАСЕ, _Ред("Водомерна шахта", 1.0)], 8)["packages"]
+
+        носители = [p for p in пакети
+                    for i in p["items"] if "Водомерна" in str(i["source_ref"])
+                    or i["source_ref"].endswith(str(_Ред("Водомерна шахта", 1.0).ref)[-3:])]
+        частици = [i for p in пакети for i in p["items"]
+                   if i["quantity"] and i["quantity"] < 1.0]
+        assert not частици, f"брой, разцепен под единица: {частици}"
+
+    def test_many_units_still_spread_across_batches(self):
+        """180 СКО се разпределят — те са по цялото трасе."""
+        пакети = allocate_execution_batches(
+            [ТРАСЕ, _Ред("СКО смесена канализационна мрежа", 180.0)], 8)["packages"]
+
+        носители = [p for p in пакети if any(
+            i["quantity"] == 22.5 for i in p["items"])]
+        assert len(носители) == 8
+
+    def test_linear_quantities_are_still_split(self):
+        пакети = allocate_execution_batches([ТРАСЕ], 8)["packages"]
+
+        assert len(пакети) == 8
+        assert all(p["items"][0]["quantity"] < 1182.0 for p in пакети)
