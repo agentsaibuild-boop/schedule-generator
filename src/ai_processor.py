@@ -594,8 +594,7 @@ class AIProcessor:
         """
         from src.provenance import format_boq_for_prompt
         from src.schedule_builder import ScheduleBuilder
-        from src.segment_scale import (scale_segment_overhead,
-                                       scale_structures_to_declared_days)
+        from src.segment_scale import scale_segment_overhead
         from src.work_package import (applied_resolutions, assign_fronts,
                                       check_conservation,
                                       conservation_messages, expand_packages,
@@ -993,15 +992,6 @@ class AIProcessor:
         # стъпките, които имат доказана продължителност.
         tasks, scale_notes = scale_segment_overhead(tasks, packages, chains)
         for note in scale_notes:
-            _prog(note)
-
-        # СЪОРЪЖЕНИЕТО ТРАЕ КОЛКОТО Е ОБЯВЕНО (19.08.2026).  Шаблонът
-        # `structure` сумира 19 дни — толкова е траел единственият екземпляр в
-        # еталона.  Изпълнителят дава срок за всяка позиция; той е по-силен от
-        # шаблона, защото е за ТАЗИ шахта, а не за наблюдавана друга.
-        tasks, structure_notes = scale_structures_to_declared_days(
-            tasks, packages, chains)
-        for note in structure_notes:
             _prog(note)
 
         scheduled = builder.reschedule(tasks)
