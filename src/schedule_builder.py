@@ -88,6 +88,30 @@ def _task_resources(task: dict, *, leveling_only: bool = False) -> list[str]:
 _ПО_ОПЕРАЦИЯ = os.getenv("CREW_PER_OPERATION", "1") not in ("0", "false")
 
 
+
+def _headcount() -> dict[str, dict[str, int]]:
+    """Колко души влизат в една задача и колко има на обекта.
+
+    ИЗМЕРЕНО 19.08.2026 от еталонния график: `capacity` брои ЕДНОВРЕМЕННИ
+    ЗАДАЧИ, а не хора — грешна мерна единица навсякъде, където бригадата е
+    повече от един човек.  Еталонът записва Units на всяко назначение:
+
+        Каналджия             3 на задача, 14 на обекта  (наш таван: 6 задачи)
+        Строителен работник   3 на задача, 11 на обекта  (наш таван: 8 задачи)
+        Товарен автомобил     1 на задача,  9 на обекта  (наш таван: 6 задачи)
+
+    Тоест обектът има четиринайсет каналджии, а ние допускахме шест задачи,
+    всяка уж с един каналджия.  Оттам идваше и 82-процентното чакане на
+    водопроводните пакети: те стояха зад канализацията за техника, която в
+    действителност стига.
+    """
+    конфиг = _load_resource_capacity() or {}
+    блок = конфиг.get("headcount") or {}
+    return {име: {"на_задача": max(1, int(v.get("на_задача") or 1)),
+                  "налични": max(1, int(v.get("налични") or 1))}
+            for име, v in блок.items() if isinstance(v, dict)}
+
+
 def _occupancy_key(task: dict) -> str:
     """Кой ЗАЕМА ресурса — бригадата на участъка, не отделният ред от КСС.
 
@@ -793,6 +817,10 @@ class ScheduleBuilder:
 
         config = _load_resource_capacity()
         table = dict(config.get("capacity") or {})
+        #: Изрично подадените тавани НАДДЕЛЯВАТ над извлечения състав: който
+        #: вика с `capacity={...}`, казва „толкова едновременни, точка" — и
+        #: правилото за хора не бива да го отменя мълчаливо.
+        изрични = set(capacity or {})
         if capacity:
             table.update(capacity)
         fallback = (default_capacity if default_capacity is not None
@@ -816,6 +844,10 @@ class ScheduleBuilder:
         # Кои бригади държат ресурса на този ден — множество, не брояч:
         # две задачи на един участък не са две бригади.
         usage: dict[tuple[str, int], set[str]] = defaultdict(set)
+        #: Колко ДУШИ от ресурса са заети на този ден.  Мерната единица е
+        #: човек, не слот за задача — виж `_headcount`.
+        глави: dict[tuple[str, int], int] = defaultdict(int)
+        състав = _headcount()
         #: Кои дни бригадата вече е заета — тя прави едно нещо наведнъж.
         busy: dict[str, set[int]] = defaultdict(set)
         new_start: dict[str, int] = {}
@@ -856,10 +888,27 @@ class ScheduleBuilder:
                 while start <= limit:
                     дни = range(start, start + span + 1)
                     свободна_бригада = all(day not in busy[occupant] for day in дни)
-                    има_ресурс = all(
-                        occupant in usage[(r, day)]
-                        or len(usage[(r, day)]) < table.get(r, fallback)
-                        for r in resources for day in дни)
+                    има_ресурс = True
+                    for r in resources:
+                        сведение = None if r in изрични else състав.get(r)
+                        for day in дни:
+                            if сведение:
+                                # ХОРА: задачата взима `на_задача` души от
+                                # `налични`.  Същият заемател не плаща втори
+                                # път — той вече ги държи.
+                                ако_вземе = глави[(r, day)] + (
+                                    0 if occupant in usage[(r, day)]
+                                    else сведение["на_задача"])
+                                ок = ако_вземе <= сведение["налични"]
+                            else:
+                                ок = (occupant in usage[(r, day)]
+                                      or len(usage[(r, day)])
+                                      < table.get(r, fallback))
+                            if not ок:
+                                има_ресурс = False
+                                break
+                        if not има_ресурс:
+                            break
                     if свободна_бригада and има_ресурс:
                         break
                     start += 1
@@ -874,8 +923,12 @@ class ScheduleBuilder:
                 for day in range(start, end + 1):
                     busy[occupant].add(day)
                 for r in resources:
+                    сведение = None if r in изрични else състав.get(r)
                     for day in range(start, end + 1):
+                        нов = occupant not in usage[(r, day)]
                         usage[(r, day)].add(occupant)
+                        if сведение and нов:
+                            глави[(r, day)] += сведение["на_задача"]
 
             if start != original:
                 shifted.append({"id": tid, "name": task.get("name"),

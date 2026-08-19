@@ -443,7 +443,7 @@ def _capacity_overloads(tasks: list[dict]) -> list[dict]:
     Изравняването го прави; ако тук се брояха задачи, гейтът щеше да отхвърля
     точно графиците, които изравняването е сметнало за изпълними.
     """
-    from src.schedule_builder import (_is_leveling_resource,
+    from src.schedule_builder import (_headcount, _is_leveling_resource,
                                       _load_resource_capacity, _occupancy_key)
 
     config = _load_resource_capacity()
@@ -462,10 +462,19 @@ def _capacity_overloads(tasks: list[dict]) -> list[dict]:
             for day in range(int(start), int(end) + 1):
                 load[(str(name), day)].add(заемател)
 
+    # ЕДНО ПРАВИЛО С ИЗРАВНЯВАНЕТО и тук: където еталонът дава състав на
+    # бригадата, се броят ХОРА, не слотове за задачи (19.08.2026).
+    състав = _headcount()
+
     overloads: list[dict] = []
     for (name, day), заематели in load.items():
-        used = len(заематели)
-        limit = int(capacity.get(name, default))
+        сведение = състав.get(name)
+        if сведение:
+            used = len(заематели) * сведение["на_задача"]
+            limit = сведение["налични"]
+        else:
+            used = len(заематели)
+            limit = int(capacity.get(name, default))
         if used > limit:
             overloads.append({"resource": name, "day": day,
                               "used": used, "limit": limit})
