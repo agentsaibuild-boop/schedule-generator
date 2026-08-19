@@ -232,7 +232,13 @@ def test_package_path_produces_wbs_and_critical_path():
     # Договорните фази (мобилизация, приемане) НЕ са работа на бригада и
     # затова нямат фронт — разпределят се само пространствените участъци.
     spatial = [p for p in out["packages"] if not p.id.startswith("ФАЗА_")]
-    assert {p.front for p in spatial} == {"Фронт 1", "Фронт 2"}
+    # Екипът носи мрежата си: „Екип К1", не „Фронт 1" (19.08.2026).  Еталонът
+    # ги изброява поименно — ЕК1/ЕК2 за канализация, ЕВ1/ЕВ2 за водопровод —
+    # и споделеното име караше водопровода да чака зад канала.
+    екипи = {p.front for p in spatial}
+    assert екипи, "участъците останаха без екип"
+    assert all(str(e).startswith("Екип ") for e in екипи), екипи
+    assert len({e for e in екипи if e.endswith(("1", "2"))}) == len(екипи)
     assert any(p.id.startswith("ФАЗА_") for p in out["packages"]), \
         "договорният обхват липсва"
 

@@ -1690,15 +1690,26 @@ def assign_fronts(
     if num_fronts == 1:
         return [_with_front(p, "Фронт 1") for p in packages]
 
-    load = [0.0] * num_fronts
-    buckets: list[list[SpatialWorkPackage]] = [[] for _ in range(num_fronts)]
-
     def weight(pkg: SpatialWorkPackage) -> float:
         return sum(abs(float(i.quantity)) for i in pkg.items) or 1.0
 
-    # Мрежите се балансират ПООТДЕЛНО — иначе един фронт може да получи цялата
-    # канализация, а другият целия водопровод, и rolling wave-ът се обезсмисля.
+    # ЕКИПИТЕ СА ПО ДИСЦИПЛИНА, не общи (19.08.2026).
+    #
+    # Еталонът ги изброява поименно: ЕК1 и ЕК2 правят САМО канализация, ЕВ1 и
+    # ЕВ2 само водопровод, ЕВН настилките.  Дотук фронтовете носеха общи имена
+    # („Фронт 1"), тоест един и същ екип получаваше и канализационни, и
+    # водопроводни пакети — и в режима „екип на участък" водопроводът чакаше
+    # зад канализацията на своя фронт.
+    #
+    # Сметката, която го извади наяве: 3247 м водопровод за 544 дни е 6 м/ден,
+    # а еталонът кара по 17.  Не защото полага по-бавно — а защото при нас
+    # водният екип стои, докато същият фронт довърши канала.
+    #
+    # Мрежите се балансират поотделно и вече имат СВОИ фронтове.
+    out: list[SpatialWorkPackage] = []
     for network in sorted({p.network for p in packages}):
+        load = [0.0] * num_fronts
+        buckets: list[list[SpatialWorkPackage]] = [[] for _ in range(num_fronts)]
         group = sorted(
             (p for p in packages if p.network == network),
             key=lambda p: (-weight(p), p.id),
@@ -1707,10 +1718,8 @@ def assign_fronts(
             idx = min(range(num_fronts), key=lambda i: (load[i], i))
             buckets[idx].append(pkg)
             load[idx] += weight(pkg)
-
-    out: list[SpatialWorkPackage] = []
-    for i, bucket in enumerate(buckets, 1):
-        out.extend(_with_front(p, f"Фронт {i}") for p in bucket)
+        for i, bucket in enumerate(buckets, 1):
+            out.extend(_with_front(p, f"Екип {network}{i}") for p in bucket)
     return sorted(out, key=lambda p: p.id)
 
 

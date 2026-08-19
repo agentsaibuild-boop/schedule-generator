@@ -136,7 +136,11 @@ def test_assign_fronts_preserves_total_quantity():
 
     assert check_conservation(spread, rows)["ok"] is True
     assert len(spread) == len(packages)
-    assert {p.front for p in spread} == {"Фронт 1", "Фронт 2"}
+    # Екипите са ПО ДИСЦИПЛИНА от 19.08.2026: еталонът ги изброява поименно —
+    # ЕК1 и ЕК2 правят само канализация, ЕВ1 и ЕВ2 само водопровод.  Дотук
+    # името беше общо („Фронт 1") и водопроводът чакаше зад канала на своя
+    # фронт: 3247 м за 544 дни е 6 м/ден, при 17 в еталона.
+    assert {p.front for p in spread} == {"Екип К1", "Екип К2"}
 
 
 def test_assign_fronts_balances_each_network_separately():
