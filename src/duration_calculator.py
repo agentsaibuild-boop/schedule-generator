@@ -39,13 +39,51 @@ _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "productiviti
 # Стойността идва от досегашния промпт в ai_processor.py.
 DEFAULT_MIN_DAYS = 5
 
-# Производителности по брой (не по дължина) — от промпта в ai_processor.py.
-COUNT_RATES: dict[str, float] = {
-    "srs": 5.0,   # СРС (сградни ревизионни шахти) — 5 бр./ден
-    "rsh": 2.0,   # РШ (ревизионни шахти) голям DN — 2 бр./ден
-    "svo": 4.0,   # СВО (сградни водопроводни отклонения) — 4 бр./ден (полево, 2026-08)
-    "sko": 4.0,   # СКО (сградни канализационни отклонения) — 4 бр./ден (полево, 2026-08)
+#: Производителности по брой — ОТ КОНФИГА, не оттук.
+#:
+#: До 19.08.2026 стояха зашити в този файл, докато CLAUDE.md твърди, че
+#: `config/productivities.json` е ЕДИНСТВЕНИЯТ източник за продължителности.
+#: Втори, недокументиран източник на норми е точно начинът един график да
+#: твърди произход, който няма — и заради него липсваха УО, кабелите и
+#: водомерната шахта, без това да личи отникъде.
+#:
+#: Стойностите долу са само аварийно резервно копие, ако конфигът е негоден.
+_COUNT_RATES_FALLBACK: dict[str, float] = {
+    "srs": 5.0, "rsh": 2.0, "svo": 4.0, "sko": 4.0,
 }
+
+
+def count_rates() -> dict[str, float]:
+    """Нормите по брой, прочетени от `config/productivities.json`."""
+    блок = (load_productivities() or {}).get("count_productivities") or {}
+    от_конфига = {
+        ключ: float(v["бр_на_ден"])
+        for ключ, v in блок.items()
+        if isinstance(v, dict) and isinstance(v.get("бр_на_ден"), (int, float))
+    }
+    return {**_COUNT_RATES_FALLBACK, **от_конфига}
+
+
+class _CountRates(dict):
+    """`COUNT_RATES` остава четимо име, но стойностите идват от конфига."""
+
+    def __missing__(self, key):                      # pragma: no cover
+        raise KeyError(key)
+
+    def __getitem__(self, key):
+        return count_rates()[key]
+
+    def get(self, key, default=None):
+        return count_rates().get(key, default)
+
+    def __iter__(self):
+        return iter(count_rates())
+
+    def items(self):
+        return count_rates().items()
+
+
+COUNT_RATES = _CountRates()
 
 # Изпитване на водопровод = 2 дни (урок #34: якост + спад на налягане,
 # двата дни са задължителни поотделно).
@@ -171,6 +209,17 @@ _RSH_RE = re.compile(r"\bРШ\b|ревизионн\w*\s+шахт", re.IGNORECASE
 # ПРЕДИ СВО в диспечера няма значение — шаблоните са взаимно изключващи се.
 _SVO_RE = re.compile(r"\bСВО\b|сградн\w*\s+водопроводн\w*\s+отклонени", re.IGNORECASE)
 _SKO_RE = re.compile(r"\bСКО\b|сградн\w*\s+канализационн\w*\s+отклонени", re.IGNORECASE)
+#: УО — улични оттоци.  Еталонният график ги изпълнява в ЕДНА стъпка
+#: със СКО („Изграждане на СКО и УО…", 46 участъка, Σ 131 дни) — тоест
+#: същата бригада и същата дейност, затова и същата норма.
+_UO_RE = re.compile(r"\bУО\b|уличен\s+отток|улични\s+оттоци|дъждоприемн",
+                    re.IGNORECASE)
+#: Водомерна шахта — еталонът ѝ дава 5 работни дни за 1 брой.
+_VODOMER_RE = re.compile(r"водомерн\w*\s*шахт", re.IGNORECASE)
+#: Кабели (ЕЛ/ТТ).  Еталонният график Илиянци дава ЕДНА задача
+#: „Изместване на съществуващи кабели ТТ и ЕЛ" = 25 работни дни, а КСС на
+#: същия обект — 500 м ТТ + 500 м ЕЛ.  Оттам е нормата от 40 м/ден.
+_CABLE_RE = re.compile(r"кабел|\bТТ\b|\bЕЛ\b", re.IGNORECASE)
 
 _FOREST_RE = re.compile(r"горск|залесен|скален", re.IGNORECASE)
 _ASPHALT_RE = re.compile(r"асфалт|настилк|урбанизиран", re.IGNORECASE)
@@ -670,8 +719,27 @@ def calculate_task_duration(
                     f"СВО: {quantity:g} бр. ÷ {COUNT_RATES['svo']:g} бр./ден",
                     COUNT_RATES["svo"], "svo",
                 )
-            return DurationResult(None, "бройки без известна норма (не е СРС/РШ/СКО/СВО)",
-                                  code=CODE_COUNT_NO_RATE)
+            if _VODOMER_RE.search(name) and "vodomerna_shahta" in count_rates():
+                норма = COUNT_RATES["vodomerna_shahta"]
+                return DurationResult(
+                    count_duration(quantity, норма),
+                    f"Водомерна шахта: {quantity:g} бр. ÷ {норма:g} бр./ден "
+                    "(еталон Илиянци: 5 дни за 1 бр.)",
+                    норма, "vodomerna_shahta",
+                )
+            if _UO_RE.search(name) and "uo" in count_rates():
+                норма = COUNT_RATES["uo"]
+                return DurationResult(
+                    count_duration(quantity, норма),
+                    f"УО: {quantity:g} бр. ÷ {норма:g} бр./ден "
+                    "(еталон Илиянци: СКО и УО са една стъпка)",
+                    норма, "uo",
+                )
+            return DurationResult(
+                None,
+                "бройки без известна норма — виж `count_productivities` в "
+                "config/productivities.json",
+                code=CODE_COUNT_NO_RATE)
 
     # --- Площни настилки (кв.м): асфалт / тротоарни плочи ---
     # Нормите са потвърдени полево за градски обект (2026-08).  Плочите се
@@ -719,6 +787,26 @@ def calculate_task_duration(
                 float(rate), "concrete_encasement",
             )
         return DurationResult(None, "бетонов кожух без норма в конфига",
+                              code=CODE_NOT_PARAMETRIC)
+
+    # --- Линейни не-тръбни: кабели ---
+    if _CABLE_RE.search(name):
+        lin_cfg = cfg.get("linear_productivities", {}) if isinstance(cfg, dict) else {}
+        entry = lin_cfg.get("cable_relocation")
+        rate = None
+        if isinstance(entry, dict):
+            rate = entry.get("m_per_day") or entry.get("effective_rate")
+        metres = detect_length_m(task)
+        if isinstance(rate, (int, float)) and rate > 0 and metres:
+            return DurationResult(
+                count_duration(metres, rate),
+                f"{metres:g} м кабел ÷ {rate:g} м/ден [cable_relocation]",
+                float(rate), "cable_relocation",
+            )
+        if not metres:
+            return DurationResult(None, "кабел без дължина",
+                                  code=CODE_MISSING_LENGTH)
+        return DurationResult(None, "кабел без норма в конфига",
                               code=CODE_NOT_PARAMETRIC)
 
     # --- Линейни не-тръбни: бордюри (кв.цена на метър, но НЕ тръба) ---

@@ -147,10 +147,13 @@ def test_synthetic_kss_coverage_is_reproducible():
     българска нотация (Ф-диаметри, PP, 'брой', кв.м), проверимо от пакета."""
     from tools.kss_coverage_demo import run
     out = run()
-    assert out["proven"] == 13, out
+    # 13 → 14 на 19.08.2026: „Водомерна шахта" получи норма от еталонния
+    # график Илиянци (5 работни дни за 1 брой).  Числото е ЗАПИС на покритието,
+    # не цел — расте, когато норма влезе, и това трябва да се вижда в диф.
+    assert out["proven"] == 14, out
     assert out["total"] == 16
     assert not out["mismatches"], out["mismatches"]
-    assert out["codes"]["CALCULATED"] == 13
+    assert out["codes"]["CALCULATED"] == 14
 
 
 # ---------------------------------------------------------------------------

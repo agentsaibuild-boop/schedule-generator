@@ -1,21 +1,111 @@
 {
-  "_note": "СИНТЕТИЧЕН КСС за независима проверка на детекция+норми (одит 2026-08, т.7). Генерични имена (Тестоград), реалната българска нотация (Ф-диаметри, PP, 'брой', кв.м). НЕ съдържа клиентски данни. Реалният КСС.json е клиентски и не е в репото — този fixture възпроизвежда СЪЩИТЕ капани.",
-  "rows": [
-    {"name": "Полагане водопровод ул. Първа, Тестоград", "diameter": "Ф90; РЕ", "length_m": 540, "unit": "m", "_expect": "CALCULATED"},
-    {"name": "Полагане водопровод ул. Втора", "diameter": "Ф110; РЕ", "length_m": 1770, "unit": "m", "_expect": "CALCULATED"},
-    {"name": "Полагане водопровод главен клон", "diameter": "Ф160; РЕ", "length_m": 70, "unit": "m", "_expect": "CALCULATED"},
-    {"name": "Реконструкция магистрален водопровод", "diameter": "Ф250; РЕ", "length_m": 300, "unit": "m", "_expect": "CALCULATED"},
-    {"name": "Изграждане смесена канализация", "diameter": "Ф300, РP", "length_m": 420, "unit": "m", "_expect": "CALCULATED"},
-    {"name": "Изграждане смесена канализация", "diameter": "Ф500, РP", "length_m": 210, "unit": "m", "_expect": "CALCULATED"},
-    {"name": "Изграждане главен колектор", "diameter": "Ф800, РP", "length_m": 160, "unit": "m", "_expect": "CALCULATED"},
-    {"name": "Изграждане дъждовен колектор", "diameter": "Ф1000, РP", "length_m": 308, "unit": "m", "_expect": "CALCULATED"},
-    {"name": "СВО сградни водопроводни отклонения", "quantity": 174, "unit": "брой", "_expect": "CALCULATED"},
-    {"name": "СКО смесена канализационна мрежа", "quantity": 180, "unit": "брой", "_expect": "CALCULATED"},
-    {"name": "Възстановяване на асфалтова настилка", "quantity": 500, "unit": "кв. м", "_expect": "CALCULATED"},
-    {"name": "Доставка и полагане тротоарни плочи (унипаваж)", "quantity": 240, "unit": "кв. м", "_expect": "CALCULATED"},
-    {"name": "Доставка и полагане бетонови бордюри 15/25/50", "quantity": 300, "unit": "m", "_expect": "CALCULATED"},
-    {"name": "Полагане тръби реконструкция", "diameter": "Ф225", "length_m": 120, "unit": "m", "_expect": "MISSING_MATERIAL"},
-    {"name": "Водомерна шахта", "quantity": 1, "unit": "брой", "_expect": "COUNT_NO_RATE"},
-    {"name": "Изкоп за тръбна траншея", "quantity": 800, "unit": "куб. м", "_expect": "NOT_PARAMETRIC"}
-  ]
+ "_note": "СИНТЕТИЧЕН КСС за независима проверка на детекция+норми (одит 2026-08, т.7). Генерични имена (Тестоград), реалната българска нотация (Ф-диаметри, PP, 'брой', кв.м). НЕ съдържа клиентски данни. Реалният КСС.json е клиентски и не е в репото — този fixture възпроизвежда СЪЩИТЕ капани.",
+ "rows": [
+  {
+   "name": "Полагане водопровод ул. Първа, Тестоград",
+   "diameter": "Ф90; РЕ",
+   "length_m": 540,
+   "unit": "m",
+   "_expect": "CALCULATED"
+  },
+  {
+   "name": "Полагане водопровод ул. Втора",
+   "diameter": "Ф110; РЕ",
+   "length_m": 1770,
+   "unit": "m",
+   "_expect": "CALCULATED"
+  },
+  {
+   "name": "Полагане водопровод главен клон",
+   "diameter": "Ф160; РЕ",
+   "length_m": 70,
+   "unit": "m",
+   "_expect": "CALCULATED"
+  },
+  {
+   "name": "Реконструкция магистрален водопровод",
+   "diameter": "Ф250; РЕ",
+   "length_m": 300,
+   "unit": "m",
+   "_expect": "CALCULATED"
+  },
+  {
+   "name": "Изграждане смесена канализация",
+   "diameter": "Ф300, РP",
+   "length_m": 420,
+   "unit": "m",
+   "_expect": "CALCULATED"
+  },
+  {
+   "name": "Изграждане смесена канализация",
+   "diameter": "Ф500, РP",
+   "length_m": 210,
+   "unit": "m",
+   "_expect": "CALCULATED"
+  },
+  {
+   "name": "Изграждане главен колектор",
+   "diameter": "Ф800, РP",
+   "length_m": 160,
+   "unit": "m",
+   "_expect": "CALCULATED"
+  },
+  {
+   "name": "Изграждане дъждовен колектор",
+   "diameter": "Ф1000, РP",
+   "length_m": 308,
+   "unit": "m",
+   "_expect": "CALCULATED"
+  },
+  {
+   "name": "СВО сградни водопроводни отклонения",
+   "quantity": 174,
+   "unit": "брой",
+   "_expect": "CALCULATED"
+  },
+  {
+   "name": "СКО смесена канализационна мрежа",
+   "quantity": 180,
+   "unit": "брой",
+   "_expect": "CALCULATED"
+  },
+  {
+   "name": "Възстановяване на асфалтова настилка",
+   "quantity": 500,
+   "unit": "кв. м",
+   "_expect": "CALCULATED"
+  },
+  {
+   "name": "Доставка и полагане тротоарни плочи (унипаваж)",
+   "quantity": 240,
+   "unit": "кв. м",
+   "_expect": "CALCULATED"
+  },
+  {
+   "name": "Доставка и полагане бетонови бордюри 15/25/50",
+   "quantity": 300,
+   "unit": "m",
+   "_expect": "CALCULATED"
+  },
+  {
+   "name": "Полагане тръби реконструкция",
+   "diameter": "Ф225",
+   "length_m": 120,
+   "unit": "m",
+   "_expect": "MISSING_MATERIAL"
+  },
+  {
+   "name": "Водомерна шахта",
+   "quantity": 1,
+   "unit": "брой",
+   "_expect": "CALCULATED",
+   "_note": "норма от еталонния график Илиянци (19.08.2026): „Водомерна шахта\" = 5 работни дни за 1 брой"
+  },
+  {
+   "name": "Изкоп за тръбна траншея",
+   "quantity": 800,
+   "unit": "куб. м",
+   "_expect": "NOT_PARAMETRIC"
+  }
+ ]
 }

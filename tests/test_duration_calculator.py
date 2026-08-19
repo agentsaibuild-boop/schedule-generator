@@ -345,11 +345,43 @@ def test_count_unit_variants_all_recognized(unit):
 
 
 def test_unknown_count_still_has_no_rate():
-    """Водомерна шахта не е СРС/РШ/СКО/СВО → остава COUNT_NO_RATE (не се гади)."""
-    task = {"name": "Водомерна шахта", "quantity": 1, "unit": "бр"}
+    """Бройка без норма ОСТАВА без норма — измислена стойност е по-лоша.
+
+    Примерът беше „Водомерна шахта", докато тя нямаше норма.  От 19.08.2026 я
+    има — еталонният график Илиянци ѝ дава 5 работни дни за 1 брой — затова
+    тестът пази СМИСЪЛА си с позиция, за която източник наистина липсва:
+    преливната шахта не се среща нито веднъж в еталона.
+    """
+    task = {"name": "Преливна шахта", "quantity": 1, "unit": "бр"}
     res = calculate_task_duration(task)
     assert res.code == "COUNT_NO_RATE"
     assert res.days is None
+
+
+def test_a_rate_taken_from_the_reference_is_used():
+    """Водомерна шахта: 5 работни дни за 1 брой, извлечено от еталона."""
+    res = calculate_task_duration(
+        {"name": "Водомерна шахта", "quantity": 1, "unit": "бр"})
+
+    assert res.code == "CALCULATED"
+    assert res.days == 5
+
+
+def test_count_rates_come_from_the_config_not_from_the_code():
+    """CLAUDE.md: productivities.json е ЕДИНСТВЕНИЯТ източник за норми.
+
+    До 19.08.2026 бройките стояха зашити в `COUNT_RATES` в самия калкулатор —
+    втори, недокументиран източник, заради който липсваха УО, кабелите и
+    водомерната шахта, без това да личи отникъде.
+    """
+    from src.duration_calculator import count_rates, load_productivities
+
+    от_конфига = (load_productivities() or {}).get("count_productivities") or {}
+
+    assert от_конфига, "нормите по брой ги няма в config/productivities.json"
+    for ключ, стойност in count_rates().items():
+        assert ключ in от_конфига, f"{ключ} се взима отникъде"
+        assert стойност == от_конфига[ключ]["бр_на_ден"]
 
 
 # --- Площни настилки (кв.м) + линейни бордюри (v0.5, полево 2026-08) ---
