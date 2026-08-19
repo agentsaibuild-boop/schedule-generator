@@ -950,12 +950,21 @@ def normalize_over_allocation(
     Returns:
         (пакети, бележки за изравненото).
     """
+    from src.provenance import is_duration_row
+
     required: dict[str, float] = {}
     for row in boq_index:
         qty = getattr(row, "quantity", None)
         ref = getattr(row, "ref", None)
-        if ref and isinstance(qty, (int, float)) and not isinstance(qty, bool):
-            required[str(ref)] = float(qty)
+        if not ref or not isinstance(qty, (int, float)) or isinstance(qty, bool):
+            continue
+        if is_duration_row(row):
+            # Ред с мярка „Календарни Дни" обявява СРОК на договорна фаза, а
+            # не работа за разпределяне.  Да го искаме в участък значи да
+            # обявим графика за непълен заради нещо, което няма къде да отиде
+            # — и точно това накара пакетния път да пита модела (19.08.2026).
+            continue
+        required[str(ref)] = float(qty)
 
     planned: dict[str, float] = {}
     for pkg in packages:
@@ -1245,12 +1254,21 @@ def check_conservation(
         ЛИПСВАЩО или ПРЕВИШЕНО количество.  Превишението е блокиращо: то
         означава дублирана работа, тоест по-дълъг и по-скъп график.
     """
+    from src.provenance import is_duration_row
+
     required: dict[str, float] = {}
     for row in boq_index:
         qty = getattr(row, "quantity", None)
         ref = getattr(row, "ref", None)
-        if ref and isinstance(qty, (int, float)) and not isinstance(qty, bool):
-            required[str(ref)] = float(qty)
+        if not ref or not isinstance(qty, (int, float)) or isinstance(qty, bool):
+            continue
+        if is_duration_row(row):
+            # Ред с мярка „Календарни Дни" обявява СРОК на договорна фаза, а
+            # не работа за разпределяне.  Да го искаме в участък значи да
+            # обявим графика за непълен заради нещо, което няма къде да отиде
+            # — и точно това накара пакетния път да пита модела (19.08.2026).
+            continue
+        required[str(ref)] = float(qty)
 
     planned: dict[str, float] = {}
     holders: dict[str, list[str]] = {}

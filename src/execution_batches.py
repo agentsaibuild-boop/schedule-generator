@@ -116,15 +116,21 @@ def allocate_execution_batches(
     брой = int(batches_per_chain or DEFAULT_BATCHES)
     брой = max(1, брой)
 
-    from src.provenance import _coverer_class
+    from src.provenance import _coverer_class, is_duration_row
 
     кофи: dict[str, list[Any]] = {}
     неразпределими: list[str] = []
+    продължителности: list[str] = []
 
     for row in boq_index or []:
         quantity = getattr(row, "quantity", None)
         if not isinstance(quantity, (int, float)) or isinstance(quantity, bool):
             continue                      # заглавия и „ОБЩО" — нямат количество
+        if is_duration_row(row):
+            # „ПРОЕКТИРАНЕ 120 Календарни Дни" не е работа за разпределяне, а
+            # обявен срок на договорна фаза.  Не влиза в участъците.
+            продължителности.append(str(row.ref))
+            continue
         клас = _coverer_class(row)
         if not клас:
             неразпределими.append(str(row.ref))
@@ -164,6 +170,10 @@ def allocate_execution_batches(
         f"Участъците са направени от кода: {len(packages)} етапа на изпълнение "
         f"по {брой} на верига, количествата разделени точно по КСС."
     ]
+    if продължителности:
+        бележки.append(
+            f"{len(продължителности)} реда обявяват договорна ПРОДЪЛЖИТЕЛНОСТ, "
+            "не количество — не се разпределят по участъци.")
     if неразпределими:
         бележки.append(
             f"{len(неразпределими)} реда не попадат в нито една верига по "
@@ -173,4 +183,4 @@ def allocate_execution_batches(
         logger.info("%s", бележка)
 
     return {"packages": packages, "unroutable": неразпределими,
-            "notes": бележки}
+            "durations": продължителности, "notes": бележки}
