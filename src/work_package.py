@@ -1551,9 +1551,18 @@ def allocation_ledger(
 
     tasks_by_ref: dict[str, list[str]] = defaultdict(list)
     for task in tasks or []:
-        ref = str(task.get("source_ref") or "").strip()
-        if ref:
-            tasks_by_ref[ref].append(str(task.get("id")))
+        # Обединената непрекъсната дейност цитира НЯКОЛКО реда (19.08.2026).
+        # Ако тук се четеше само `source_ref`, трите пътни реда щяха да стоят в
+        # описа без нито една задача срещу тях — количеството разпределено,
+        # работата невидима.  Виж `road_works`.
+        цитати = task.get("source_refs")
+        refs = ([str(c.get("ref") or "").strip()
+                 for c in цитати if isinstance(c, dict)]
+                if isinstance(цитати, list) and цитати
+                else [str(task.get("source_ref") or "").strip()])
+        for ref in refs:
+            if ref:
+                tasks_by_ref[ref].append(str(task.get("id")))
 
     holders: dict[str, list[tuple[str, float]]] = defaultdict(list)
     for pkg in packages:

@@ -787,6 +787,49 @@ def _is_production_task(task: dict) -> bool:
     return True
 
 
+def citation_units(task: dict) -> list[dict]:
+    """Задачата, разложена на цитатите, които носи.
+
+    Обикновената задача цитира ЕДИН ред от КСС и се връща както си е.
+    Обединената непрекъсната дейност цитира НЯКОЛКО: в еталонния график
+    „Възстановяване на пътна настилка … вкл. бордюри и плочи" е един ред, а
+    зад него стоят три реда от лист „4. Пътна".  Без това разлагане описът
+    щеше да види едно количество от трите и да обяви два реда за непокрити —
+    върху напълно вярна работа.  Виж `road_works.merge_level_of_effort`.
+
+    Върнатите части са КОПИЯ: те носят количеството, мярката и името на
+    цитирания ред, за да работят проверките за клас и за мярка.  `__от_задача`
+    сочи оригинала, за да може резултатът да се запише върху него.
+    """
+    цитати = task.get("source_refs")
+    if not isinstance(цитати, list) or not цитати:
+        return [task]
+    части: list[dict] = []
+    for цитат in цитати:
+        if not isinstance(цитат, dict) or not цитат.get("ref"):
+            continue
+        част = dict(task)
+        част.pop("length_m", None)
+        част["source_ref"] = цитат.get("ref")
+        част["quantity"] = цитат.get("quantity")
+        част["unit"] = цитат.get("unit")
+        for поле in ("name", "activity_class_hint", "source_record_id"):
+            if цитат.get(поле):
+                част[поле] = цитат[поле]
+        част["__от_задача"] = task
+        части.append(част)
+    return части or [task]
+
+
+def _expand_citations(schedule: list[dict]):
+    """Графикът, в който многоцитатните задачи стоят като отделни цитати."""
+    for task in schedule:
+        if not isinstance(task, dict):
+            yield task
+            continue
+        yield from citation_units(task)
+
+
 def _fits_in_row(claimed: float, actual: float) -> bool:
     """Побира ли се вече заявеното количество в цитирания ред.
 
@@ -833,7 +876,7 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
     _claimed: dict[tuple, float] = {}
     human = 0
 
-    for task in schedule:
+    for task in _expand_citations(schedule):
         if not isinstance(task, dict):
             continue
         # Само ПРОИЗВОДСТВЕНА задача доказва покритие на количество (одит v13/v14).
@@ -924,7 +967,7 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
         counts[check.status] += 1
         if check.status == CITE_VERIFIED and check.ref:
             verified_refs.append(check.ref)
-        task["quantity_provenance"] = {
+        произход = {
             "status": (STATUS_EXTRACTED if check.status == CITE_VERIFIED
                        else STATUS_AI_REPORTED),
             "citation": check.status,
@@ -933,6 +976,15 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
             "expected": check.expected,
             "actual": check.actual,
         }
+        task["quantity_provenance"] = произход
+        # Многоцитатната задача се проверява цитат по цитат, а резултатът се
+        # записва върху НЕЯ.  Пише се първият НЕчист цитат: иначе последният
+        # верен би скрил предишния проблем.
+        носител = task.get("__от_задача")
+        if носител is not None:
+            досега = (носител.get("quantity_provenance") or {}).get("citation")
+            if досега in (None, CITE_VERIFIED):
+                носител["quantity_provenance"] = произход
         if check.status != CITE_VERIFIED:
             problems.append({
                 "id": task.get("id"),
@@ -1044,7 +1096,7 @@ def analyze_boq_coverage(schedule: list[dict], index: list[QuantityRow]) -> dict
 
     uncited: list[dict] = []
 
-    for task in schedule:
+    for task in _expand_citations(schedule):
         if not isinstance(task, dict) or not _is_production_task(task):
             continue
         ref = str(task.get("source_ref") or "").strip()

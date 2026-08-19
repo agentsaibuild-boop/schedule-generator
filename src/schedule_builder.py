@@ -197,6 +197,9 @@ def _per_crew_roles() -> frozenset[str]:
     return frozenset(str(r) for r in (блок.get("роли") or []))
 
 
+from src.road_works import merged_into_level_of_effort  # noqa: E402
+
+
 def _is_leveling_resource(name: str) -> bool:
     """Ограничава ли този ресурс колко работа може да върви едновременно.
 
@@ -910,7 +913,13 @@ class ScheduleBuilder:
             earliest = max(earliest, 1)
 
             resources = _task_resources(task, leveling_only=True)
-            consumes = bool(resources) and duration > 0 and not self._is_summary(task)
+            # НЕПРЕКЪСНАТАТА ДЕЙНОСТ не се изравнява твърдо, както и надзорът:
+            # тя описва присъствие на обекта през целия строеж, а не такт на
+            # производство.  Ако участваше, 595-дневната ѝ заетост щеше да
+            # изтласка всичко, което дели ресурс с нея.  Виж `road_works`.
+            consumes = (bool(resources) and duration > 0
+                        and not self._is_summary(task)
+                        and not merged_into_level_of_effort(task))
             occupant = _occupancy_key(task)
 
             start = earliest

@@ -443,6 +443,7 @@ def _capacity_overloads(tasks: list[dict]) -> list[dict]:
     Изравняването го прави; ако тук се брояха задачи, гейтът щеше да отхвърля
     точно графиците, които изравняването е сметнало за изпълними.
     """
+    from src.road_works import merged_into_level_of_effort
     from src.schedule_builder import (_headcount, _is_leveling_resource,
                                       _load_resource_capacity, _occupancy_key,
                                       _per_crew_roles)
@@ -455,6 +456,11 @@ def _capacity_overloads(tasks: list[dict]) -> list[dict]:
     for task in _leaves(tasks):
         start, end = _start(task), _end(task)
         if start is None or task.get("milestone"):
+            continue
+        # Непрекъснатата дейност не заема твърдо ресурс — същото правило,
+        # с което изравняването я подмина (19.08.2026).  Иначе гейтът щеше
+        # да обяви претоварване точно там, където го няма.
+        if merged_into_level_of_effort(task):
             continue
         заемател = _occupancy_key(task)
         # Едно правило с изравняването и тук: хората на екипа не са общообектов
@@ -552,6 +558,16 @@ def _template_complete(packages, chains, tasks) -> bool:
         if task.get("chain_step"):
             produced[parent].add(str(task["chain_step"]))
 
+    # ОБЕДИНЕНИТЕ СТЪПКИ вече не стоят под пакета — те са ЕДИН ред за целия
+    # обект (19.08.2026).  Изваждат се само когато обединената задача наистина
+    # е в графика: при изключено обединяване шаблонът си остава пълен и гейтът
+    # пази старото си правило.
+    обединени: dict[str, set[str]] = defaultdict(set)
+    for task in tasks:
+        if task.get("level_of_effort") and task.get("chain"):
+            обединени[str(task["chain"])] |= {
+                str(s) for s in (task.get("merged_steps") or []) if s}
+
     checked = 0
     for package in packages:
         key = getattr(package, "chain", "")
@@ -566,6 +582,7 @@ def _template_complete(packages, chains, tasks) -> bool:
         from src.work_package import effective_chain_steps
 
         expected = {str(s.get("key")) for s in effective_chain_steps(package, chain)}
+        expected -= обединени.get(key, set())
         if not expected:
             continue
         checked += 1

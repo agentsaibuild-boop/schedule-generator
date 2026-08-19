@@ -631,6 +631,7 @@ class AIProcessor:
         """
         from src.provenance import format_boq_for_prompt
         from src.schedule_builder import ScheduleBuilder
+        from src.road_works import merge_level_of_effort
         from src.segment_scale import (calibrate_to_declared_pace,
                                        scale_segment_overhead)
         from src.work_package import (applied_resolutions, assign_fronts,
@@ -1140,6 +1141,15 @@ class AIProcessor:
             if след < преди:
                 _prog(f"Затворени празнини: срокът пада от {преди} на {след} дни.")
             tasks, _ = enforce_construction_span(tasks)
+
+        # НЕПРЕКЪСНАТИТЕ ДЕЙНОСТИ се обединяват НАКРАЯ (19.08.2026): те взимат
+        # вече изравнените дати на частите си, затова нито удължават, нито
+        # скъсяват срока — само сменят как работата СТОИ в графика.  В еталона
+        # възстановяването извън траншеята е един ред от 595 дни, не 285
+        # задачи по участък.  Виж `road_works`.
+        tasks, loe_notes = merge_level_of_effort(tasks, chains)
+        for note in loe_notes:
+            _prog(note)
 
         cpm = builder.compute_critical_path(tasks)
         if not cpm["warnings"]:
