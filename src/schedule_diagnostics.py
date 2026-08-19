@@ -444,7 +444,8 @@ def _capacity_overloads(tasks: list[dict]) -> list[dict]:
     точно графиците, които изравняването е сметнало за изпълними.
     """
     from src.schedule_builder import (_headcount, _is_leveling_resource,
-                                      _load_resource_capacity, _occupancy_key)
+                                      _load_resource_capacity, _occupancy_key,
+                                      _per_crew_roles)
 
     config = _load_resource_capacity()
     capacity = config.get("capacity") or {}
@@ -456,8 +457,11 @@ def _capacity_overloads(tasks: list[dict]) -> list[dict]:
         if start is None or task.get("milestone"):
             continue
         заемател = _occupancy_key(task)
+        # Едно правило с изравняването и тук: хората на екипа не са общообектов
+        # ресурс, затова не могат и да го претоварят (19.08.2026).
+        на_екипа = _per_crew_roles()
         for name in (task.get("resources") or []):
-            if not _is_leveling_resource(str(name)):
+            if not _is_leveling_resource(str(name)) or str(name) in на_екипа:
                 continue
             for day in range(int(start), int(end) + 1):
                 load[(str(name), day)].add(заемател)

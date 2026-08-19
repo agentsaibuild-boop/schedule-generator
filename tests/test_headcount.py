@@ -46,13 +46,32 @@ def test_the_reference_crew_composition_is_loaded():
     assert състав["Ръководител работна група"]["налични"] == 6
 
 
-def test_more_tasks_fit_than_the_old_slot_rule_allowed():
-    """14 каналджии ÷ 3 на задача = 4 едновременни, не 6 „слота"."""
-    резултат = ScheduleBuilder().level_resources(_задачи(6, ["Каналджия"]))
+def test_machines_are_counted_by_how_many_there_are():
+    """Три багера, по един на задача → три едновременни, не „слот" за задача.
+
+    Примерът беше „Каналджия", докато хората бяха общообектов ресурс.  От
+    19.08.2026 те принадлежат на ЕКИПА и не ограничават обекта; машините
+    остават общи и точно те са мерилото.
+    """
+    резултат = ScheduleBuilder().level_resources(_задачи(6, ["Багер ескаватор"]))
 
     едновременни = sum(1 for t in резултат["schedule"]
                        if int(t["start_day"]) == 1)
-    assert едновременни == 4, [t["start_day"] for t in резултат["schedule"]]
+    assert едновременни == 3, [t["start_day"] for t in резултат["schedule"]]
+
+
+def test_people_belong_to_the_crew_and_do_not_cap_the_site():
+    """Изпълнителят: „всеки екип си има свои общи работници, не ги делят."
+
+    Дотук `Общ работник` беше 8 души по 2 на задача — 4 едновременни задачи за
+    ЦЕЛИЯ обект — и едновременността ни стоеше на 4.9 при 6.9 в еталона, на
+    колкото и участъка да делим обекта.
+    """
+    резултат = ScheduleBuilder().level_resources(_задачи(6, ["Общ работник"]))
+
+    едновременни = sum(1 for t in резултат["schedule"]
+                       if int(t["start_day"]) == 1)
+    assert едновременни == 6, [t["start_day"] for t in резултат["schedule"]]
 
 
 def test_a_task_that_needs_nobody_special_is_not_capped():
@@ -71,7 +90,7 @@ def test_a_task_that_needs_nobody_special_is_not_capped():
 def test_an_explicit_capacity_still_wins():
     """Който вика с `capacity={...}`, казва „толкова, точка"."""
     резултат = ScheduleBuilder().level_resources(
-        _задачи(6, ["Каналджия"]), capacity={"Каналджия": 2})
+        _задачи(6, ["Багер ескаватор"]), capacity={"Багер ескаватор": 2})
 
     едновременни = sum(1 for t in резултат["schedule"]
                        if int(t["start_day"]) == 1)
@@ -83,19 +102,26 @@ def test_an_explicit_capacity_still_wins():
 # ---------------------------------------------------------------------------
 
 
-def test_the_overload_check_counts_people_too():
+def test_the_overload_check_counts_the_same_way():
     """Иначе гейтът отхвърля точно графиците, които изравняването е сметнало."""
     from src.schedule_diagnostics import _capacity_overloads
 
-    изравнен = ScheduleBuilder().level_resources(_задачи(6, ["Каналджия"]))
+    изравнен = ScheduleBuilder().level_resources(_задачи(6, ["Багер ескаватор"]))
 
     assert not _capacity_overloads(изравнен["schedule"])
+
+
+def test_the_check_ignores_crew_people_too():
+    """Едно правило за двете страни: щом не ограничават, не могат и да претоварят."""
+    from src.schedule_diagnostics import _capacity_overloads
+
+    assert not _capacity_overloads(_задачи(9, ["Общ работник"]))
 
 
 def test_the_check_still_catches_a_real_overload():
     """Гейт, който не може да падне, е безполезен."""
     from src.schedule_diagnostics import _capacity_overloads
 
-    претоварен = _задачи(9, ["Каналджия"])      # 9 × 3 = 27 при 14 налични
+    претоварен = _задачи(9, ["Багер ескаватор"])   # 9 наведнъж при 3 налични
 
     assert _capacity_overloads(претоварен)
