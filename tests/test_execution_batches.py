@@ -121,7 +121,10 @@ def test_names_do_not_claim_node_to_node_geometry():
 
     for p in пакети:
         assert "РШ" not in p["name"] and "КШ" not in p["name"]
-        assert p["name"].startswith("Етап ")
+        # Всяко име казва, че е ЕТАП НА ИЗПЪЛНЕНИЕ.  Настилките носят и
+        # трасето, което възстановяват („Възстановяване на настилката —
+        # Етап 3 от 8"), затова проверката е за наличие, не за начало.
+        assert "Етап " in p["name"], p["name"]
 
 
 def test_a_row_without_a_quantity_is_skipped():
@@ -135,3 +138,51 @@ def test_it_says_what_it_did():
     бележки = allocate_execution_batches(_ксс(), 8)["notes"]
 
     assert any("направени от кода" in b for b in бележки)
+
+
+# ---------------------------------------------------------------------------
+# Настилките следват трасето
+# ---------------------------------------------------------------------------
+
+
+def test_pavement_gets_one_package_per_route_section():
+    """Човекът възстановява след всеки участък, не накрая.
+
+    Сравнение с еталона (19.08.2026): той прави настилки от ден 131 до 774 —
+    през целия строеж, 70 задачи.  Ние ги трупахме в 514→712 и точно те
+    определяха края на обекта.  Количествата са общообектови („Пътна —
+    възстановяване на настилка", 10824 кв.м за квартала), затова ставаха свой
+    пакет; човекът ги пише по участъци.
+    """
+    пакети = allocate_execution_batches(_ксс(), 8)["packages"]
+
+    трасови = [p for p in пакети
+               if p["chain"] in ("sewer_section", "water_section",
+                                 "cable_section")]
+    настилки = [p for p in пакети if p["chain"] == "pavement_section"]
+
+    assert len(настилки) == len(трасови), (
+        "настилките не са по един пакет на участък")
+    for настилка, трасе in zip(настилки, трасови):
+        assert трасе["name"] in настилка["name"], (
+            f"{настилка['name']!r} не сочи своя участък")
+
+
+def test_pavement_quantities_still_sum_to_the_boq():
+    """Разпределянето по участъци не бива да губи или ражда количество."""
+    редове = _ксс()
+    сбор = {}
+    for p in allocate_execution_batches(редове, 8)["packages"]:
+        for i in p["items"]:
+            сбор[i["source_ref"]] = сбор.get(i["source_ref"], 0.0) + i["quantity"]
+
+    настилки = [r for r in редове if "настилка" in r.description.lower()]
+    assert настилки
+    for ред in настилки:
+        assert сбор[str(ред.ref)] == pytest.approx(ред.quantity, abs=1e-6)
+
+
+def test_it_says_the_pavement_follows_the_route():
+    бележки = allocate_execution_batches(_ксс(), 8)["notes"]
+
+    assert any("следват трасето" in b for b in бележки)
