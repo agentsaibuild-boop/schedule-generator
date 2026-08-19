@@ -1673,7 +1673,8 @@ def conservation_messages(report: dict[str, Any]) -> list[str]:
 
 
 def assign_fronts(
-    packages: list[SpatialWorkPackage], num_fronts: int
+    packages: list[SpatialWorkPackage],
+    num_fronts: int | dict[str, int],
 ) -> list[SpatialWorkPackage]:
     """Разпредели пакетите между фронтовете, БЕЗ да дублира количества.
 
@@ -1685,10 +1686,18 @@ def assign_fronts(
     Балансът е по обем работа (сбор от количествата), не по брой пакети:
     greedy „най-натоварен последен" върху сортирани по големина пакети.
     """
-    if num_fronts < 1:
-        num_fronts = 1
-    if num_fronts == 1:
-        return [_with_front(p, "Фронт 1") for p in packages]
+    # БРОЯТ МОЖЕ ДА Е ПО ВЕРИГА (19.08.2026).  Срокът е зададен от процедурата,
+    # затова екипите се ИЗЧИСЛЯВАТ от него (`crew_sizing`) и се различават:
+    # канализацията иска два, водопроводът при сондаж — един.  Едно общо число
+    # за всички вериги значи или излишни екипи, или задавен водопровод.
+    по_верига = num_fronts if isinstance(num_fronts, dict) else {}
+    подразбиране = 1 if по_верига else max(int(num_fronts), 1)
+
+    def колко(pkg: SpatialWorkPackage) -> int:
+        return max(int(по_верига.get(pkg.chain, подразбиране)), 1)
+
+    if not по_верига and подразбиране == 1:
+        return [_with_front(p, f"Екип {p.network}1") for p in packages]
 
     def weight(pkg: SpatialWorkPackage) -> float:
         return sum(abs(float(i.quantity)) for i in pkg.items) or 1.0
@@ -1707,19 +1716,19 @@ def assign_fronts(
     #
     # Мрежите се балансират поотделно и вече имат СВОИ фронтове.
     out: list[SpatialWorkPackage] = []
-    for network in sorted({p.network for p in packages}):
-        load = [0.0] * num_fronts
-        buckets: list[list[SpatialWorkPackage]] = [[] for _ in range(num_fronts)]
-        group = sorted(
-            (p for p in packages if p.network == network),
-            key=lambda p: (-weight(p), p.id),
-        )
-        for pkg in group:
-            idx = min(range(num_fronts), key=lambda i: (load[i], i))
+    for верига in sorted({p.chain for p in packages}):
+        група = sorted((p for p in packages if p.chain == верига),
+                       key=lambda p: (-weight(p), p.id))
+        n = колко(група[0])
+        load = [0.0] * n
+        buckets: list[list[SpatialWorkPackage]] = [[] for _ in range(n)]
+        for pkg in група:
+            idx = min(range(n), key=lambda i: (load[i], i))
             buckets[idx].append(pkg)
             load[idx] += weight(pkg)
+        мрежа = група[0].network
         for i, bucket in enumerate(buckets, 1):
-            out.extend(_with_front(p, f"Екип {network}{i}") for p in bucket)
+            out.extend(_with_front(p, f"Екип {мрежа}{i}") for p in bucket)
     return sorted(out, key=lambda p: p.id)
 
 

@@ -294,6 +294,43 @@ _SKIP_WORDS = frozenset({
 })
 
 
+
+def _строителни_дни(boq_index) -> int:
+    """Колко дни са ЗАДАДЕНИ за строителство от процедурата.
+
+    Търгът ги пише в КСС с времева мярка („АВТОРСКИ НАДЗОР | Календарни Дни |
+    660").  Надзорът трае колкото строителството, затова неговият ред е
+    най-прекият измерител; при липса се пада към разликата между общия и
+    проектантския срок.
+
+    Нула значи „не е зададен" — тогава броят екипи си остава подаденият.
+    """
+    from src.provenance import is_duration_row
+
+    срокове = {}
+    for row in boq_index or []:
+        if not is_duration_row(row):
+            continue
+        описание = str(getattr(row, "description", "") or "").upper()
+        try:
+            дни = int(float(getattr(row, "quantity", 0) or 0))
+        except (TypeError, ValueError):
+            continue
+        if "НАДЗОР" in описание:
+            срокове["надзор"] = дни
+        elif "ПРОЕКТ" in описание:
+            срокове["проектиране"] = дни
+        else:
+            срокове.setdefault("друго", дни)
+    return int(срокове.get("надзор") or srokove_друго(срокове))
+
+
+def srokove_друго(срокове: dict) -> int:
+    общо = срокове.get("друго") or 0
+    проект = срокове.get("проектиране") or 0
+    return max(общо - проект, 0)
+
+
 class AIProcessor:
     """Orchestrates AI-powered schedule generation and document analysis."""
 
@@ -937,20 +974,75 @@ class AIProcessor:
         # Настилките се пакетират по ЗОНА, не по ред от КСС (одит 07.08.2026):
         # иначе всеки от трите пътни реда влачи цялата 3-степенна верига и
         # обектът се асфалтира три пъти при напълно точен сбор по количества.
+        with_design_early = "инженеринг" in str(analysis_text).lower()
+
         packages, zone_notes = merge_restoration_zones(
             packages, spatial_authoritative=spatial_authoritative)
         for note in zone_notes:
             _prog(note)
             parse_errors.append(note)
 
-        packages = assign_fronts(packages, max(int(num_teams), 1))
+        # КОЛКО ЕКИПА — ИЗЧИСЛЯВА СЕ ОТ СРОКА, не се задава наслуки
+        # (изпълнителят, 19.08.2026): „имаш 780 дни за всичко: 120 проектиране
+        # и останалите за строителство… изчисляваш с колко екипа трябва да се
+        # работи В и с колко К, и ще стане много лесно".
+        #
+        # Затова веригата се разгъва ВЕДНЪЖ на празно, само за да се измери
+        # работата по вериги; чак тогава екипите се разпределят и се разгъва
+        # наистина.  Разгъването е детерминистично и не струва заявка.
+        #
+        # Без зададен срок се пада към подаденото число — старото поведение.
+        екипи: dict[str, int] | int = max(int(num_teams), 1)
+        срок = _строителни_дни(boq_index)
+        if срок:
+            from src.crew_sizing import crews_for_deadline, fit_crews_to_deadline
+
+            договорни = contract_packages(chains, with_design=with_design_early)
+
+            def _обхвати(колко) -> dict[str, float]:
+                """Разписва НАИСТИНА с този брой екипи и връща обхвата по верига.
+
+                Теоретичният минимум (работа ÷ дни) не стига: зависимостите
+                вътре в участъка държат екипа в чакане и използваемостта пада
+                към половината.  Затова се мери, не се предполага.
+                """
+                проба = assign_fronts(packages, колко)
+                верига_на = {p.id: p.chain for p in проба}
+                зад = expand_packages(проба + договорни, chains).tasks
+                зад = ScheduleBuilder().recompute_durations(
+                    зад, reschedule=False)["schedule"]
+                зад = ScheduleBuilder().reschedule(зад)["schedule"]
+                зад = ScheduleBuilder().level_resources(зад)["schedule"]
+                обхват: dict[str, list[int]] = {}
+                for задача in зад:
+                    в = верига_на.get(str(задача.get("parent_id") or ""))
+                    if not в or not задача.get("chain_step"):
+                        continue
+                    a, b = обхват.get(в, (10 ** 9, 0))
+                    обхват[в] = (min(a, int(задача["start_day"])),
+                                 max(b, int(задача["end_day"])))
+                return {в: b - a + 1 for в, (a, b) in обхват.items()}
+
+            проба = assign_fronts(packages, 1)
+            пробни = expand_packages(проба + договорни, chains).tasks
+            пробни = ScheduleBuilder().recompute_durations(
+                пробни, reschedule=False)["schedule"]
+            минимум, бележки = crews_for_deadline(пробни, проба, срок)
+            for бележка in бележки:
+                _prog(бележка)
+            if минимум:
+                екипи, дозиране = fit_crews_to_deadline(минимум, _обхвати, срок)
+                for бележка in дозиране:
+                    _prog(бележка)
+
+        packages = assign_fronts(packages, екипи)
 
         # ДОГОВОРНИЯТ ОБХВАТ не идва от КСС (одит 2026-08-07): проектиране,
         # мобилизация, авторски надзор и приемане ги няма в количествената
         # сметка, затова моделът не може да ги върне — създават се тук.
         # Без тях готовият файл съдържа само СТРОИТЕЛСТВО и нула milestone-и.
-        with_design = "инженеринг" in str(analysis_text).lower()
-        packages = packages + contract_packages(chains, with_design=with_design)
+        packages = packages + contract_packages(
+            chains, with_design=with_design_early)
 
         # Пак, защото зонирането и разделянето по-горе раждат нови пакети:
         # номерацията се пресмята от нулата и е безопасна за повтаряне.
