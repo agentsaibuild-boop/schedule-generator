@@ -111,6 +111,39 @@ def _клас(row: Any) -> str | None:
     return _coverer_class(row)
 
 
+def _диаметър(row: Any) -> tuple[Any, str]:
+    from src.work_package import _row_pipe_spec
+    return _row_pipe_spec(row)
+
+
+def _добави_етапи(packages: list[dict], редове: list[Any], верига: str,
+                  мрежа: str, брой: int, етикет: str = "") -> None:
+    """Етапите на ЕДНА група (един диаметър), с точно разделени количества."""
+    брой = max(1, int(брой))
+    начало = len(packages) + 1
+    етапи = [
+        {
+            "id": f"{мрежа}{начало + i}",
+            "name": f"Етап {i + 1} от {брой}{етикет}",
+            "network": мрежа,
+            "chain": верига,
+            "items": [],
+        }
+        for i in range(брой)
+    ]
+    for отместване, row in enumerate(редове):
+        части = брой
+        ед = str(getattr(row, "unit", "") or "").strip().lower()
+        if ед in _БРОЙНИ_МЕРКИ:
+            части = max(1, min(брой, int(float(row.quantity))))
+        for н, дял in enumerate(split_exactly(float(row.quantity), части)):
+            if дял <= 0:
+                continue
+            етапи[(отместване + н) % len(етапи)]["items"].append(
+                {"source_ref": str(row.ref), "quantity": дял})
+    packages.extend(p for p in етапи if p["items"])
+
+
 def _самостоятелно_съоръжение(row: Any) -> bool:
     """Дали позицията се лее на място от ОТДЕЛЕН екип.
 
@@ -251,6 +284,36 @@ def allocate_execution_batches(
         редове = линейни
         if not редове:
             continue
+
+        # ЕТАПЪТ Е ОТСЕЧКА ОТ ЕДНА ТРЪБА, не осмина от цялата мрежа.
+        #
+        # Дотук всеки етап получаваше по малко от ВСЕКИ ред на КСС, тоест по
+        # парче от всеки диаметър.  Следствието се мери: стъпката за полагане
+        # на един етап се разбиваше на по една задача за диаметър и всяка
+        # книжно заемаше цялата бригада.  Бетоновозът излизаше на 210 задачи
+        # при 73 в еталона, строителният работник на 265 при 77 — а той е
+        # най-дефицитният ресурс и държеше половината закъснения.
+        #
+        # Реалният участък има ЕДИН диаметър: кл.32 е 80 м DN300, не троха от
+        # седем диаметъра.  Затова етапите се правят ВЪТРЕ в група по диаметър,
+        # а броят им се дели между групите по дела им от работата.
+        по_диаметър: dict[Any, list[Any]] = {}
+        for row in редове:
+            dn, _ = _диаметър(row)
+            по_диаметър.setdefault(dn, []).append(row)
+
+        тегла = {к: sum(float(r.quantity) for r in гр)
+                 for к, гр in по_диаметър.items()}
+        общо_тегло = sum(тегла.values()) or 1.0
+        дялове = {к: max(1, round(брой * т / общо_тегло))
+                  for к, т in тегла.items()}
+
+        for dn, група in sorted(по_диаметър.items(),
+                                key=lambda kv: (kv[0] is None, kv[0])):
+            _добави_етапи(packages, група, верига, мрежа, дялове[dn],
+                          етикет=f" DN{dn}" if dn else "")
+        continue
+
         етапи: list[dict] = [
             {
                 "id": f"{мрежа}{i + 1}",
