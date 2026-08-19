@@ -238,3 +238,81 @@ def scale_segment_overhead(
     for бележка in бележки:
         logger.info("%s", бележка)
     return tasks, бележки
+
+
+def calibrate_to_declared_pace(
+    tasks: list[dict],
+    packages: Iterable[Any],
+    boq_index: Iterable[Any],
+) -> tuple[list[dict], list[str]]:
+    """Свива верига до ОБЯВЕНОТО ѝ темпо, м/ден на екип.
+
+    Изпълнителят казва: „приеми, че всеки екип полага по 8.6 м тръби В на
+    ден".  Това е темпо за ЦЕЛИЯ цикъл по участък — трасиране, разкъртване,
+    изкоп, заваряване, изтегляне, фасонни части, изпитване, дезинфекция,
+    арматури, връзки — не за една стъпка.  Затова се прилага върху сбора, а
+    отделните стъпки запазват пропорцията си.
+
+    Числото е по-силно от нормите по стъпки: то идва от изпълнителя за ТОЗИ
+    обект, а нормите са средни.  За сравнение еталонът дава 417 екипо-дни за
+    3247 м = 7.8 м/ден.
+
+    Мащабът се ОБЯВЯВА, за да не изглежда, че продължителностите са изчислени
+    от нормите, когато всъщност са свити до обявено темпо.
+    """
+    from src.tender_parameters import declared_pace
+
+    верига_на = {}
+    for pkg in packages or []:
+        pid = _attr(pkg, "id")
+        if pid:
+            верига_на[str(pid)] = str(_attr(pkg, "chain") or "")
+
+    метри: dict[str, float] = {}
+    работа: dict[str, float] = {}
+    листа: dict[str, list[dict]] = {}
+    количество = {str(_attr(r, "ref")): (float(_attr(r, "quantity") or 0),
+                                         str(_attr(r, "unit") or "").strip())
+                  for r in (boq_index or [])
+                  if isinstance(_attr(r, "quantity"), (int, float))}
+
+    for task in tasks or []:
+        верига = верига_на.get(str(task.get("parent_id") or ""))
+        if not верига or not task.get("chain_step"):
+            continue
+        листа.setdefault(верига, []).append(task)
+        работа[верига] = работа.get(верига, 0.0) + _num(task.get("duration"))
+
+    for pkg in packages or []:
+        верига = str(_attr(pkg, "chain") or "")
+        for item in (_attr(pkg, "items") or ()):
+            реф = str(_attr(item, "source_ref") or "")
+            кол, мярка = количество.get(реф, (0.0, ""))
+            if мярка in ("m", "м") and кол:
+                метри[верига] = метри.get(верига, 0.0) + _num(
+                    _attr(item, "quantity"))
+
+    бележки: list[str] = []
+    for верига, задачи in листа.items():
+        темпо = declared_pace(верига)
+        дължина = метри.get(верига, 0.0)
+        сега = работа.get(верига, 0.0)
+        if not темпо or дължина <= 0 or сега <= 0:
+            continue
+        цел = дължина / темпо
+        коеф = цел / сега
+        if abs(коеф - 1.0) < 0.02:
+            continue
+        for задача in задачи:
+            беше = _num(задача.get("duration"))
+            стана = max(1, int(round(беше * коеф)))
+            if стана != беше:
+                задача["duration"] = стана
+                задача["declared_pace"] = темпо
+        бележки.append(
+            f"{верига}: обявено темпо {темпо:g} м/ден на екип → {дължина:.0f} м "
+            f"искат {цел:.0f} екипо-дни; веригата беше {сега:.0f} и се свива "
+            f"с коефициент {коеф:.2f}.")
+    for бележка in бележки:
+        logger.info("%s", бележка)
+    return tasks, бележки

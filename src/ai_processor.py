@@ -631,7 +631,8 @@ class AIProcessor:
         """
         from src.provenance import format_boq_for_prompt
         from src.schedule_builder import ScheduleBuilder
-        from src.segment_scale import scale_segment_overhead
+        from src.segment_scale import (calibrate_to_declared_pace,
+                                       scale_segment_overhead)
         from src.work_package import (applied_resolutions, assign_fronts,
                                       check_conservation,
                                       conservation_messages, expand_packages,
@@ -1092,6 +1093,13 @@ class AIProcessor:
         # стъпките, които имат доказана продължителност.
         tasks, scale_notes = scale_segment_overhead(tasks, packages, chains)
         for note in scale_notes:
+            _prog(note)
+
+        # ОБЯВЕНОТО ТЕМПО Е ПО-СИЛНО ОТ НОРМИТЕ (19.08.2026): изпълнителят
+        # казва колко метра на ден кара един екип по ЦЕЛИЯ цикъл, а нормите
+        # са средни.  Свива се сборът; стъпките пазят пропорцията си.
+        tasks, pace_notes = calibrate_to_declared_pace(tasks, packages, boq_index)
+        for note in pace_notes:
             _prog(note)
 
         scheduled = builder.reschedule(tasks)
