@@ -121,11 +121,30 @@ def test_the_open_chain_does_not_describe_drilling_work():
 
 
 def test_the_drilling_chain_keeps_the_reference_wording():
-    """Наблюдаваната верига остава дословна — тя е доказателство."""
-    task = _laying_task("Безизкопно полагане на водопровод PEHD DN160")
+    """Наблюдаваната верига остава дословна — тя е доказателство.
 
-    assert "сондаж" in task["chain_step_name"].lower()
-    assert any("сонд" in str(r).lower() for r in task.get("resources") or [])
+    От 19.08.2026 цикълът е РАЗДЕЛЕН на две стъпки, по описание на
+    изпълнителя: „тръбите се заваряват предварително и след това само се
+    полагат със сондажната машина".  Сондата е в стъпката за изтегляне;
+    заваряването е своя, върви успоредно на изкопа и НЕ ползва сондажна
+    машина — иначе тя би стояла заета, докато се заварява.
+    """
+    items = _items("Безизкопно полагане на водопровод PEHD DN160", 160)
+    pkg = SpatialWorkPackage(id="W1", network="В",
+                             chain=trenchless_chain("water_section", items),
+                             branch="кл. 1", dn=160, material="PEHD",
+                             items=items)
+    tasks = expand_packages([pkg], CHAINS).tasks
+    по_стъпка = {str(t.get("chain_step")): t for t in tasks}
+
+    изтегляне = по_стъпка["laying"]
+    assert "сондаж" in изтегляне["chain_step_name"].lower()
+    assert any("сонд" in str(r).lower() for r in изтегляне.get("resources") or [])
+
+    заваряване = по_стъпка["prefab_weld"]
+    assert "заваряване" in заваряване["chain_step_name"].lower()
+    assert not any("сонд" in str(r).lower()
+                   for r in заваряване.get("resources") or [])
 
 
 def test_both_water_chains_exist_and_declare_their_origin():

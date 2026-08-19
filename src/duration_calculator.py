@@ -486,17 +486,37 @@ def detect_length_m(task: dict) -> float | None:
 # Търсене на производителност
 # ---------------------------------------------------------------------------
 
+#: Коя норма ползва коя стъпка, когато цикълът е РАЗДЕЛЕН на стъпки.
+#:
+#: Урок #16 казва: ефективната норма е ограничена от най-бавната операция в
+#: цикъла, затова никога не се ползва `drill_rate` за продължителност.  Това
+#: важи, докато целият цикъл е ЕДНА задача.
+#:
+#: При безизкопно полагане обаче цикълът е разделен (изпълнителят, 19.08.2026):
+#: тръбите се заваряват ПРЕДВАРИТЕЛНО, на терена, и сондата само ги изтегля.
+#: Заваряването е своя стъпка и върви пред сондата по трасето.  Тогава стъпката
+#: за изтегляне НЕ е ограничена от заваряването и върви със сондажната скорост.
+#:
+#: `effective_rate` остава непокътната за случая, в който цикълът е един.
+_ПО_СТЪПКА = {
+    "prefab_weld": "weld_rate",
+    "laying": "pull_rate",
+}
+
+
 def resolve_rate(
     dn: int,
     material: str | None,
     method: str = "open",
     *,
     config: dict | None = None,
+    step: str = "",
 ) -> RateLookup | None:
-    """Намери ЕФЕКТИВНАТА производителност (м/ден) за DN + материал + метод.
+    """Намери производителността (м/ден) за DN + материал + метод.
 
     Урок #16: ефективната е ограничена от най-бавната операция в цикъла —
-    затова НИКОГА не се ползва drill_rate/dig_rate за продължителност.
+    затова НИКОГА не се ползва drill_rate/dig_rate за продължителност.  Виж
+    `_ПО_СТЪПКА` за единственото изключение и защо то не му противоречи.
 
     Търси точно съвпадение; при липса връща None (без приблизителни
     съседни DN — тихото приближение е точно грешката, която лекуваме).
@@ -510,10 +530,13 @@ def resolve_rate(
     # Записи без материал в ключа (напр. "DN630_open").
     candidates.append(f"DN{dn}_{method}")
 
+    поле = _ПО_СТЪПКА.get(str(step or "").strip())
     for key in candidates:
         entry = rates.get(key)
         if isinstance(entry, dict):
-            rate = entry.get("effective_rate")
+            rate = entry.get(поле) if поле else None
+            if not isinstance(rate, (int, float)) or rate <= 0:
+                rate = entry.get("effective_rate")
             if isinstance(rate, (int, float)) and rate > 0:
                 return RateLookup(float(rate), key, "config")
 
@@ -841,7 +864,8 @@ def calculate_task_duration(
     material = detect_material(task)
     method = detect_method(task)
 
-    lookup = resolve_rate(dn, material, method, config=cfg)
+    lookup = resolve_rate(dn, material, method, config=cfg,
+                          step=str(task.get("chain_step") or ""))
     if lookup is None:
         return DurationResult(
             None,
