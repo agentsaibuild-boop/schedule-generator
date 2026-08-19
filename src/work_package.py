@@ -1867,6 +1867,40 @@ def enforce_construction_span(tasks: list[dict]) -> tuple[list[dict], list[str]]
     start = min(int(t["start_day"]) for t in building)
     finish = max(int(t.get("end_day") or t["start_day"]) for t in building)
 
+    # ОТ КРАЯ НА ПРОЕКТИРАНЕТО ДО КРАЯ НА ОБЕКТА (19.08.2026).
+    #
+    # Дотук надзорът се разтягаше само по СТРОИТЕЛСТВОТО.  Човешкият еталон го
+    # води иначе и клиентът го потвърди: проектирането свършва ден 120,
+    # надзорът върви 121 → 780, а 780 е краят на целия обект.  Тоест той тръгва
+    # веднага щом има проект, за който да се отговаря, и не свършва преди
+    # обектът да е приет.
+    #
+    # При нас това са две отделни разминавания: тръгваше чак с първата
+    # строителна задача (след мобилизацията, ден 142 вместо 125) и свършваше с
+    # последната строителна, оставяйки приемането без надзор (712 срещу 743).
+    проектиране = [t for t in out
+                   if t.get("wbs_root") == "design"
+                   and not t.get("is_summary")
+                   and t.get("end_day") is not None]
+    if проектиране:
+        start = min(start, max(int(t["end_day"]) for t in проектиране) + 1)
+
+    # Краят се мери по задачите, които НЕ зависят от разпъваната.  Иначе
+    # излиза ратчет: надзорът се разтяга до последната задача → финалният
+    # milestone, който го следва, се мести → надзорът се разтяга пак.  Веднъж
+    # вече го получих така, +41 дни на всяко превъртане (19.08.2026).
+    разпъвани = {str(t.get("id")) for t in spanning}
+    зависими = {str(t.get("id")) for t in out
+                if any(str(_dep_id(d)) in разпъвани
+                       for d in (t.get("dependencies") or []))}
+    останалите = [t for t in out
+                  if not t.get("spans_construction")
+                  and not t.get("is_summary")
+                  and str(t.get("id")) not in зависими
+                  and t.get("end_day") is not None]
+    if останалите:
+        finish = max(finish, max(int(t["end_day"]) for t in останалите))
+
     notes: list[str] = []
     for task in spanning:
         was = (task.get("start_day"), task.get("end_day"))
@@ -1875,8 +1909,9 @@ def enforce_construction_span(tasks: list[dict]) -> tuple[list[dict], list[str]]
         task["duration"] = finish - start + 1
         task["duration_source"] = "construction_span"
         notes.append(
-            f"{task.get('name', task.get('id'))}: разтеглена до строителството "
-            f"({start}–{finish} вместо {was[0]}–{was[1]})")
+            f"{task.get('name', task.get('id'))}: разтеглена от края на "
+            f"проектирането до края на обекта ({start}–{finish} вместо "
+            f"{was[0]}–{was[1]})")
     return out, notes
 
 
@@ -2325,10 +2360,41 @@ def link_contract_phases(
                     and not isinstance(стойност, bool)
                     else по_подразбиране)
 
-        най_рано = min(build, key=lambda t: _ден(t, "start_day", 10**9))
-        най_късно = max(build, key=lambda t: _ден(t, "end_day", 0))
-        add(str(най_рано["id"]), str(sup[0]["id"]), "SS", 0, "supervision_spans")
-        add(str(най_късно["id"]), str(sup[0]["id"]), "FF", 0, "supervision_spans")
+        # НАЧАЛОТО Е КРАЯТ НА ПРОЕКТИРАНЕТО, НЕ ПЪРВАТА СТРОИТЕЛНА ЗАДАЧА
+        # (19.08.2026).  Човешкият еталон: проектирането свършва ден 120,
+        # надзорът върви 121 → 780.  Той тръгва щом има проект, за който да се
+        # отговаря — не чака мобилизацията да свърши.  При нас това бяха
+        # седемнайсет изгубени дни (125 срещу 142).
+        if design:
+            add(str(design[-1]["id"]), str(sup[0]["id"]), "FS", 0,
+                "supervision_starts_after_design")
+        else:
+            най_рано = min(build, key=lambda t: _ден(t, "start_day", 10**9))
+            add(str(най_рано["id"]), str(sup[0]["id"]), "SS", 0,
+                "supervision_spans")
+
+        # КРАЯТ Е КРАЯТ НА ОБЕКТА, НЕ НА СТРОИТЕЛСТВОТО.  Надзорът покрива и
+        # приемането: в еталона той свършва ден 780, колкото е целият обект.
+        #
+        # Котвата е последната РАБОТНА задача от приемането, не финалният
+        # milestone: иначе надзорът остава без наследник и графикът излиза с
+        # ДВА края, а той трябва да се затваря на един.  Затова после самият
+        # надзор води към milestone-а.
+        приемане_всички = tasks_of("acceptance")
+        работни = [t for t in приемане_всички
+                   if not (t.get("milestone") or t.get("is_milestone"))]
+        последни = работни or build
+        най_късно = max(последни, key=lambda t: _ден(t, "end_day", 0))
+        add(str(най_късно["id"]), str(sup[0]["id"]), "FF", 0,
+            "supervision_until_handover")
+        финал = [t for t in приемане_всички
+                 if t.get("milestone") or t.get("is_milestone")]
+        if финал:
+            # FF, не FS: приемането става в СЪЩИЯ ден, в който свършва
+            # надзорът, не на другия.  С FS графикът падаше от собствената си
+            # валидация — „започва ден 786, но предшественик завършва 786".
+            add(str(sup[0]["id"]), str(финал[-1]["id"]), "FF", 0,
+                "supervision_closes_on_handover")
 
     # --- ВСИЧКИ висящи краища → приемането ---
     acceptance = tasks_of("acceptance")
@@ -2338,12 +2404,18 @@ def link_contract_phases(
         successors = {
             _dep_id(d) for t in out for d in (t.get("dependencies") or [])
         }
-        # Надзорът също влиза: той свършва с края на строителството (FF) и
-        # трябва да предхожда приемането, иначе остава втори висящ край.
+        # НАДЗОРЪТ НЕ ВЛИЗА (поправено 19.08.2026).  Дотук той се броеше за
+        # висящ край и се връзваше ПРЕДИ приемането — а той го покрива, не го
+        # предхожда.  Двете правила заедно даваха кръг: разтегли надзора до
+        # края на обекта → приемането се мести след него → краят на обекта се
+        # мести → надзорът пак се разтяга.  Сега краят му е FF към последната
+        # задача от приемането и той не е ничий предшественик.
+        sup_ids = {str(t["id"]) for t in tasks_of("supervision")}
         loose = [t for t in out
                  if not t.get("is_summary")
                  and str(t["id"]) not in successors
-                 and str(t["id"]) not in acceptance_ids]
+                 and str(t["id"]) not in acceptance_ids
+                 and str(t["id"]) not in sup_ids]
         added = sum(add(str(t["id"]), first_acceptance, why="all_work_before_handover")
                     for t in loose)
         if added:

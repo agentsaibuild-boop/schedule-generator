@@ -16,6 +16,7 @@ FAILURE означава: или шахтите пак ще държат зае�
 
 from __future__ import annotations
 
+import itertools
 import sys
 from pathlib import Path
 
@@ -26,12 +27,19 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.execution_batches import allocate_execution_batches  # noqa: E402
 
 
+#: Броячът дава РАЗЛИЧЕН ref на всеки ред.  Първата версия го извеждаше от
+#: `hash(описание)` по модул 90 — а хешът на низ се променя между прогони и
+#: понякога два реда получаваха един и същ ref.  Тестът за Σ = КСС падаше на
+#: всеки трийсети прогон, без нищо в кода да се е сменило.
+_БРОЯЧ = itertools.count(4)
+
+
 class _Ред:
     def __init__(self, описание, количество, мярка="брой", ref=None):
         self.description = описание
         self.quantity = количество
         self.unit = мярка
-        self.ref = ref or f"КСС!Kanalizaciya!{abs(hash(описание)) % 90 + 4}"
+        self.ref = ref or f"КСС!Kanalizaciya!{next(_БРОЯЧ)}"
 
 
 ТРАСЕ = _Ред("Изграждане на смесена канализационна мрежа", 1182.0, "m")
