@@ -16,7 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.crew_sizing import (  # noqa: E402
-    crews_for_deadline, fit_crews_to_deadline, work_by_chain)
+    add_crews_while_they_pay, crews_for_deadline, fit_crews_to_deadline,
+    work_by_chain)
 
 
 class _Пакет:
@@ -120,3 +121,43 @@ def test_the_cap_is_respected():
         660, max_crews=3)
 
     assert екипи["sewer_section"] <= 3
+
+
+# ---------------------------------------------------------------------------
+# Екип, който се изплаща
+# ---------------------------------------------------------------------------
+
+
+class TestCrewsThatPayForThemselves:
+    """Събирането в срока не е единственият въпрос.
+
+    ИЗМЕРЕНО на Илиянци: водопроводът има 472 екипо-дни, което при ЕДИН екип е
+    536 дни — и се „събира" в 660-те, затова дозирането спираше.  Но никой не
+    кара един воден екип година и половина, когато с два свършва за 339, а
+    човешкият еталон го прави за 190 с ДВА.
+    """
+
+    def test_a_crew_that_halves_the_chain_is_added(self):
+        обхвати = {1: {"water": 536}, 2: {"water": 339}, 3: {"water": 300}}
+
+        екипи, бележки = add_crews_while_they_pay(
+            {"water": 1}, lambda e: обхвати[min(e["water"], 3)], печалба=0.20)
+
+        assert екипи["water"] >= 2
+        assert any("скъсява" in b for b in бележки), "решението не се вижда"
+
+    def test_a_crew_that_changes_little_is_not_added(self):
+        """Верига, ограничена от зависимости, не се ускорява с хора."""
+        екипи, бележки = add_crews_while_they_pay(
+            {"sewer": 2}, lambda e: {"sewer": 500}, печалба=0.20)
+
+        assert екипи == {"sewer": 2}
+        assert any("не биха скъсили" in b for b in бележки)
+
+    def test_the_cap_holds(self):
+        екипи, _ = add_crews_while_they_pay(
+            {"water": 1},
+            lambda e: {"water": 1000 // max(e["water"], 1)},
+            печалба=0.10, max_crews=3)
+
+        assert екипи["water"] <= 3

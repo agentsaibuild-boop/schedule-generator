@@ -995,7 +995,9 @@ class AIProcessor:
         екипи: dict[str, int] | int = max(int(num_teams), 1)
         срок = _строителни_дни(boq_index)
         if срок:
-            from src.crew_sizing import crews_for_deadline, fit_crews_to_deadline
+            from src.crew_sizing import (add_crews_while_they_pay,
+                                         crews_for_deadline,
+                                         fit_crews_to_deadline)
 
             договорни = contract_packages(chains, with_design=with_design_early)
 
@@ -1033,6 +1035,12 @@ class AIProcessor:
             if минимум:
                 екипи, дозиране = fit_crews_to_deadline(минимум, _обхвати, срок)
                 for бележка in дозиране:
+                    _prog(бележка)
+                # Събирането в срока не е единственият въпрос: верига, която
+                # се „събира" сама за 536 дни, докато с още един екип пада на
+                # 339, не бива да остава с един.  Виж `add_crews_while_they_pay`.
+                екипи, изгода = add_crews_while_they_pay(екипи, _обхвати)
+                for бележка in изгода:
                     _prog(бележка)
 
         packages = assign_fronts(packages, екипи)
