@@ -217,3 +217,105 @@ def scale_segment_overhead(
     for бележка in бележки:
         logger.info("%s", бележка)
     return tasks, бележки
+
+
+def scale_structures_to_declared_days(
+    tasks: list[dict],
+    packages: Iterable[Any],
+    chains: dict,
+) -> tuple[list[dict], list[str]]:
+    """Свива веригата на едно съоръжение до ОБЯВЕНИЯ му срок.
+
+    Шаблонът `structure` сумира 19 дни — толкова е траел единственият
+    екземпляр, наблюдаван в еталонния график.  Изпълнителят обаче дава срок за
+    ВСЯКА позиция (19.08.2026): преливна шахта 14 дни, индивидуална монолитна
+    РШ 7 дни, водомерна шахта 5.  Числото е за ЕДНО съоръжение, от изкопа до
+    покривните панели.
+
+    Дните се разпределят между стъпките пропорционално на шаблонните им
+    медиани, по най-голям остатък, за да е сборът точно обявеният срок.
+
+    КОГАТО СРОКЪТ Е ПО-МАЛЪК ОТ БРОЯ СТЪПКИ, това се КАЗВА, а не се замазва:
+    осем последователни операции не се побират в седем цели дни.  Тогава всяка
+    получава по един ден и графикът излиза с толкова, колкото операциите
+    изискват — с бележка, че обявеният срок предполага сливане на операции,
+    което шаблонът не описва.
+    """
+    chain_defs = (chains or {}).get("chains", chains) or {}
+    структура = chain_defs.get("structure")
+    if not isinstance(структура, dict):
+        return tasks, []
+
+    правила = ((chains or {}).get("standalone_structures") or {}).get(
+        "по_позиция") or {}
+    норми = _дни_на_брой()
+    if not правила or not норми:
+        return tasks, []
+
+    steps = {str(s.get("key")): s for s in (структура.get("steps") or [])}
+    име_на = {}
+    for pkg in packages or []:
+        pid = _attr(pkg, "id")
+        if pid and str(_attr(pkg, "chain") or "") == "structure":
+            име_на[str(pid)] = str(_attr(pkg, "label") or _attr(pkg, "name") or "")
+
+    по_пакет: dict[str, list[dict]] = {}
+    for task in tasks or []:
+        pid = str(task.get("parent_id") or "")
+        if pid in име_на and task.get("chain_step"):
+            по_пакет.setdefault(pid, []).append(task)
+
+    пипнати = 0
+    не_се_побират: set[str] = set()
+    for pid, листа in по_пакет.items():
+        ключ = _норма_за(име_на[pid], правила)
+        цел = норми.get(ключ) if ключ else None
+        if not цел:
+            continue
+        цел = int(round(float(цел)))
+        подред = sorted(листа, key=lambda t: str(t.get("chain_step")))
+        тегла = [_num(steps.get(str(t.get("chain_step")), {}).get("median_days")) or 1.0
+                 for t in подред]
+        if цел < len(подред):
+            не_се_побират.add(f"{име_на[pid]} ({цел} дни за {len(подред)} операции)")
+            цел = len(подред)
+        раздадени = _apportion(цел, тегла)
+        for задача, дни in zip(подред, раздадени):
+            задача["declared_structure_days"] = цел
+            if дни != _num(задача.get("duration")):
+                задача["duration"] = int(дни)
+                задача["duration_source"] = "declared_structure"
+                пипнати += 1
+
+    бележки: list[str] = []
+    if пипнати:
+        бележки.append(
+            f"Съоръжения: {пипнати} стъпки свити до обявения срок на "
+            "съоръжението вместо шаблонните 19 дни.")
+    if не_се_побират:
+        бележки.append(
+            "Обявеният срок предполага СЛИВАНЕ на операции, което шаблонът не "
+            "описва — " + "; ".join(sorted(не_се_побират))
+            + ".  Графикът показва по един ден на операция.")
+    for бележка in бележки:
+        logger.info("%s", бележка)
+    return tasks, бележки
+
+
+def _дни_на_брой() -> dict[str, float]:
+    from src.duration_calculator import load_productivities
+
+    блок = (load_productivities() or {}).get("count_productivities") or {}
+    return {к: float(v["дни_на_брой"]) for к, v in блок.items()
+            if isinstance(v, dict) and isinstance(v.get("дни_на_брой"), (int, float))}
+
+
+def _норма_за(име: str, правила: dict) -> str | None:
+    import re
+
+    for шаблон, ключ in правила.items():
+        if шаблон.startswith("_"):
+            continue
+        if re.search(шаблон, име, re.IGNORECASE):
+            return str(ключ)
+    return None
