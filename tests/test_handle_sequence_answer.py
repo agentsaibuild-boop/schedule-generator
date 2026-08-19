@@ -1,6 +1,7 @@
 """Unit tests for ChatHandler._handle_sequence_answer (previously uncovered).
 
-Covers all four steps: q1, q2, q2_exceptions, and unknown/fallback.
+Covers всички стъпки: q1, q_laying, q2, q2_exceptions, q3_teams, q4_parallel
+и непознат вход.
 _continue_generation is mocked so no AI calls are made.
 
 FAILURE означава: src/chat_handler.py :: _handle_sequence_answer е счупен —
@@ -62,13 +63,26 @@ def _mock_continue(h: ChatHandler) -> MagicMock:
 # ===========================================================================
 
 class TestQ1NoSections:
-    """Q1 with no named sections — should immediately trigger generation."""
+    """Q1 без именувани участъци — води към въпроса за полагането.
 
-    def test_q1_water_first_triggers_generation(self):
+    ОТ 19.08.2026 генерацията НЕ тръгва直 след Q1: методът на полагане е
+    третият въпрос, който изпълнителят поиска, и мени срока чувствително.
+    """
+
+    def test_q1_water_first_goes_to_laying(self):
         h = _handler()
         mock = _mock_continue(h)
         state = _base_state("q1", sections=[])
         result = h._handle_sequence_answer("В", state)
+        mock.assert_not_called()
+        assert result["pending_sequence"]["step"] == "q_laying"
+
+    def test_q1_water_first_triggers_generation_after_laying(self):
+        h = _handler()
+        mock = _mock_continue(h)
+        state = _base_state("q1", sections=[])
+        след_q1 = h._handle_sequence_answer("В", state)["pending_sequence"]
+        result = h._handle_sequence_answer("И", след_q1)
         mock.assert_called_once()
         assert result["schedule_updated"] is True
 
@@ -76,7 +90,8 @@ class TestQ1NoSections:
         h = _handler()
         mock = _mock_continue(h)
         state = _base_state("q1", sections=[])
-        result = h._handle_sequence_answer("К", state)
+        след_q1 = h._handle_sequence_answer("К", state)["pending_sequence"]
+        h._handle_sequence_answer("И", след_q1)
         mock.assert_called_once()
         _, kwargs_constraints, *_ = mock.call_args[0]
         assert kwargs_constraints["default"] == "sewer_first"
@@ -85,7 +100,8 @@ class TestQ1NoSections:
         h = _handler()
         mock = _mock_continue(h)
         state = _base_state("q1", sections=[])
-        h._handle_sequence_answer("Водопровод", state)
+        след_q1 = h._handle_sequence_answer("Водопровод", state)["pending_sequence"]
+        h._handle_sequence_answer("И", след_q1)
         _, constraints, *_ = mock.call_args[0]
         assert constraints["default"] == "water_first"
 
@@ -113,33 +129,33 @@ class TestQ1NoSections:
 class TestQ1WithSections:
     """Q1 with named sections — should proceed to Q2."""
 
+    def _след_полагането(self, h, sections, отговор="В"):
+        state = _base_state("q1", sections=sections)
+        след_q1 = h._handle_sequence_answer(отговор, state)["pending_sequence"]
+        return h._handle_sequence_answer("И", след_q1)
+
     def test_q1_water_with_sections_goes_to_q2(self):
         h = _handler()
-        state = _base_state("q1", sections=["Участък А", "Участък Б"])
-        result = h._handle_sequence_answer("В", state)
+        result = self._след_полагането(h, ["Участък А", "Участък Б"])
         assert "pending_sequence" in result
         assert result["pending_sequence"]["step"] == "q2"
 
     def test_q1_sewer_with_sections_goes_to_q2(self):
         h = _handler()
-        state = _base_state("q1", sections=["Участък А", "Участък Б"])
-        result = h._handle_sequence_answer("К", state)
+        result = self._след_полагането(h, ["Участък А", "Участък Б"], "К")
         assert result["pending_sequence"]["step"] == "q2"
 
     def test_q1_response_contains_all_sections(self):
         h = _handler()
         sections = ["Участък 1", "Участък 2", "Участък 3"]
-        state = _base_state("q1", sections=sections)
-        result = h._handle_sequence_answer("В", state)
+        result = self._след_полагането(h, sections)
         for section in sections:
             assert section in result["response"]
 
     def test_q1_response_asks_about_all_sections(self):
         h = _handler()
-        state = _base_state("q1", sections=["А", "Б"])
-        result = h._handle_sequence_answer("В", state)
-        response = result["response"].lower()
-        assert "всички" in response
+        result = self._след_полагането(h, ["А", "Б"])
+        assert "всички" in result["response"].lower()
 
     def test_q1_with_sections_no_immediate_generation(self):
         h = _handler()
@@ -473,10 +489,13 @@ class TestQ4Parallel:
 # ===========================================================================
 
 class TestFullQuestionnaireWalk:
-    """Проверява, че четирите стъпки се навързват и нищо не се губи по пътя.
+    """Проверява, че стъпките се навързват и нищо не се губи по пътя.
 
     Точно това липсваше: тестовете покриваха стъпките поотделно със стария
     2-стъпков поток и не хванаха, че q2 вече не генерира.
+
+    ОТ 19.08.2026 стъпките са пет: между Q1 и Q2 стои въпросът за метода на
+    полагане, а отговорите му пътуват до генерацията в `tender`.
     """
 
     def _walk(self, answers: list[str], sections: list[str]) -> tuple[dict, MagicMock]:
@@ -490,7 +509,7 @@ class TestFullQuestionnaireWalk:
         return result, mock
 
     def test_water_first_all_sections_one_team(self):
-        result, mock = self._walk(["В", "ДА", "1"], ["Участък 1", "Участък 2"])
+        result, mock = self._walk(["В", "И", "ДА", "1"], ["Участък 1", "Участък 2"])
         mock.assert_called_once()
         _, constraints, *_ = mock.call_args[0]
         assert constraints == {"default": "water_first"}
@@ -499,7 +518,8 @@ class TestFullQuestionnaireWalk:
 
     def test_sewer_first_with_exception_two_parallel_teams(self):
         result, mock = self._walk(
-            ["К", "НЕ", "2", "2", "ДА"], ["Участък 1", "Участък 2", "Участък 3"]
+            ["К", "С", "НЕ", "2", "2", "ДА"],
+            ["Участък 1", "Участък 2", "Участък 3"]
         )
         mock.assert_called_once()
         _, constraints, *_ = mock.call_args[0]
@@ -510,14 +530,45 @@ class TestFullQuestionnaireWalk:
 
     def test_exception_label_reaches_the_final_summary(self):
         result, _ = self._walk(
-            ["В", "НЕ", "1, 3", "1"], ["Участък 1", "Участък 2", "Участък 3"]
+            ["В", "И", "НЕ", "1, 3", "1"],
+            ["Участък 1", "Участък 2", "Участък 3"]
         )
         assert "Участък 1, Участък 3" in result["response"]
 
     def test_no_sections_skips_straight_to_generation(self):
-        result, mock = self._walk(["В"], [])
+        result, mock = self._walk(["В", "И"], [])
         mock.assert_called_once()
         assert result["schedule_updated"] is True
+
+    def test_answers_reach_the_generator(self):
+        """ТРИТЕ ВЪПРОСА стигат до машинката, не само до промпта.
+
+        Дотогава отговорът за реда отиваше в `sequence_constraints`, който се
+        чете САМО при съставянето на промпта за модела — тоест на
+        детерминистичния път нямаше никакъв ефект, а методът на полагане
+        изобщо не се питаше.
+        """
+        _, mock = self._walk(["К", "С", "ДА", "3", "ДА"], ["А", "Б"])
+        tender = mock.call_args.kwargs["tender"]
+        assert tender == {"network_order": "К", "laying_method": "hdd",
+                          "declared_teams": 3}
+
+    def test_open_cut_reaches_the_generator(self):
+        _, mock = self._walk(["В", "И"], [])
+        assert mock.call_args.kwargs["tender"]["laying_method"] == "open"
+
+    def test_laying_answer_is_shown_back(self):
+        result, _ = self._walk(["В", "С"], [])
+        assert "сондаж" in result["response"]
+
+    def test_unrecognised_laying_answer_asks_again(self):
+        h = _handler()
+        mock = _mock_continue(h)
+        след_q1 = h._handle_sequence_answer(
+            "В", _base_state("q1", sections=[]))["pending_sequence"]
+        result = h._handle_sequence_answer("не знам", след_q1)
+        mock.assert_not_called()
+        assert result["pending_sequence"]["step"] == "q_laying"
 
 
 # ===========================================================================

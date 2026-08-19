@@ -733,10 +733,13 @@ def declared_laying_method() -> str:
     разпределителната мрежа".  Значи не може да се извади от текста; трябва да
     бъде КАЗАН, както се казват сроковете за проектиране и строителство.
 
-    Приложението трябва да пита работника при качване на проекта.  Дотогава се
-    чете от средата, за да може да се мери.
+    ПИТА СЕ ОТ 19.08.2026: въпросникът има стъпка `q_laying`, а отговорът
+    минава през `tender_parameters.for_this_run`.  Средата остава като изход за
+    мерене и за прогони без въпросник.
     """
-    return str(os.getenv("LAYING_METHOD", "") or "").strip().lower()
+    from src.tender_parameters import laying_method
+
+    return laying_method()
 
 
 def trenchless_chain(chain: str, items: Iterable[PackageItem]) -> str:
@@ -2485,6 +2488,118 @@ def link_contract_phases(
     return out, notes
 
 
+def enforce_network_order(
+    tasks: list[dict],
+    packages: Sequence[SpatialWorkPackage],
+    chains: dict[str, Any] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Втората мрежа не тръгва преди първата — отговорът на въпросника, като връзка.
+
+    ЗАЩО ОТДЕЛЕН ПРОХОД (19.08.2026).  „Кое е първо, В или К" се пита от
+    приложението, но дотогава отговорът стигаше само до промпта на модела: на
+    детерминистичния път — който е по подразбиране — той нямаше НИКАКЪВ ефект.
+
+    ЗАЩО СЛЕД РАЗПИСВАНЕТО.  Котвата трябва да е НАЙ-РАННАТА задача на първата
+    мрежа, а коя е тя се знае чак когато има дати.  Опитът да се избере по ред
+    в списъка хвана „Етап 4 от 8" за първи и залепи целия канал за него.
+
+    КОЛКО СИЛНО.  Не е ред участък по участък: в еталона от 34 участъка с двете
+    мрежи в 15 водата тръгва първа, в 15 ЗАЕДНО и в 4 каналът е пръв.  Затова
+    твърдението е под — нито един участък на втората мрежа не започва преди
+    първата, — а не последователност.  Връзките са SS с нула дни: редът се
+    вижда, чакане няма.
+
+    ВРЪЗКА СЕ СЛАГА САМО КЪДЕТО ПРАВИЛОТО НЕ Е СПАЗЕНО (измерено).  Първата
+    версия връзваше и 29-те канализационни участъка към котвата, включително
+    онези, които и без това тръгват след нея.  Излишните връзки не менят нищо
+    по смисъл, но менят топологичния ред, по който сериалното изравняване
+    раздава ресурси — и срокът скочи от 741 на 777 дни без нито един ден
+    истинско чакане.  Затова: който вече спазва реда, остава свободен; който
+    го нарушава, получава връзка.  Плюс ЕДНА връзка към най-ранния участък на
+    втората мрежа, за да се вижда правилото в графиката дори когато е спазено.
+
+    Returns:
+        (нов график, обяснения) — входният не се мутира.
+    """
+    from src.tender_parameters import order_of_networks
+
+    cfg = chains if chains is not None else load_chains()
+    правила = [r for r in (cfg.get("cross_discipline") or {}).get("rules") or []
+               if r.get("network_order")]
+    ред = order_of_networks()
+    правила = [r for r in правила if r["network_order"] == ред]
+    if not правила or not tasks:
+        return list(tasks), []
+
+    out = [dict(t) for t in tasks]
+    by_id = {str(t.get("id")): t for t in out}
+    по_пакет: dict[str, list[dict]] = {}
+    for задача in out:
+        pid = str(задача.get("parent_id") or "")
+        if pid:
+            по_пакет.setdefault(pid, []).append(задача)
+    верига_на = {p.id: p.chain for p in packages}
+
+    def _старт(задача: dict) -> int:
+        try:
+            return int(задача.get("start_day"))
+        except (TypeError, ValueError):
+            return 10 ** 9
+
+    def задачи_на(верига: str) -> list[dict]:
+        събрани: list[dict] = []
+        for pid, група in по_пакет.items():
+            if верига_на.get(pid) == верига:
+                събрани.extend(x for x in група if x.get("chain_step"))
+        return събрани
+
+    бележки: list[str] = []
+    for правило in правила:
+        първи = задачи_на(правило["predecessor_chain"])
+        ако_втори = правило["successor_chain"]
+        if not първи:
+            continue
+        котва = min(първи, key=_старт)
+        ден = _старт(котва)
+
+        начала: list[tuple[int, dict]] = []
+        for pid, група in по_пакет.items():
+            if верига_на.get(pid) != ако_втори:
+                continue
+            стъпкови = [x for x in група if x.get("chain_step")]
+            if стъпкови:
+                първата = min(стъпкови, key=_старт)
+                начала.append((_старт(първата), първата))
+        if not начала:
+            continue
+
+        нарушители = [з for д, з in начала if д < ден]
+        най_ранният = min(начала, key=lambda двойка: двойка[0])[1]
+        цели = {str(з.get("id")): з for з in нарушители}
+        цели.setdefault(str(най_ранният.get("id")), най_ранният)
+
+        сложени = 0
+        for задача in цели.values():
+            if str(задача.get("id")) == str(котва.get("id")):
+                continue
+            deps = list(задача.get("dependencies") or [])
+            if any(_dep_id(d) == str(котва.get("id")) for d in deps):
+                continue
+            deps.append({"predecessor_id": str(котва.get("id")),
+                         "type": правило.get("type", "SS"),
+                         "lag_days": int(правило.get("lag_days", 0)),
+                         "reason": правило.get("why", "ред на мрежите")})
+            задача["dependencies"] = deps
+            сложени += 1
+        if сложени:
+            бележки.append(
+                f"Ред на мрежите ({ред} първо): {ако_втори} тръгва след "
+                f"{правило['predecessor_chain']} (ден {ден}); "
+                f"{len(нарушители)} участъка бяха преди него, "
+                f"{сложени} връзки.")
+    return out, бележки
+
+
 def link_cross_discipline(
     tasks: list[dict],
     packages: list[SpatialWorkPackage],
@@ -2502,6 +2617,16 @@ def link_cross_discipline(
     """
     cfg = chains if chains is not None else load_chains()
     rules = (cfg.get("cross_discipline") or {}).get("rules") or []
+    # РЕДЪТ НА МРЕЖИТЕ е отговор на изпълнителя, не находка в документите.
+    # Правилата, които го изразяват, идват по двойки — едно за всяка посока — и
+    # тук остава само тази, която е обявена за прогона.  Без този филтър
+    # отговорът от въпросника стигаше само до промпта на модела, тоест на
+    # детерминистичния път нямаше никакъв ефект (19.08.2026).
+    from src.tender_parameters import order_of_networks
+
+    обявен_ред = order_of_networks()
+    rules = [r for r in rules
+             if not r.get("network_order") or r["network_order"] == обявен_ред]
     if not rules:
         return list(tasks)
 
@@ -2587,6 +2712,23 @@ def link_cross_discipline(
         if not chain_tasks:
             return []
         return [chain_tasks[-1]] if fallback == "last" else [chain_tasks[0]]
+
+    # РЕДЪТ НА МРЕЖИТЕ се прилага ОТДЕЛНО, защото значи друго (19.08.2026).
+    # Останалите правила са за едно трасе: настилката тук чака канала тук.  А
+    # „първо В, после К" е твърдение за целия обект, и еталонът показва точно
+    # колко силно е: от 34 участъка с двете мрежи в 15 водата тръгва първа, в
+    # 15 ЗАЕДНО и в 4 каналът е пръв.  Тоест не е ред участък по участък.
+    #
+    # Пуснато през вълните, правилото струваше 47 дни и изкара срока над
+    # договорните 780: вълните на двете мрежи почти не съвпадат (30 срещу 32
+    # пакета при 95 кофи), затова връзките падаха между случайни двойки.
+    #
+    # Оставя се твърдението, което еталонът поддържа: втората мрежа не тръгва
+    # ПРЕДИ първата.  Една връзка, SS с нула дни — редът се вижда, чакане няма.
+    # Правилата за РЕДА НА МРЕЖИТЕ не се прилагат тук: те искат дати, а на
+    # този етап ги няма (връзките се пишат преди разписването).  Виж
+    # `enforce_network_order`, който се пуска след първия проход.
+    rules = [r for r in rules if not r.get("network_order")]
 
     for _, chains_here in by_alignment.items():
         for rule in rules:

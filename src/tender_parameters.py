@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from typing import Any
 
@@ -33,11 +34,53 @@ from typing import Any
 ПЪРВО_ВОДА = "В"
 ПЪРВО_КАНАЛ = "К"
 
+#: Отговорите на въпросника за ТЕКУЩИЯ прогон.  Празно значи „никой не е питан"
+#: и важи `.env`.  Държи се тук, а не се преплита през двайсет подписа, защото
+#: същите функции вече се четат отвсякъде — виж `for_this_run`.
+_ТЕКУЩИ: dict[str, Any] = {}
+
+
+@contextlib.contextmanager
+def for_this_run(параметри: dict[str, Any] | None):
+    """Отговорите на изпълнителя важат за този прогон и само за него.
+
+    ЗАЩО СЪЩЕСТВУВА (19.08.2026).  Въпросникът питаше кое е първо В или К и
+    колко екипа, но отговорът стигаше само до промпта на модела.  На
+    детерминистичния път — който е по подразбиране — той нямаше НИКАКЪВ ефект,
+    а методът на полагане изобщо не се питаше: четеше се от `.env`.  Тоест
+    графикът, който мерим, работникът не можеше да получи от приложението.
+
+    Контекстът се затваря след прогона, за да не изтече в следващия: два
+    проекта в една сесия не бива да делят отговори.
+    """
+    global _ТЕКУЩИ
+    предишни = _ТЕКУЩИ
+    _ТЕКУЩИ = dict(параметри or {})
+    try:
+        yield _ТЕКУЩИ
+    finally:
+        _ТЕКУЩИ = предишни
+
+
+def declared() -> dict[str, Any]:
+    """Какво е обявено за този прогон (празно, ако не е питано)."""
+    return dict(_ТЕКУЩИ)
+
 
 def order_of_networks() -> str:
     """„В" или „К" — коя мрежа тръгва първа в участъка."""
-    ред = str(os.getenv("NETWORK_ORDER", ПЪРВО_ВОДА) or "").strip().upper()
+    обявен = str(_ТЕКУЩИ.get("network_order") or "").strip().upper()
+    ред = обявен or str(os.getenv("NETWORK_ORDER", ПЪРВО_ВОДА) or "").strip().upper()
     return ПЪРВО_КАНАЛ if ред.startswith(("К", "K")) else ПЪРВО_ВОДА
+
+
+def laying_method() -> str:
+    """Как се полага водопроводът: „hdd" (безизкопно) или „" (открит изкоп).
+
+    Питаният отговор НАДДЕЛЯВА над `.env`; липсата на отговор пада към него.
+    """
+    обявен = str(_ТЕКУЩИ.get("laying_method") or "").strip().lower()
+    return обявен or str(os.getenv("LAYING_METHOD", "") or "").strip().lower()
 
 
 def declared_pace(chain: str) -> float | None:
@@ -46,6 +89,14 @@ def declared_pace(chain: str) -> float | None:
     Чете се от `PACE_<ВЕРИГА>` (напр. `PACE_WATER=8.6`).  Нула или липса значи
     „не е обявено" — тогава важат нормите по стъпки.
     """
+    обявени = _ТЕКУЩИ.get("pace")
+    if isinstance(обявени, dict) and chain in обявени:
+        try:
+            темпо = float(обявени[chain])
+        except (TypeError, ValueError):
+            темпо = 0.0
+        return темпо if темпо > 0 else None
+
     ключ = {"water_section": "PACE_WATER", "water_section_hdd": "PACE_WATER",
             "sewer_section": "PACE_SEWER"}.get(chain)
     if not ключ:
@@ -63,6 +114,11 @@ def declared_crews() -> dict[str, int]:
     Формат: `CREWS=water_section_hdd:2,sewer_section:3`.  Каквото е казано,
     е по-силно от изчисленото — човекът знае с какво разполага.
     """
+    обявени = _ТЕКУЩИ.get("crews")
+    if isinstance(обявени, dict) and обявени:
+        return {str(к): int(n) for к, n in обявени.items()
+                if str(n).isdigit() and int(n) > 0}
+
     сурово = str(os.getenv("CREWS", "") or "").strip()
     ако: dict[str, int] = {}
     for част in сурово.split(","):
@@ -77,10 +133,8 @@ def declared_crews() -> dict[str, int]:
 
 def describe() -> list[str]:
     """Какво е прието за този прогон — за да се вижда, не да се подразбира."""
-    from src.work_package import declared_laying_method
-
     ред = order_of_networks()
-    метод = declared_laying_method() or "не е обявен (важи откритият изкоп)"
+    метод = laying_method() or "не е обявен (важи откритият изкоп)"
     редове = [
         f"Ред на мрежите: първо {'водопровод' if ред == ПЪРВО_ВОДА else 'канализация'}.",
         f"Метод на полагане на водопровода: {метод}.",

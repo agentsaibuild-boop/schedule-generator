@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import heapq
+import itertools
 import json
 import logging
 import math
@@ -1413,7 +1415,22 @@ class ScheduleBuilder:
     def _topological_order(
         schedule: list[dict], task_by_id: dict[str, dict]
     ) -> list[str] | None:
-        """Kahn topological sort over dependencies. None if not sortable."""
+        """Kahn topological sort over dependencies. None if not sortable.
+
+        РЕДЪТ НА МРЕЖИТЕ СЕ РЕШАВА ТУК (19.08.2026).  Изравняването раздава
+        ресурси в този ред, тоест при две готови задачи печели онази, която
+        излезе първа.  Затова „кое е първо, В или К" е въпрос точно към този
+        списък, а не към зависимостите: изразен като връзки, редът или не
+        хваща нищо (двете мрежи и без това не се изпреварват), или слага 29
+        излишни ребра, които разместват раздаването и струват 36 дни без нито
+        един ден истинско чакане.
+
+        Пипа се САМО отношението между двете мрежи: втората отстъпва на
+        първата.  Всичко останало пази реда си на вкарване, за да не се
+        разбърка нищо, което не е питано.
+        """
+        from src.tender_parameters import order_of_networks
+
         indegree: dict[str, int] = {_task_key(t): 0 for t in schedule}
         successors: dict[str, list[str]] = defaultdict(list)
 
@@ -1424,16 +1441,25 @@ class ScheduleBuilder:
                     successors[dep_id].append(tid)
                     indegree[tid] += 1
 
-        queue = [tid for tid, deg in indegree.items() if deg == 0]
+        втора = "К" if order_of_networks() == "В" else "В"
+        мрежа = {_task_key(t): str(t.get("network") or "") for t in schedule}
+
+        def _тежест(tid: str) -> int:
+            return 1 if мрежа.get(tid) == втора else 0
+
+        брояч = itertools.count()
+        heap = [(_тежест(tid), next(брояч), tid)
+                for tid, deg in indegree.items() if deg == 0]
+        heapq.heapify(heap)
         order: list[str] = []
 
-        while queue:
-            tid = queue.pop(0)
+        while heap:
+            _, _, tid = heapq.heappop(heap)
             order.append(tid)
             for succ in successors.get(tid, []):
                 indegree[succ] -= 1
                 if indegree[succ] == 0:
-                    queue.append(succ)
+                    heapq.heappush(heap, (_тежест(succ), next(брояч), succ))
 
         return order if len(order) == len(indegree) else None
 

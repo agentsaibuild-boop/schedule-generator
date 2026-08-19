@@ -637,6 +637,7 @@ class AIProcessor:
         from src.work_package import (applied_resolutions, assign_fronts,
                                       check_conservation,
                                       conservation_messages, expand_packages,
+                                      enforce_network_order,
                                       link_cross_discipline, load_chains,
                                       allocation_ledger, assign_orphan_rows,
                                       contract_packages,
@@ -777,6 +778,15 @@ class AIProcessor:
         # 10.08.2026; преработено 18.08.2026).  Прочетеното от PDF е ЕТИКЕТ:
         # става за име на участък, не за зониране, зависимости или
         # доказателство за покритие.
+        # КАКВО Е ПРИЕТО ЗА ТОЗИ ПРОГОН се казва, а не се подразбира: редът на
+        # мрежите, методът на полагане и екипите менят срока с десетки дни, а
+        # дотогава единственият начин да се разбере кое е било в сила беше да
+        # се чете `.env` (19.08.2026).
+        from src.tender_parameters import describe as описание_на_процедурата
+
+        for ред in описание_на_процедурата():
+            _prog(ред)
+
         from src.spatial_source import (SpatialSource, describe,
                                         is_authoritative)
         spatial_source = (SpatialSource.PDF_SUGGESTIONS_ONLY if segments
@@ -997,7 +1007,8 @@ class AIProcessor:
         екипи: dict[str, int] | int = max(int(num_teams), 1)
         срок = _строителни_дни(boq_index)
         if срок:
-            from src.crew_sizing import (add_crews_while_they_pay,
+            from src.crew_sizing import (ОБЩ_ОБХВАТ,
+                                         add_crews_while_they_pay,
                                          crews_for_deadline,
                                          fit_crews_to_deadline)
 
@@ -1017,7 +1028,7 @@ class AIProcessor:
                     зад, reschedule=False)["schedule"]
                 зад = ScheduleBuilder().reschedule(зад)["schedule"]
                 зад = ScheduleBuilder().level_resources(зад)["schedule"]
-                обхват: dict[str, list[int]] = {}
+                обхват: dict[str, tuple[int, int]] = {}
                 for задача in зад:
                     в = верига_на.get(str(задача.get("parent_id") or ""))
                     if not в or not задача.get("chain_step"):
@@ -1025,7 +1036,17 @@ class AIProcessor:
                     a, b = обхват.get(в, (10 ** 9, 0))
                     обхват[в] = (min(a, int(задача["start_day"])),
                                  max(b, int(задача["end_day"])))
-                return {в: b - a + 1 for в, (a, b) in обхват.items()}
+                мерено = {в: b - a + 1 for в, (a, b) in обхват.items()}
+                # И ОБХВАТЪТ НА СТРОИТЕЛСТВОТО, защото договорът ограничава
+                # него, а не всяка верига поотделно: веригите не тръгват
+                # заедно и сборът им е по-дълъг от най-дългата.
+                строителни = [(a, b) for в, (a, b) in обхват.items()
+                              if (chains.get("chains", {}).get(в, {})
+                                  .get("wbs_root", "construction") == "construction")]
+                if строителни:
+                    мерено[ОБЩ_ОБХВАТ] = (max(b for _, b in строителни)
+                                          - min(a for a, _ in строителни) + 1)
+                return мерено
 
             проба = assign_fronts(packages, 1)
             пробни = expand_packages(проба + договорни, chains).tasks
@@ -1044,6 +1065,21 @@ class AIProcessor:
                 екипи, изгода = add_crews_while_they_pay(екипи, _обхвати)
                 for бележка in изгода:
                     _prog(бележка)
+
+        # ОБЯВЕНОТО ОТ ИЗПЪЛНИТЕЛЯ НАДДЕЛЯВА НАД СМЕТКАТА (19.08.2026).
+        # Въпросникът пита „колко екипа се предвиждат", а когато процедурата
+        # дава срок, кодът си ги смяташе сам и отговорът се губеше.  Човекът
+        # знае с какво разполага; сметката остава ВИДИМА, за да се види
+        # разликата — това е решение за пари, не само за срок.
+        from src.crew_sizing import declared_crews_for
+
+        обявени = declared_crews_for(екипи)
+        if обявени is not None:
+            беше = (", ".join(f"{к}×{n}" for к, n in sorted(екипи.items()))
+                    if isinstance(екипи, dict) else str(екипи))
+            екипи = обявени
+            _prog(f"Обявени са {sorted(set(обявени.values()))[0]} екипа на "
+                  f"верига — важи обявеното, не сметката (тя даваше {беше}).")
 
         packages = assign_fronts(packages, екипи)
 
@@ -1105,6 +1141,15 @@ class AIProcessor:
 
         scheduled = builder.reschedule(tasks)
         tasks = scheduled["schedule"]
+
+        # РЕДЪТ НА МРЕЖИТЕ — отговорът на въпросника, приложен като връзка.
+        # Иска дати, затова е тук, а не при останалите междудисциплинни
+        # правила: котвата е най-ранната задача на първата мрежа.
+        tasks, order_notes = enforce_network_order(tasks, packages, chains)
+        for note in order_notes:
+            _prog(note)
+        if order_notes:
+            tasks = builder.reschedule(tasks)["schedule"]
 
         # РЕСУРСНО ИЗРАВНЯВАНЕ (одит 2026-08-07): без него един ръководител
         # излизаше на 22 едновременни задачи, а един багер на 16.  Мрежата е
@@ -1362,6 +1407,7 @@ class AIProcessor:
         progress_callback: Any | None = None,
         feedback: str = "",
         project_path: Any | None = None,
+        tender: dict | None = None,
     ) -> dict:
         """Пакетната генерация, приведена към СТАНДАРТНИЯ резултат на pipeline-а.
 
@@ -1375,7 +1421,35 @@ class AIProcessor:
         — че разпределеното е свършено от дейност от правилния клас.
         """
         from src.provenance import analyze_boq_coverage, strip_ai_provenance
+        from src.tender_parameters import for_this_run
 
+        # ОТГОВОРИТЕ НА ВЪПРОСНИКА важат за целия прогон (19.08.2026): редът на
+        # мрежите, методът на полагане и обявените екипи се четат на десетина
+        # места надолу по веригата.  Контекстът се затваря накрая, за да не
+        # изтече в следващия проект.
+        with for_this_run(tender):
+            return self._packaged_run(
+                analysis, boq_index, num_teams=num_teams, locations=locations,
+                segments=segments, progress_callback=progress_callback,
+                feedback=feedback, project_path=project_path,
+                analyze_boq_coverage=analyze_boq_coverage,
+                strip_ai_provenance=strip_ai_provenance)
+
+    def _packaged_run(
+        self,
+        analysis: dict,
+        boq_index: list,
+        *,
+        num_teams: int,
+        locations: list[str] | None,
+        segments: list[dict] | None,
+        progress_callback: Any | None,
+        feedback: str,
+        project_path: Any | None,
+        analyze_boq_coverage: Any,
+        strip_ai_provenance: Any,
+    ) -> dict:
+        """Тялото на пакетния прогон, вътре в контекста на процедурата."""
         result = self.generate_packages(
             analysis, boq_index, num_teams=num_teams, locations=locations,
             segments=segments, progress_callback=progress_callback,

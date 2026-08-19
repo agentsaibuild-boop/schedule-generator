@@ -478,7 +478,7 @@ class ChatHandler:
 
     def _try_package_generation(
         self, analysis, boq_index, *, num_teams: int, locations, progress,
-        segments=None,
+        segments=None, tender=None,
     ):
         """Пакетният път (2026-08-07) — устройството на човешкия еталон.
 
@@ -524,7 +524,8 @@ class ChatHandler:
                         analysis, boq_index,
                         num_teams=max(int(num_teams or 1), 1),
                         locations=locations, segments=segments,
-                        progress_callback=напредък, feedback=_вр),
+                        progress_callback=напредък, feedback=_вр,
+                        tender=tender),
                     срок, progress=progress, name=f"пакетна генерация, опит {опит}")
             except DeadlineExceeded:
                 logger.warning("Пакетната генерация, опит %d: изтече срокът от "
@@ -2258,18 +2259,55 @@ class ChatHandler:
                     "Моля, отговори с **В** (Водопровод първо) или **К** (Канализация първо)."
                 ), "pending_sequence": state}
 
-            sections = state.get("sections", [])
-            new_state = {**state, "step": "q2", "constraints": {"default": choice}}
+            # ОТГОВОРЪТ ВЛИЗА В `tender` (19.08.2026).  Дотогава той стигаше
+            # само до промпта на модела, тоест на детерминистичния път — който
+            # е по подразбиране — нямаше НИКАКЪВ ефект върху графика.  Виж
+            # `tender_parameters.for_this_run`.
+            tender = {**(state.get("tender") or {}),
+                      "network_order": "В" if choice == "water_first" else "К"}
+            return {**_base,
+                "response": (
+                    f"Разбрах: **{choice_label}**.\n\n"
+                    "**Как се полага водопроводът?**\n"
+                    "  **И** — на открит изкоп\n"
+                    "  **С** — със сондаж (безизкопно)\n\n"
+                    "Това мени срока чувствително: в еталонния график целият "
+                    "водопровод е сондиран за 36 екипо-дни, а с открит изкоп "
+                    "същата работа е седем пъти повече."
+                ),
+                "pending_sequence": {**state, "step": "q_laying",
+                                     "tender": tender,
+                                     "constraints": {"default": choice}},
+            }
 
+        # ── Q1б: открит изкоп или сондаж? ───────────────────────────────
+        if step == "q_laying":
+            if msg.startswith("С") or "СОНДА" in msg or "БЕЗИЗКОП" in msg:
+                метод, метод_етикет = "hdd", "сондаж (безизкопно)"
+            elif msg.startswith("И") or "ИЗКОП" in msg or "ОТКРИТ" in msg:
+                метод, метод_етикет = "open", "открит изкоп"
+            else:
+                return {**_base, "response": (
+                    "Моля, отговори с **И** (открит изкоп) или **С** (сондаж)."
+                ), "pending_sequence": state}
+
+            tender = {**(state.get("tender") or {}), "laying_method": метод}
+            new_state = {**state, "step": "q2", "tender": tender,
+                         "_laying_label": метод_етикет}
+            sections = state.get("sections", [])
             if not sections:
-                # No named sections — apply to whole project and generate
+                # Няма именувани участъци — важи за целия обект.
                 return self._generate_with_sequence(new_state)
 
+            default = state.get("constraints", {}).get("default", "water_first")
+            choice_label = ("Водопровод → Канализация" if default == "water_first"
+                            else "Канализация → Водопровод")
             sections_list = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(sections))
             return {**_base,
                 "response": (
-                    f"Разбрах: **{choice_label}** за целия проект.\n\n"
-                    f"Важи ли това за **всички участъци**?\n"
+                    f"Разбрах: **{метод_етикет}**.\n\n"
+                    f"Последователността **{choice_label}** важи ли за "
+                    f"**всички участъци**?\n"
                     f"  **ДА** — генерирай\n"
                     f"  **НЕ** — ще посоча изключенията\n\n"
                     f"Намерени участъци:\n{sections_list}"
@@ -2339,6 +2377,14 @@ class ChatHandler:
             nums = re.findall(r"\d+", msg)
             if nums:
                 num_teams = max(1, int(nums[0]))
+                # ОБЯВЕНИЯТ БРОЙ НАДДЕЛЯВА НАД СМЕТКАТА (19.08.2026).  Когато
+                # процедурата дава срок, екипите се ИЗЧИСЛЯВАТ от него
+                # (`crew_sizing`) и отговорът тук се губеше.  Изпълнителят
+                # обаче знае с какво разполага — числото му е по-силно, а
+                # сметката остава видима, за да се види разликата.
+                tender = {**(state.get("tender") or {}),
+                          "declared_teams": num_teams}
+                state = {**state, "tender": tender}
                 if num_teams == 1:
                     return self._generate_with_sequence({**state, "num_teams": 1, "parallel": False})
                 return self._ask_parallel_question({**state, "num_teams": num_teams})
@@ -2420,6 +2466,9 @@ class ChatHandler:
         if exc_label:
             opposite_label = "Канализация → Водопровод" if default == "water_first" else "Водопровод → Канализация"
             summary += f"\nИзключения ({opposite_label}): {exc_label}"
+        laying_label = state.get("_laying_label")
+        if laying_label:
+            summary += f"\nПолагане на водопровода: **{laying_label}**"
         num_teams = state.get("num_teams", 1)
         parallel = state.get("parallel", num_teams > 1)
         if num_teams > 1:
@@ -2427,16 +2476,22 @@ class ChatHandler:
 
         # Re-enter generation flow
         result = self._continue_generation(analysis, constraints, project_context,
-                                           num_teams=num_teams if parallel else 1)
+                                           num_teams=num_teams if parallel else 1,
+                                           tender=state.get("tender"))
         result["response"] = summary + "\n\n" + result.get("response", "")
         result.pop("pending_sequence", None)
         return result
 
     def _continue_generation(
         self, analysis: dict, sequence_constraints: dict, project_context: dict | None = None,
-        num_teams: int = 1,
+        num_teams: int = 1, tender: dict | None = None,
     ) -> dict:
-        """Run the generation steps after questionnaire is complete."""
+        """Run the generation steps after questionnaire is complete.
+
+        `tender` носи отговорите на въпросника — ред на мрежите, метод на
+        полагане, обявени екипи — до самата генерация.  Виж
+        `tender_parameters.for_this_run`.
+        """
         all_text = self.files.get_all_text() if self.files else ""
 
         # Situation locations
@@ -2470,7 +2525,8 @@ class ChatHandler:
                    for r in _boq if getattr(r, "quantity", None) is not None}
         _packaged = self._try_package_generation(
             analysis, _boq, num_teams=num_teams,
-            locations=situation_locations or None, progress=_progress)
+            locations=situation_locations or None, progress=_progress,
+            tender=tender)
 
         if _packaged is not None:
             gen_result = _packaged
