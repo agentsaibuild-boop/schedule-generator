@@ -1171,6 +1171,7 @@ class FileManager:
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
 
         tables: list[dict] = []
+        table_lines: list[str] = []
         for table in doc.tables:
             rows_data: list[list[str]] = []
             for row in table.rows:
@@ -1182,8 +1183,16 @@ class FileManager:
                     dict(zip(headers, r)) for r in rows_data[1:]
                 ]
                 tables.append({"headers": headers, "rows": data_rows})
+                table_lines.extend(" | ".join(r) for r in rows_data)
 
-        full_text = "\n".join(paragraphs)
+        # Таблицата Е част от текста на документа.  Дотук `full_text` държеше
+        # само абзаците, затова таблиците оставаха невидими за всичко, което
+        # чете текст: `looks_like_boq` даваше на техническата спецификация 0.4
+        # и генерирането се блокираше, а моделът не виждаше числата ѝ — макар
+        # тя да носи ВСИЧКИТЕ количества на процедурата в една таблица.
+        # PDF конверторът винаги е слагал таблиците в текста; DOCX беше
+        # изключението, не правилото.
+        full_text = "\n".join(paragraphs + table_lines)
 
         data = {
             "source_file": Path(filepath).name,

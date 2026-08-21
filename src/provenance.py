@@ -161,8 +161,11 @@ def _number(value: Any) -> float | None:
 
 
 # Заглавия на колони, които носят описание / количество / мярка.
+# „смр" — заглавието на колоната с работите в техническата спецификация
+# (проба 2026-08-21).  Без него описанието се спасяваше от резервното правило
+# „най-дългата буквена клетка", което върши работа, но е догадка вместо избор.
 _DESC_KEYS = ("наименование", "описание", "дейност", "позиция", "description", "item",
-              "мрежа", "клон", "вид дейност", "работи")
+              "мрежа", "клон", "вид дейност", "работи", "смр")
 # „дължин" — при тръбните КСС количеството е в колона „Дължина /m/", не
 # „Количество" (проба 2026-07-24, реален проект).
 _QTY_KEYS = ("количество", "к-во", "кол-во", "дължин", "quantity", "qty")
@@ -281,13 +284,72 @@ def _warn_if_conversions_are_stale(base: Path, converted: Path) -> None:
             ", ".join(stale))
 
 
+#: Римско число, само по себе си в клетка: „I", „IV.", „VII" — номерът на
+#: раздел в тръжна таблица.  Позициите вътре в раздела са с арабски.
+_РИМСКО = re.compile(r"^(x{0,3})(ix|iv|v?i{0,3})\.?$", re.IGNORECASE)
+
+
+def _е_римско(row: dict) -> bool:
+    """Дали някоя клетка на реда държи само римско число (номер на раздел)."""
+    for стойност in row.values():
+        текст = str(стойност or "").strip()
+        if текст and _РИМСКО.fullmatch(текст):
+            return True
+    return False
+
+
+def _index_row(row: dict, document: str, sheet: str, row_no: int) -> QuantityRow | None:
+    """Един ред от таблица → индексиран количествен ред, или None ако е празен.
+
+    Общо за Excel листовете и за таблиците в DOCX: и двете стигат дотук като
+    речник „заглавие на колона → клетка", затова правилото за разчитане е едно
+    и също и се пише на едно място.
+
+    Args:
+        row: Редът като речник.
+        document: Име на документа-източник.
+        sheet: Име на листа или „таблица N".
+        row_no: Номер на реда в източника, 1-базиран.
+
+    Returns:
+        `QuantityRow`, или None — когато редът няма никакво описание.
+    """
+    desc_col, description = _pick(row, _DESC_KEYS)
+    qty_col, quantity = _pick(row, _QTY_KEYS, prefer_numeric=True)
+    unit = _pick_unit(row)
+
+    # Fallback за описанието: ако избраната колона е празна ИЛИ държи
+    # само число/код (напр. пореден номер „1" под разместен хедър —
+    # реален КСС „4. Пътна", проба 2026-08-03), вземи най-ДЪЛГАТА
+    # БУКВЕНА клетка от реда.  Числата са количества/цени, не описания.
+    description = str(description or "").strip()
+    if not _looks_like_description(description):
+        best = description
+        for col, val in row.items():
+            s = str(val or "").strip()
+            if len(s) > len(best) and _looks_like_description(s):
+                desc_col, best = str(col), s
+        description = best
+    if not description:
+        return None
+
+    return QuantityRow(
+        description=description,
+        quantity=_number(quantity),
+        unit=str(unit or "").strip(),
+        source=SourceRef(document, sheet, row_no, qty_col or desc_col),
+        raw=row,
+    )
+
+
 def build_quantity_index(base_path: str | Path) -> list[QuantityRow]:
     """Индексирай количествените редове от конвертираните документи.
 
-    Работи върху `converted/*.json`.  Табличните файлове (Excel/CSV) дават
-    точен произход — документ, лист и ред.  Текстовите документи се пропускат:
-    от свободен текст не може да се посочи клетка, а фалшив произход е
-    по-лош от липсващ.
+    Работи върху `converted/*.json`.  Индексира ТАБЛИЦИ — листовете на
+    Excel/CSV (`sheets`) и таблиците в DOCX (`tables`).  И двете дават точен
+    произход: документ, лист или номер на таблица, и ред.  СВОБОДНИЯТ текст
+    се пропуска и занапред — от проза не може да се посочи клетка, а фалшив
+    произход е по-лош от липсващ.
 
     Args:
         base_path: Папката на проекта.
@@ -317,37 +379,55 @@ def build_quantity_index(base_path: str | Path) -> list[QuantityRow]:
             for offset, row in enumerate(sheet.get("rows") or []):
                 if not isinstance(row, dict):
                     continue
-                desc_col, description = _pick(row, _DESC_KEYS)
-                qty_col, quantity = _pick(row, _QTY_KEYS, prefer_numeric=True)
-                unit = _pick_unit(row)
-
-                # Fallback за описанието: ако избраната колона е празна ИЛИ държи
-                # само число/код (напр. пореден номер „1" под разместен хедър —
-                # реален КСС „4. Пътна", проба 2026-08-03), вземи най-ДЪЛГАТА
-                # БУКВЕНА клетка от реда.  Числата са количества/цени, не описания.
-                description = str(description or "").strip()
-                if not _looks_like_description(description):
-                    best = description
-                    for col, val in row.items():
-                        s = str(val or "").strip()
-                        if len(s) > len(best) and _looks_like_description(s):
-                            desc_col, best = str(col), s
-                    description = best
-                if not description:
-                    continue
-
                 # Реалният Excel ред (одит v11 #2): конверторът вече го записва
                 # (`__excel_row__`).  Fallback към offset+2 само за стар формат.
                 excel_row = row.get("__excel_row__")
                 if not isinstance(excel_row, int):
                     excel_row = offset + 2
-                index.append(QuantityRow(
-                    description=description,
-                    quantity=_number(quantity),
-                    unit=str(unit or "").strip(),
-                    source=SourceRef(document, sheet_name, excel_row, qty_col or desc_col),
-                    raw=row,
-                ))
+                indexed = _index_row(row, document, sheet_name, excel_row)
+                if indexed is not None:
+                    index.append(indexed)
+
+        # Таблици от DOCX: конверторът ги дава като `tables`, не като `sheets`.
+        # Техническата спецификация на процедурата носи ВСИЧКИТЕ си количества
+        # в една такава таблица — дотук тя се конвертираше и после се
+        # изхвърляше, защото индексът гледаше само `sheets`.  Произходът тук е
+        # точно толкова адресируем, колкото при Excel: документ, коя таблица,
+        # кой ред — затова правилото „от свободен текст не се сочи клетка" не
+        # се нарушава.
+        for tno, table in enumerate(data.get("tables") or [], start=1):
+            if not isinstance(table, dict):
+                continue
+            # РАЗДЕЛЪТ Е КОНТЕКСТЪТ НА РЕДОВЕТЕ ПОД НЕГО.
+            #
+            # Excel КСС се дава на листове по части („3. Chast Kanalizacia") и
+            # мрежата се чете от името на листа, без да се отваря нито един
+            # ред.  Тръжната таблица е ЕДНА: листът се казва „таблица 1" и
+            # мълчи, а мрежата е обявена ВЕДНЪЖ, с римско число — „III.
+            # Водопроводна мрежа" — и важи за всичко отдолу.  Редът
+            # „Реконструкция на разпределителната мрежа с Ф 90 РЕ" сам не
+            # казва коя мрежа е; разделът казва.  Без това целият документ
+            # оставаше неразпределим (проба 21.08.2026).
+            #
+            # Заглавието се познава по РИМСКОТО ЧИСЛО и по липсата на
+            # количество.  Разделите се номерират с I/II/III/IV, позициите — с
+            # 1/2/3; това е конвенцията на самите тръжни таблици, не догадка.
+            # По-мекото правило „няма количество и няма мярка" не върши работа:
+            # късо заглавие като „Пътни работи" минава за мерна единица, а и
+            # позиция със счупено количество би се сметнала за заглавие и би
+            # пренаписала контекста на всичко отдолу.
+            раздел = ""
+            for offset, row in enumerate(table.get("rows") or []):
+                if not isinstance(row, dict):
+                    continue
+                име = f"таблица {tno} · {раздел}" if раздел else f"таблица {tno}"
+                # +2: хедърът е ред 1, а редовете се броят от 1 като в Excel.
+                indexed = _index_row(row, document, име, offset + 2)
+                if indexed is None:
+                    continue
+                if indexed.quantity is None and _е_римско(row):
+                    раздел = indexed.description
+                index.append(indexed)
 
     logger.info("Индексирани %d количествени реда от %s", len(index), base_path)
     return index
@@ -744,6 +824,32 @@ def activity_class(task_or_text: Any) -> str | None:
     text = (str(task_or_text.get("name", "")) if isinstance(task_or_text, dict)
             else str(task_or_text or ""))
     low = text.lower()
+
+    # ГЛАВАТА РЕШАВА, ОПАШКАТА СЛЕД „ВКЛ." — НЕ.
+    #
+    # Измерено 21.08.2026 върху техническата спецификация на реален търг.  Там
+    # позицията се пише сбито, с обхвата си накрая:
+    #
+    #     „Изграждане на канализационни клонове Ф300 РР, ВКЛ. ревизионни
+    #      шахти и възстановяване на настилка"        m'  1182
+    #
+    # Количеството са МЕТРИТЕ ТРЪБА; шахтите и настилката са казано какво
+    # влиза в цената, а не какво е свършено.  Понеже „настилк" стои по-напред
+    # от глагола за полагане, деветте тръбни реда (4075 м канал) излизаха
+    # `pavement` — график без нито един метър тръбополагане.
+    #
+    # Затова се класифицира САМО главата.  Ако тя не каже нищо, отговорът е
+    # „не знам" — и това е по-доброто, което може да се каже: `_coverer_class`
+    # чете съществителните от ЦЯЛОТО описание („тръб", „канализац", „Ф300") и
+    # се справя.  Да се върне класът на опашката би значело да се предпочете
+    # обхватът пред работата — точно грешката, която това правило премахва.
+    глава = re.split(r"\bвкл\.?\b|\bвключително\b|\bв\s*т\.?\s*ч\.?\b",
+                     low, maxsplit=1)[0].strip(" ,;-")
+    return _activity_class_of(глава or low)
+
+
+def _activity_class_of(low: str) -> str | None:
+    """Класът на едно вече снишено парче текст, по подредения списък маркери."""
     # Негация/контекст: „безизкопно/HDD/сондаж" е ПОЛАГАНЕ, не изкоп — макар да
     # съдържа „изкоп" (одит v16 P0: приоритетният substring matcher бъркаше).
     if ("безизкоп" in low or "сондаж" in low or "хдд" in low
@@ -1039,6 +1145,13 @@ def _coverer_class(row: QuantityRow) -> str | None:
     if cls in _PRODUCTION_CLASSES:
         return cls
     desc = str(row.description or "").lower()
+    # СГРАДНИТЕ ОТКЛОНЕНИЯ СА ТОЧКОВИ — броят се, не се мерят.  Кодовете
+    # (СКО/СВО) вече се хващаха по-долу, но спецификацията ги ИЗПИСВА с думи:
+    # „Изграждане на сградно канализационно отклонение".  Такъв ред съдържа
+    # „канализац" и падаше в `laying` — тоест 180 БРОЯ отиваха в кофата за
+    # метри.  Затова проверката за тях стои ПРЕДИ тръбната (проба 21.08.2026).
+    if "отклонени" in desc and "сградн" in desc:
+        return "manhole"
     if ("тръб" in desc or "водопровод" in desc or "канализац" in desc
             or "мрежа" in desc or re.search(r"\bdn\b|\bф\s*\d", desc)):
         return "laying"
