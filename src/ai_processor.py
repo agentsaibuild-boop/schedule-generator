@@ -653,8 +653,10 @@ class AIProcessor:
             return {"status": "error", "message": "AI Router not initialized."}
         if not boq_index:
             return {"status": "error",
-                    "message": "Пакетната генерация изисква индекс на КСС — "
-                               "без него количествата не могат да се разпределят."}
+                    "message": "Пакетната генерация изисква КОЛИЧЕСТВА — без тях "
+                               "няма какво да се разпредели по участъци. Достатъчна "
+                               "е таблица с мрежа, дължина, диаметър и материал; "
+                               "КСС не е задължителна."}
 
         def _prog(message: str) -> None:
             if progress_callback:
