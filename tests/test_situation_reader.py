@@ -357,3 +357,110 @@ def test_drawing_without_legend_yields_nothing(tmp_path: Path):
     doc.close()
 
     assert read_sewer_situation(път) == []
+
+
+# ---------------------------------------------------------------------------
+# 6. Водопровод: „PEHD" в етикета значи „тази тръба се подменя"
+# ---------------------------------------------------------------------------
+#
+# За канализацията обхватът се решава по перото.  За водопровода това е
+# невъзможно и е измерено: в инвестиционното приложение един и същ молив
+# покрива и „НОВ ВОДОПРОВОД", и „СЪЩЕСТВУВАЩ — ОТПАДА".  Затова там обхватът
+# идва от самия етикет, който казва какво ще СЕ ПОЛОЖИ.
+
+_ВОДНИ_ЕТИКЕТИ = [
+    (120, ["КЛ.24а-И", "L=433.10m", "PEHD DN110", "Q=1.63л/с"]),
+    (160, ["КЛ.1-И", "L=393.10m", "PEHD DN160"]),
+    (200, ["ГЛ.КЛ.II", "L=44.93m", "PEHD DN225"]),
+    (240, ["КЛ.16-Р", "L=135.00m", "PEHD DN110"]),
+    (280, ["ПЗ-КЛ.4", "L=448.01m", "PEHD DN110"]),
+    (320, ["КЛ.9-И", "L=200.00m", "ПЕВП DN90 -същ."]),
+    (360, ["ГЛ. КЛ. A", "L=600.00m", "Ф600 чугун"]),
+    (400, ["L=187.00m", "PEHD DN110"]),
+]
+
+
+def _водна_ситуация(път: Path) -> Path:
+    """Водопроводна ситуация: етикети-изречения, всеки в свой блок."""
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=460)
+    _пиши(page, 40, 40, "ул.Фрезия")
+    for y, редове in _ВОДНИ_ЕТИКЕТИ:
+        for i, ред in enumerate(редове):
+            _пиши(page, 60, y + i * 9, ред)
+    doc.save(str(път))
+    doc.close()
+    return път
+
+
+@pytest.fixture()
+def водни(tmp_path: Path):
+    from src.situation_reader import read_water_situation
+    return read_water_situation(_водна_ситуация(tmp_path / "вода.pdf"))
+
+
+def test_pehd_label_is_a_replacement(водни):
+    """Етикетът с PEHD обявява подмяна — той е обхватът."""
+    клонове = {о.branch for о in водни}
+
+    assert "КЛ.24а-И" in клонове
+    assert "ГЛ.КЛ.II" in клонове
+
+
+def test_diameter_is_the_new_pipe(водни):
+    """DN до „PEHD" е НОВИЯТ диаметър, за разлика от колоната D в таблицата."""
+    кл24а = next(о for о in водни if о.branch == "КЛ.24а-И")
+
+    assert кл24а.dn == 110
+    assert кл24а.length_m == pytest.approx(433.10)
+    assert кл24а.network == "В"
+
+
+def test_existing_pipes_are_not_replacements(водни):
+    """„-същ.", „чугун", „ст." — това си стои; не е работа по договора."""
+    клонове = {о.branch for о in водни}
+
+    assert 'КЛ.9-И' not in клонове, 'маркираното като съществуващо не е подмяна'
+    assert not any("чугун" in о.branch for о in водни)
+
+
+def test_continuation_labels_still_count(водни):
+    """Етикет без име на клон пак носи дължина — не се изхвърля мълчаливо."""
+    безименни = [о for о in водни if о.branch.startswith("водопроводен участък")]
+
+    assert len(безименни) == 1
+    assert безименни[0].length_m == pytest.approx(187.0)
+
+
+def test_area_filter_keeps_only_the_procurement(tmp_path: Path):
+    """Един чертеж, три подобекта — спецификацията казва кой е нашият."""
+    from src.situation_reader import read_water_situation
+
+    отсечки = read_water_situation(_водна_ситуация(tmp_path / "вода.pdf"), area="И")
+    в_обхват = {о.branch for о in отсечки if о.in_scope}
+
+    assert "КЛ.24а-И" in в_обхват
+    assert "КЛ.1-И" in в_обхват
+    assert "КЛ.16-Р" not in в_обхват
+    assert "ПЗ-КЛ.4" not in в_обхват
+
+
+def test_main_branches_belong_to_every_area(tmp_path: Path):
+    """Магистралният клон храни всичко — не е на един подобект."""
+    from src.situation_reader import read_water_situation
+
+    отсечки = read_water_situation(_водна_ситуация(tmp_path / "вода.pdf"), area="И")
+    гл = next(о for о in отсечки if о.branch == "ГЛ.КЛ.II")
+
+    assert гл.in_scope
+    assert "магистрален" in гл.scope_reason
+
+
+def test_dropped_branch_says_why(tmp_path: Path):
+    from src.situation_reader import read_water_situation
+
+    отсечки = read_water_situation(_водна_ситуация(tmp_path / "вода.pdf"), area="И")
+    рожен = next(о for о in отсечки if о.branch == "КЛ.16-Р")
+
+    assert not рожен.in_scope
+    assert "друг подобект" in рожен.scope_reason

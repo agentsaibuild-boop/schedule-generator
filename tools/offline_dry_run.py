@@ -178,6 +178,10 @@ def main() -> int:
     parser.add_argument("--situation", default="",
                         help="ситуационен чертеж: участъците идват от него, "
                              "вместо да се делят на равни етапи")
+    parser.add_argument("--water", default="",
+                        help="водопроводна ситуация (етикети PEHD)")
+    parser.add_argument("--water-area", default="",
+                        help="подобект на водопровода: И / Р / ПЗ")
     parser.add_argument("--bundle", default="",
                         help="папка за ЦЕЛИЯ комплект от една версия: график, "
                              "опис, диагностика, сравнение на календарите и "
@@ -225,6 +229,14 @@ def main() -> int:
         print(f"ситуация: {обобщение['segments']} участъка в обхват, "
               f"{обобщение['dropped']} отпаднали, "
               f"{обобщение['total_m']} м")
+
+    if args.water:
+        from src.situation_reader import read_water_situation, summarize
+        водни = read_water_situation(args.water, area=args.water_area)
+        situation_segments += [dict(о._asdict()) for о in водни if о.in_scope]
+        w = summarize(водни)
+        print(f"водопровод: {w['segments']} участъка в обхват, "
+              f"{w['dropped']} отпаднали, {w['total_m']} м")
 
     result = ai.generate_schedule_packaged(
         {"analysis": args.analysis}, boq_index, num_teams=args.teams,
