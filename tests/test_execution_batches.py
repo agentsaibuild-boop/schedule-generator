@@ -186,3 +186,113 @@ def test_it_says_the_pavement_follows_the_route():
     бележки = allocate_execution_batches(_ксс(), 8)["notes"]
 
     assert any("следват трасето" in b for b in бележки)
+
+
+# ---------------------------------------------------------------------------
+# Когато чертежът е прочетен, участъците са ТЕ — не равни етапи
+# ---------------------------------------------------------------------------
+#
+# Равните етапи са компромис за липсваща геометрия, не предпочитание.  Върху
+# реалния търг ситуацията дава 46 канализационни участъка — точно колкото има
+# и еталонният човешки график — вместо 10 етапа „по 8 на верига".
+
+def _тръбни() -> list[_Ред]:
+    return [
+        _Ред("КСС!Kanalizaciya!3", 300.0,
+             "Изграждане на канализационни клонове Ф300 РР"),
+        _Ред("КСС!Kanalizaciya!4", 12.0, "Ревизионна шахта Ф300", unit="брой"),
+    ]
+
+
+def _отсечки() -> list[dict]:
+    return [
+        {"network": "К", "branch": "Кл.48", "street": "ул.Грозден",
+         "dn": 300, "length_m": 200.0, "in_scope": True},
+        {"network": "К", "branch": "Кл.45", "street": "ул.Комета",
+         "dn": 300, "length_m": 100.0, "in_scope": True},
+        {"network": "К", "branch": "Кл.73", "street": "ул.Лале",
+         "dn": 300, "length_m": 900.0, "in_scope": False},   # следващ етап
+    ]
+
+
+def _тръбни_пакети(резултат) -> list[dict]:
+    return [p for p in резултат["packages"] if p.get("branch")]
+
+
+def test_drawn_segments_replace_invented_stages():
+    без = allocate_execution_batches(_тръбни(), 8)
+    със = allocate_execution_batches(_тръбни(), 8, segments=_отсечки())
+
+    assert not _тръбни_пакети(без), "без чертеж не бива да има имена на клонове"
+    assert len(_тръбни_пакети(със)) == 2
+
+
+def test_package_name_comes_from_the_drawing():
+    пакети = _тръбни_пакети(
+        allocate_execution_batches(_тръбни(), 8, segments=_отсечки()))
+
+    assert {p["name"] for p in пакети} == {
+        "Кл.48 по ул.Грозден", "Кл.45 по ул.Комета"}
+
+
+def test_quantities_follow_the_measured_lengths():
+    """По-дългата отсечка носи повече работа — 200 м срещу 100 м е 2:1."""
+    пакети = {p["branch"]: p for p in _тръбни_пакети(
+        allocate_execution_batches(_тръбни(), 8, segments=_отсечки()))}
+
+    дълга = sum(i["quantity"] for i in пакети["Кл.48"]["items"]
+                if i["source_ref"] == "КСС!Kanalizaciya!3")
+    къса = sum(i["quantity"] for i in пакети["Кл.45"]["items"]
+               if i["source_ref"] == "КСС!Kanalizaciya!3")
+
+    assert дълга == pytest.approx(200.0)
+    assert къса == pytest.approx(100.0)
+
+
+def test_sum_still_equals_the_boq():
+    """Разчленяването по чертеж не бива да губи или ражда количество."""
+    редове = _тръбни()
+    сбор: dict[str, float] = defaultdict(float)
+    for p in allocate_execution_batches(редове, 8, segments=_отсечки())["packages"]:
+        for i in p["items"]:
+            сбор[i["source_ref"]] += i["quantity"]
+
+    for ред in редове:
+        assert сбор[str(ред.ref)] == pytest.approx(ред.quantity, abs=1e-6)
+
+
+def test_out_of_scope_segments_do_not_become_packages():
+    """Кл.73 е „следващ етап" — не бива да влиза в срока на тази процедура."""
+    имена = {p["branch"] for p in _тръбни_пакети(
+        allocate_execution_batches(_тръбни(), 8, segments=_отсечки()))}
+
+    assert "Кл.73" not in имена
+
+
+def test_counts_are_not_split_below_one():
+    """Дванайсет шахти на две отсечки са 6 и 6, не дванайсет по нищо."""
+    пакети = _тръбни_пакети(
+        allocate_execution_batches(_тръбни(), 8, segments=_отсечки()))
+    шахти = [i["quantity"] for p in пакети for i in p["items"]
+             if i["source_ref"] == "КСС!Kanalizaciya!4"]
+
+    assert шахти
+    assert all(q >= 1 for q in шахти)
+    assert sum(шахти) == pytest.approx(12.0)
+
+
+def test_it_says_which_packages_came_from_the_drawing():
+    """Разликата между догадка и документ трябва да се вижда в бележките."""
+    бележки = allocate_execution_batches(
+        _тръбни(), 8, segments=_отсечки())["notes"]
+
+    assert any("от чертежа" in b for b in бележки)
+
+
+def test_segments_of_another_network_are_ignored():
+    """Водопроводна отсечка не бива да разчленява канализационен ред."""
+    чужди = [{"network": "В", "branch": "ГЛ.КЛ. I", "street": "",
+              "dn": 300, "length_m": 500.0, "in_scope": True}]
+
+    assert not _тръбни_пакети(
+        allocate_execution_batches(_тръбни(), 8, segments=чужди))

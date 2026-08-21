@@ -1183,6 +1183,25 @@ class ChatHandler:
                     # без тях пакетите не могат да се кръстят като в еталона.
                     # Пропуск тук не спира генерацията (виж generate_packages).
                     if os.getenv("SITUATION_SEGMENTS", "1") != "0":
+                        # ПЪРВО ЧЕТЕНЕ, ЧАК ПОСЛЕ ПИТАНЕ.  Тръжните ситуации са
+                        # векторни: етикетите „Кл.48 / DN 700 / L=618.74м" се
+                        # четат с координати, а легендата казва кои линии са на
+                        # ТАЗИ процедура.  Детерминистичният четец не струва
+                        # токени, повтаря се и обяснява всяко отпадане.  Vision
+                        # остава само за чертежи, които той не разбира.
+                        прочетени = []
+                        try:
+                            from src.situation_reader import read_sewer_situation
+                            прочетени = [dict(о._asdict())
+                                         for о in read_sewer_situation(sit_path)
+                                         if о.in_scope]
+                        except Exception as exc:      # noqa: BLE001
+                            logger.warning("Четенето на ситуация се провали: %s", exc)
+                        if прочетени:
+                            situation_segments.extend(прочетени)
+                            logger.info("Ситуация %s: %d участъка ПРОЧЕТЕНИ "
+                                        "(без модел)", sit_path, len(прочетени))
+                            continue
                         try:
                             situation_segments.extend(
                                 self.ai.extract_situation_segments(sit_path))

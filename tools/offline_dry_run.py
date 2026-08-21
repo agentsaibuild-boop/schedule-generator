@@ -175,6 +175,9 @@ def main() -> int:
                         help="участъци на верига")
     parser.add_argument("--teams", type=int, default=2)
     parser.add_argument("--xml", default="", help="запиши MSPDI тук")
+    parser.add_argument("--situation", default="",
+                        help="ситуационен чертеж: участъците идват от него, "
+                             "вместо да се делят на равни етапи")
     parser.add_argument("--bundle", default="",
                         help="папка за ЦЕЛИЯ комплект от една версия: график, "
                              "опис, диагностика, сравнение на календарите и "
@@ -213,9 +216,19 @@ def main() -> int:
     router = _ScriptedRouter(allocation)
     ai = AIProcessor(router=router)
 
+    situation_segments = []
+    if args.situation:
+        from src.situation_reader import read_sewer_situation, summarize
+        отсечки = read_sewer_situation(args.situation)
+        situation_segments = [dict(о._asdict()) for о in отсечки]
+        обобщение = summarize(отсечки)
+        print(f"ситуация: {обобщение['segments']} участъка в обхват, "
+              f"{обобщение['dropped']} отпаднали, "
+              f"{обобщение['total_m']} м")
+
     result = ai.generate_schedule_packaged(
         {"analysis": args.analysis}, boq_index, num_teams=args.teams,
-        project_path=project)
+        segments=situation_segments, project_path=project)
 
     status = result.get("status")
     # Външният слой връща графика в `schedule.tasks`; вътрешният — в `tasks`.

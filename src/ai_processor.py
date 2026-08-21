@@ -815,7 +815,11 @@ class AIProcessor:
             from src.execution_batches import allocate_execution_batches
 
             _prog(describe(spatial_source))
-            разпределение = allocate_execution_batches(boq_index)
+            # Отсечките, прочетени от ситуацията, СА участъците — когато ги
+            # има.  Без тях кодът дели мрежата на равни етапи, което е
+            # компромис за липсваща геометрия, не предпочитание.
+            разпределение = allocate_execution_batches(boq_index,
+                                                       segments=segments)
             for бележка in разпределение["notes"]:
                 _prog(бележка)
             parsed = {"packages": разпределение["packages"]}

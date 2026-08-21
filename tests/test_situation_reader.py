@@ -165,6 +165,55 @@ def test_legend_maps_pen_to_scope(ситуация: Path):
     assert легенда[МАВОВ][0] is False
 
 
+def test_pen_with_two_meanings_is_refused(tmp_path: Path):
+    """Един молив, две значения → не се вписва изобщо.
+
+    Измерено върху водопроводното инвестиционно приложение: там (0.6,0.6,0.6)
+    покрива и „НОВ ВОДОПРОВОД", и „СЪЩЕСТВУВАЩ ВОДОПРОВОД - ОТПАДА", а нито
+    шарката, нито дебелината ги делят — PDF експортът е сплескал типовете
+    линии.  По-добре празна легенда, отколкото половин мрежа наслуки.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=200)
+    _пиши(page, 200, 20, "ЛЕГЕНДА")
+    for i, текст in enumerate(("Инвестиционна програма за смесен канал",
+                               "Съществуваща смесена канализация")):
+        y = 50 + i * 20
+        page.draw_line(fitz.Point(30, y), fitz.Point(60, y), color=ЗЕЛЕН, width=2)
+        _пиши(page, 70, y + 3, текст)
+    път = tmp_path / "двусмислена.pdf"
+    doc.save(str(път))
+    doc.close()
+
+    with fitz.open(str(път)) as отворен:
+        assert read_legend(отворен[0]) == {}
+
+
+def test_legend_heading_cuts_out_drawing_labels(tmp_path: Path):
+    """Когато чертежът обявява „ЛЕГЕНДА", важи само блокът под нея.
+
+    Иначе надпис по самото трасе, съдържащ същите думи, минава за легендна
+    позиция и налага цвета си върху половината чертеж.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=400)
+    # примамка ОТГОРЕ: надпис по чертежа, с мостра вляво
+    page.draw_line(fitz.Point(30, 20), fitz.Point(60, 20), color=МАВОВ, width=2)
+    _пиши(page, 70, 23, "Съществуваща смесена канализация")
+    # истинската легенда
+    _пиши(page, 200, 60, "ЛЕГЕНДА")
+    page.draw_line(fitz.Point(30, 90), fitz.Point(60, 90), color=МАВОВ, width=2)
+    _пиши(page, 70, 93, "Инвестиционна програма за смесен канал")
+    път = tmp_path / "с_заглавие.pdf"
+    doc.save(str(път))
+    doc.close()
+
+    with fitz.open(str(път)) as отворен:
+        легенда = read_legend(отворен[0])
+
+    assert легенда[МАВОВ][0] is True
+
+
 def test_next_stage_beats_investment_programme(ситуация: Path):
     """„Инвестиционна програма … — СЛЕДВАЩ ЕТАП" съдържа и двете думи.
 
