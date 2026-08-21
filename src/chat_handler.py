@@ -97,6 +97,21 @@ LOAD_PROJECT_PHRASES: list[str] = [
 ]
 
 
+def _отпечатък(път: str) -> str:
+    """Съдържанието на файла като ключ — за да не се чете два пъти.
+
+    Тръжният пакет дава един и същи чертеж под две имена; сравнението по име
+    не го хваща, а по съдържание — да.
+    """
+    import hashlib
+
+    try:
+        with open(път, "rb") as fh:
+            return hashlib.md5(fh.read()).hexdigest()
+    except OSError:
+        return ""
+
+
 class ChatHandler:
     """Manages the chat session: message processing, AI routing, intent detection."""
 
@@ -1176,7 +1191,22 @@ class ChatHandler:
             situation_paths = classification.get("situation_paths", [])
             if situation_paths:
                 self._progress(0.20, f"Четене на ситуация ({len(situation_paths)} файл/а)...")
+                # ЕДНА МРЕЖА, МНОГО ЛИСТА.  Тръжният пакет дава един и същи
+                # чертеж по няколко пъти: `5_СИТ_ИНВЕСТИЦИИ_R.pdf` и
+                # `Prilojenie_…_SEWERAGE_R.pdf` са БАЙТ ПО БАЙТ еднакви, а
+                # водопроводът идва в три варианта — „нормална работа", „при
+                # пожар" и инвестиционното приложение.  Без отсяване
+                # канализацията се удвоява, а водопроводът се утроява.
+                видени_файлове: set[str] = set()
+                видени_отсечки: set[tuple] = set()
                 for sit_path in situation_paths:
+                    отпечатък = _отпечатък(sit_path)
+                    if отпечатък and отпечатък in видени_файлове:
+                        logger.info("Ситуация %s е същият файл като вече "
+                                    "прочетен — пропуска се.", sit_path)
+                        continue
+                    if отпечатък:
+                        видени_файлове.add(отпечатък)
                     locs = self.ai.extract_situation_locations(sit_path)
                     situation_locations.extend(locs)
                     # Отсечките между възли (РШ/ОТ) са в ЧЕРТЕЖА, не в КСС —
@@ -1189,18 +1219,42 @@ class ChatHandler:
                         # ТАЗИ процедура.  Детерминистичният четец не струва
                         # токени, повтаря се и обяснява всяко отпадане.  Vision
                         # остава само за чертежи, които той не разбира.
+                        # Кой чертеж е кой не се гадае по името: пробват се и
+                        # двата прочита и се взима този, който е разбрал нещо.
+                        # Канализационният иска ЛЕГЕНДА с цветни пера;
+                        # водопроводният — етикети „PEHD DN…".  Чертеж, който
+                        # не е нито едното, връща празно и минава към vision.
                         прочетени = []
                         try:
-                            from src.situation_reader import read_sewer_situation
-                            прочетени = [dict(о._asdict())
-                                         for о in read_sewer_situation(sit_path)
-                                         if о.in_scope]
+                            from src.situation_reader import (
+                                read_sewer_situation, read_water_situation)
+                            from src.tender_parameters import sub_project
+                            подобект = sub_project()
+                            for чети in (
+                                read_sewer_situation,
+                                lambda п: read_water_situation(п, area=подобект),
+                            ):
+                                прочетени = [dict(о._asdict())
+                                             for о in чети(sit_path) if о.in_scope]
+                                if прочетени:
+                                    break
                         except Exception as exc:      # noqa: BLE001
                             logger.warning("Четенето на ситуация се провали: %s", exc)
+                        # Същата отсечка от друг лист е същата работа.
+                        нови = []
+                        for о in прочетени:
+                            ключ = (о.get("network"), str(о.get("branch")),
+                                    о.get("dn"),
+                                    round(float(о.get("length_m") or 0), 2))
+                            if ключ in видени_отсечки:
+                                continue
+                            видени_отсечки.add(ключ)
+                            нови.append(о)
                         if прочетени:
-                            situation_segments.extend(прочетени)
+                            situation_segments.extend(нови)
                             logger.info("Ситуация %s: %d участъка ПРОЧЕТЕНИ "
-                                        "(без модел)", sit_path, len(прочетени))
+                                        "(без модел), %d нови",
+                                        sit_path, len(прочетени), len(нови))
                             continue
                         try:
                             situation_segments.extend(
