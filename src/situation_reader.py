@@ -175,14 +175,35 @@ def _pen(color: Any) -> tuple[float, ...]:
     return tuple(round(float(c), 2) for c in color)
 
 
+#: Под тази разлика между каналите перото е сиво/черно/бяло — мастило, не цвят.
+_CHROMA = 0.10
+
+
+def _is_chromatic(pen: tuple[float, ...]) -> bool:
+    """Дали перото носи ЦВЯТ, а не е черно/сиво/бяло.
+
+    Мрежите на ситуационния чертеж се различават по цвят; каквото е оставено
+    в сивата гама, е основата — кадастър, сгради, изнасящи чертички.  Виж
+    обосновката при ползването му в `read_sewer_situation`.
+    """
+    if not pen:
+        return False
+    return (max(pen) - min(pen)) >= _CHROMA
+
+
 # ---------------------------------------------------------------------------
 # Канализация: етикети до линията, обхват по цвета на линията
 # ---------------------------------------------------------------------------
 
-#: „Кл.48", „Кл.30а" — името на клона стои само на своя ред.
-_BRANCH = re.compile(r"^Кл\.\s*(\d+[а-яa-z]?)$", re.IGNORECASE)
-_DN = re.compile(r"\bDN\s*(\d+)", re.IGNORECASE)
-_LENGTH = re.compile(r"\bL\s*=\s*([\d.,]+)\s*м", re.IGNORECASE)
+#: „Кл.48", „Кл.30а", „Кл.3-1" — името на клона стои само на своя ред.
+#: Съставният номер („3-1", „3-2") е чест: един клон, разбит на подучастъци.
+_BRANCH = re.compile(r"^Кл\.\s*([\dа-яa-z][\dа-яa-z\-]*)$", re.IGNORECASE)
+_DN = re.compile(r"^DN\s*(\d+)", re.IGNORECASE)
+_LENGTH = re.compile(r"^L\s*=\s*([\d.,]+)\s*м$", re.IGNORECASE)
+
+#: Докъде се търси съседен етикет.  Тройката се чертае една под друга с ~8 pt
+#: междуредие; 30 pt хваща и разредените групи, без да прескача на съседна.
+_LABEL_RADIUS = 30.0
 #: Възел: „РШ N12", „Пр.Ш 1", „ОТ 43".
 _NODE = re.compile(r"^(РШ|Пр\.?\s*Ш|ОТ|OT)\s*[NН]?\s*[\d]+[а-яa-zA-Z]?$",
                    re.IGNORECASE)
@@ -209,6 +230,28 @@ def _distance(px: float, py: float, s: tuple[float, ...]) -> float:
     t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)
     t = max(0.0, min(1.0, t))
     return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _center(bbox: tuple[float, ...]) -> tuple[float, float]:
+    return (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+
+
+def _nearest_unused(точка: tuple[float, float],
+                    кандидати: list[tuple[Any, tuple[float, float]]],
+                    заети: set[int]) -> int | None:
+    """Най-близкият още незает етикет в радиуса, или None.
+
+    „Незает" е важното: без него един диаметър би се залепил за две дължини и
+    втората отсечка би получила чужд профил.
+    """
+    най: tuple[float, int | None] = (_LABEL_RADIUS, None)
+    for i, (_, център) in enumerate(кандидати):
+        if i in заети:
+            continue
+        d = math.hypot(точка[0] - център[0], точка[1] - център[1])
+        if d < най[0]:
+            най = (d, i)
+    return най[1]
 
 
 def _nearest_street(cx: float, cy: float,
@@ -253,11 +296,30 @@ def read_sewer_situation(path: str | Path) -> list[Segment]:
             if not легенда:
                 continue
 
+            # ЧЕРНОТО НЕ Е МРЕЖА, А МАСТИЛО.
+            #
+            # Легендата дава на черното значение („Съществуваща смесена
+            # канализация"), но със същото перо е начертана и цялата
+            # кадастрална подложка: 4365 линии срещу 240 за най-натоварената
+            # мрежа, плюс изнасящите чертички под самите етикети.  Затова то
+            # печели по близост почти навсякъде — измерено 21.08.2026: с 0.4 до
+            # 5 pt пред истинското перо на мрежата.
+            #
+            # Мрежите СЕ МАРКИРАТ С ЦВЯТ — това е смисълът на цветна легенда.
+            # Каквото е оставено сиво или черно, е основата на чертежа, и
+            # близостта до него не носи информация.
+            #
+            # Проверено срещу самия търг, а не по усет: без това правило DN500
+            # излиза −14.1 % и DN1000 −47.2 % спрямо техническата спецификация;
+            # с него — DN500 точно 0.0 % и DN1000 −1.1 %.
             мрежови: dict[tuple[float, ...], list] = defaultdict(list)
             for d in page.get_drawings():
                 цвят = d.get("color")
-                if цвят and _pen(цвят) in легенда:
-                    мрежови[_pen(цвят)].extend(_segments_of(d))
+                if not цвят:
+                    continue
+                перо = _pen(цвят)
+                if перо in легенда and _is_chromatic(перо):
+                    мрежови[перо].extend(_segments_of(d))
             if not мрежови:
                 continue
 
@@ -265,16 +327,38 @@ def read_sewer_situation(path: str | Path) -> list[Segment]:
             улици = [(m.group(0), (b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
                      for т, b in редове if (m := _STREET.match(т))]
 
-            for i, (текст, bbox) in enumerate(редове):
-                клон = _BRANCH.match(текст)
-                if not клон:
-                    continue
-                опашка = " ".join(т for т, _ in редове[i + 1:i + 3])
-                dn, дължина = _DN.search(опашка), _LENGTH.search(опашка)
-                if not (dn and дължина):
-                    continue
+            # ДЪЛЖИНАТА Е КОТВАТА, ИМЕТО — НЕ.
+            #
+            # Досега се тръгваше от реда „Кл.N" и се гледаха следващите два.
+            # Това губеше 9 от 77 отсечки (576 м) по три различни начина:
+            # клон със съставен номер („Кл.3-1"), ДВЕ тройки в един блок, и
+            # етикети БЕЗ име на клон — а те си остават тръба.  Измерено на
+            # 21.08.2026: DN500 излизаше −14 % от спецификацията, DN1000 −58 %.
+            #
+            # Затова се събират трите вида етикет поотделно и се сдвояват по
+            # БЛИЗОСТ: на чертежа те стоят един под друг като групичка.  Всеки
+            # етикет се ползва веднъж, за да не се залепи един диаметър за две
+            # дължини.  Резултат: 77 от 77, DN500 точно, DN1000 −1.1 %.
+            имена = [(m.group(1), _center(b)) for т, b in редове
+                     if (m := _BRANCH.match(т))]
+            диаметри = [(int(m.group(1)), _center(b)) for т, b in редове
+                        if (m := _DN.match(т))]
+            дължини = [(float(m.group(1).replace(",", ".")), _center(b))
+                       for т, b in редове if (m := _LENGTH.match(т))]
 
-                cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+            заети_dn: set[int] = set()
+            заети_име: set[int] = set()
+            for дължина, център in дължини:
+                i_dn = _nearest_unused(център, диаметри, заети_dn)
+                if i_dn is None:
+                    logger.debug("Етикет L=%.2f няма диаметър наблизо", дължина)
+                    continue
+                заети_dn.add(i_dn)
+                i_име = _nearest_unused(център, имена, заети_име)
+                if i_име is not None:
+                    заети_име.add(i_име)
+
+                cx, cy = център
                 най = (float("inf"), None)
                 for цвят, сегменти in мрежови.items():
                     for s in сегменти:
@@ -285,10 +369,11 @@ def read_sewer_situation(path: str | Path) -> list[Segment]:
 
                 отсечки.append(Segment(
                     network="К",
-                    branch=f"Кл.{клон.group(1)}",
+                    branch=(f"Кл.{имена[i_име][0]}" if i_име is not None
+                            else f"участък {len(отсечки) + 1}"),
                     start_node="", end_node="",
-                    length_m=float(дължина.group(1).replace(",", ".")),
-                    dn=int(dn.group(1)),
+                    length_m=дължина,
+                    dn=диаметри[i_dn][0],
                     street=_nearest_street(cx, cy, улици),
                     source=име_на_документа,
                     in_scope=влиза,
@@ -539,6 +624,10 @@ _WATER_BRANCH = re.compile(
 _WATER_DN = re.compile(r"\bDN\s*(\d+)", re.IGNORECASE)
 _WATER_LENGTH = re.compile(r"\bL\s*=\s*([\d.,]+)\s*m", re.IGNORECASE)
 
+#: Етикетът, който носи САМО дължина — котвата, около която се търсят тръбата
+#: и името на клона.  Едно съвпадение = една отсечка.
+_WATER_LENGTH_ONLY = re.compile(r"^L\s*=\s*([\d.,]+)\s*m$", re.IGNORECASE)
+
 
 def _water_scope(branch: str, area: str) -> tuple[bool, str]:
     """Дали клонът е от избрания подобект, и защо.
@@ -605,30 +694,53 @@ def read_water_situation(path: str | Path, area: str = "") -> list[Segment]:
 
     with doc:
         for page in doc:
+            редове = _lines_with_boxes(page)
             улици = [(m.group(0), (b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
-                     for т, b in _lines_with_boxes(page) if (m := _STREET.match(т))]
-            for блок in page.get_text("dict")["blocks"]:
-                редове = ["".join(с["text"] for с in р.get("spans", []))
-                          for р in блок.get("lines", [])]
-                текст = " ".join(р.strip() for р in редове if р.strip())
-                if not _NEW_PIPE.search(текст) or _EXISTING.search(текст):
+                     for т, b in редове if (m := _STREET.match(т))]
+
+            # СЪЩОТО КАТО ПРИ КАНАЛИЗАЦИЯТА: етикетът е РАЗПРЪСНАТ.
+            #
+            # Дотук се четеше блок по блок и се искаше всичко да е вътре.
+            # Измерено 21.08.2026: 120 блока носят „L=", а само 75 се четяха —
+            # 45 етикета имат дължина, докато тръбата и диаметърът им стоят в
+            # съседен блок.  На ниво РЕД чертежът има 119 дължини, 120
+            # диаметъра и 129 имена на клон, тоест отсечките са ~119, не 75.
+            имена = [(re.sub(r"\s+", " ", m.group(1)).strip(), _center(b))
+                     for т, b in редове if (m := _WATER_BRANCH.match(т))]
+            тръби = [(т, _center(b)) for т, b in редове
+                     if _WATER_DN.search(т) and (_NEW_PIPE.search(т)
+                                                 or _EXISTING.search(т))]
+            дължини = [(float(m.group(1).replace(",", ".")), _center(b))
+                       for т, b in редове if (m := _WATER_LENGTH_ONLY.match(т))]
+
+            заети_тръба: set[int] = set()
+            заети_име: set[int] = set()
+            for дължина, център in дължини:
+                i_тръба = _nearest_unused(център, тръби, заети_тръба)
+                if i_тръба is None:
                     continue
-                dn, дължина = _WATER_DN.search(текст), _WATER_LENGTH.search(текст)
-                if not (dn and дължина):
+                заети_тръба.add(i_тръба)
+                текст_на_тръбата = тръби[i_тръба][0]
+                if _EXISTING.search(текст_на_тръбата):
+                    continue          # съществуващо — не е работа по договора
+                dn = _WATER_DN.search(текст_на_тръбата)
+                if not dn:
                     continue
-                клон = _WATER_BRANCH.search(текст)
-                if клон is None:
+
+                i_име = _nearest_unused(център, имена, заети_име)
+                if i_име is None:
                     без_име += 1
-                име = (re.sub(r"\s+", " ", клон.group(1)).strip() if клон
+                else:
+                    заети_име.add(i_име)
+                име = (имена[i_име][0] if i_име is not None
                        else f"водопроводен участък {len(отсечки) + 1}")
                 влиза, причина = _water_scope(име, area)
-                bbox = блок["bbox"]
-                cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+                cx, cy = център
                 отсечки.append(Segment(
                     network="В",
                     branch=име,
                     start_node="", end_node="",
-                    length_m=float(дължина.group(1).replace(",", ".")),
+                    length_m=дължина,
                     dn=int(dn.group(1)),
                     street=_nearest_street(cx, cy, улици),
                     source=име_на_документа,
