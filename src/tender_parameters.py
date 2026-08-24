@@ -151,7 +151,16 @@ def contract_days() -> int:
     """
     обявен = _ТЕКУЩИ.get("contract_days")
     if обявен in (None, ""):
-        обявен = os.getenv("CONTRACT_DAYS", "")
+        фази = _ТЕКУЩИ.get("phase_days")
+        if isinstance(фази, dict):
+            обявен = фази.get("construction")
+    if обявен in (None, ""):
+        # `CONSTRUCTION_DAYS` И `CONTRACT_DAYS` значат ЕДНО И СЪЩО (24.08.2026).
+        # Без този ред обявеният по новия начин срок стигаше до разтягането на
+        # фазата, но НЕ и до оразмеряването на екипите — и същият търг даваше
+        # различен обхват според това коя променлива е използвана (мерено на
+        # контролния прогон: 637 срещу 834 дни строителство).
+        обявен = os.getenv("CONTRACT_DAYS", "") or os.getenv("CONSTRUCTION_DAYS", "")
     try:
         дни = int(float(str(обявен).strip() or 0))
     except (TypeError, ValueError):

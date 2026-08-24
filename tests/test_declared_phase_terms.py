@@ -227,3 +227,62 @@ class TestГаранцията:
             задачи, [Пакет("D", "design")], ВЕРИГИ, _преразпиши, опити=1)
 
         assert _обхват(задачи, "D") <= 70
+
+
+class TestКаквоПокриваСрокътЗаСМР:
+    """Мобилизацията и приемането са ВЪТРЕ в обявения строителен срок.
+
+    ПРОВЕРЕНО В ДВАТА ЧОВЕШКИ ГРАФИКА (24.08.2026):
+      Илиянци — „СТРОИТЕЛСТВО" (03.02.2026–24.11.2027) съдържа откриването на
+        площадката, мобилизацията, участъците, окончателното приключване на
+        СМР, демобилизацията и констативния акт;
+      Русе — „ЕТАП 4" е точно обявените 180 дни и в него са мобилизацията
+        (дни 72–76), участъците, изпитването, приключването и актът (ден 250).
+    """
+
+    ВЕРИГИ_С_ФАЗИ = {
+        "chains": {
+            "water_section": {"wbs_root": "construction", "steps": []},
+            "mobilization": {"wbs_root": "mobilization", "steps": []},
+            "acceptance": {"wbs_root": "acceptance", "steps": []},
+        }
+    }
+
+    def _обект(self):
+        задачи = (_верижка("М", "mobilization", 1, [10])
+                  + _верижка("В1", "water_section", 11, [20, 20, 18])
+                  + _верижка("П", "acceptance", 69, [12]))
+        пакети = [Пакет("М", "mobilization"), Пакет("В1", "water_section"),
+                  Пакет("П", "acceptance")]
+        return задачи, пакети
+
+    def _цял_обхват(self, задачи):
+        return (max(t["end_day"] for t in задачи)
+                - min(t["start_day"] for t in задачи) + 1)
+
+    def test_srokat_pokriva_mobilizaciya_stroitelstvo_i_priemane(self, monkeypatch):
+        monkeypatch.setenv("CONSTRUCTION_DAYS", "180")
+        задачи, пакети = self._обект()
+        assert self._цял_обхват(задачи) == 80
+
+        задачи, бележки = enforce_declared_phase_terms(
+            задачи, пакети, self.ВЕРИГИ_С_ФАЗИ, _преразпиши)
+
+        стана = self._цял_обхват(задачи)
+        assert 175 <= стана <= 180, (
+            f"{стана} дни — мобилизацията и приемането пак стоят извън срока")
+        assert any("construction" in б for б in бележки), бележки
+
+    def test_faza_sas_svoy_srok_izliza_ot_grupata(self, monkeypatch):
+        monkeypatch.setenv("CONSTRUCTION_DAYS", "180")
+        monkeypatch.setenv("ACCEPTANCE_DAYS", "30")
+        задачи, пакети = self._обект()
+
+        задачи, _ = enforce_declared_phase_terms(
+            задачи, пакети, self.ВЕРИГИ_С_ФАЗИ, _преразпиши)
+
+        приемане = [t for t in задачи if t["parent_id"] == "П"]
+        обхват = (max(t["end_day"] for t in приемане)
+                  - min(t["start_day"] for t in приемане) + 1)
+        assert 29 <= обхват <= 30, (
+            f"приемането е {обхват} дни при свой обявен срок 30")
