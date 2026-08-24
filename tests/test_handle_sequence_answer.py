@@ -82,7 +82,8 @@ class TestQ1NoSections:
         mock = _mock_continue(h)
         state = _base_state("q1", sections=[])
         след_q1 = h._handle_sequence_answer("В", state)["pending_sequence"]
-        result = h._handle_sequence_answer("И", след_q1)
+        след_метода = h._handle_sequence_answer("И", след_q1)["pending_sequence"]
+        result = h._handle_sequence_answer("660", след_метода)
         mock.assert_called_once()
         assert result["schedule_updated"] is True
 
@@ -91,7 +92,8 @@ class TestQ1NoSections:
         mock = _mock_continue(h)
         state = _base_state("q1", sections=[])
         след_q1 = h._handle_sequence_answer("К", state)["pending_sequence"]
-        h._handle_sequence_answer("И", след_q1)
+        след_метода = h._handle_sequence_answer("И", след_q1)["pending_sequence"]
+        h._handle_sequence_answer("660", след_метода)
         mock.assert_called_once()
         _, kwargs_constraints, *_ = mock.call_args[0]
         assert kwargs_constraints["default"] == "sewer_first"
@@ -101,7 +103,8 @@ class TestQ1NoSections:
         mock = _mock_continue(h)
         state = _base_state("q1", sections=[])
         след_q1 = h._handle_sequence_answer("Водопровод", state)["pending_sequence"]
-        h._handle_sequence_answer("И", след_q1)
+        след_метода = h._handle_sequence_answer("И", след_q1)["pending_sequence"]
+        h._handle_sequence_answer("660", след_метода)
         _, constraints, *_ = mock.call_args[0]
         assert constraints["default"] == "water_first"
 
@@ -132,7 +135,8 @@ class TestQ1WithSections:
     def _след_полагането(self, h, sections, отговор="В"):
         state = _base_state("q1", sections=sections)
         след_q1 = h._handle_sequence_answer(отговор, state)["pending_sequence"]
-        return h._handle_sequence_answer("И", след_q1)
+        след_метода = h._handle_sequence_answer("И", след_q1)["pending_sequence"]
+        return h._handle_sequence_answer("660", след_метода)
 
     def test_q1_water_with_sections_goes_to_q2(self):
         h = _handler()
@@ -494,8 +498,9 @@ class TestFullQuestionnaireWalk:
     Точно това липсваше: тестовете покриваха стъпките поотделно със стария
     2-стъпков поток и не хванаха, че q2 вече не генерира.
 
-    ОТ 19.08.2026 стъпките са пет: между Q1 и Q2 стои въпросът за метода на
-    полагане, а отговорите му пътуват до генерацията в `tender`.
+    ОТ 24.08.2026 стъпките са ШЕСТ: след метода на полагане стои въпросът за
+    ДОГОВОРНИЯ СРОК, и той се пита ТУК нарочно — обект без именувани участъци
+    прескача всичко надолу, а срокът е най-силният лост върху графика.
     """
 
     def _walk(self, answers: list[str], sections: list[str]) -> tuple[dict, MagicMock]:
@@ -509,7 +514,7 @@ class TestFullQuestionnaireWalk:
         return result, mock
 
     def test_water_first_all_sections_one_team(self):
-        result, mock = self._walk(["В", "И", "ДА", "1"], ["Участък 1", "Участък 2"])
+        result, mock = self._walk(["В", "И", "660", "ДА", "1"], ["Участък 1", "Участък 2"])
         mock.assert_called_once()
         _, constraints, *_ = mock.call_args[0]
         assert constraints == {"default": "water_first"}
@@ -518,7 +523,7 @@ class TestFullQuestionnaireWalk:
 
     def test_sewer_first_with_exception_two_parallel_teams(self):
         result, mock = self._walk(
-            ["К", "С", "НЕ", "2", "2", "ДА"],
+            ["К", "С", "660", "НЕ", "2", "2", "ДА"],
             ["Участък 1", "Участък 2", "Участък 3"]
         )
         mock.assert_called_once()
@@ -530,13 +535,13 @@ class TestFullQuestionnaireWalk:
 
     def test_exception_label_reaches_the_final_summary(self):
         result, _ = self._walk(
-            ["В", "И", "НЕ", "1, 3", "1"],
+            ["В", "И", "660", "НЕ", "1, 3", "1"],
             ["Участък 1", "Участък 2", "Участък 3"]
         )
         assert "Участък 1, Участък 3" in result["response"]
 
     def test_no_sections_skips_straight_to_generation(self):
-        result, mock = self._walk(["В", "И"], [])
+        result, mock = self._walk(["В", "И", "660"], [])
         mock.assert_called_once()
         assert result["schedule_updated"] is True
 
@@ -548,17 +553,17 @@ class TestFullQuestionnaireWalk:
         детерминистичния път нямаше никакъв ефект, а методът на полагане
         изобщо не се питаше.
         """
-        _, mock = self._walk(["К", "С", "ДА", "3", "ДА"], ["А", "Б"])
+        _, mock = self._walk(["К", "С", "660", "ДА", "3", "ДА"], ["А", "Б"])
         tender = mock.call_args.kwargs["tender"]
         assert tender == {"network_order": "К", "laying_method": "hdd",
-                          "declared_teams": 3}
+                          "contract_days": 660, "declared_teams": 3}
 
     def test_open_cut_reaches_the_generator(self):
-        _, mock = self._walk(["В", "И"], [])
+        _, mock = self._walk(["В", "И", "660"], [])
         assert mock.call_args.kwargs["tender"]["laying_method"] == "open"
 
     def test_laying_answer_is_shown_back(self):
-        result, _ = self._walk(["В", "С"], [])
+        result, _ = self._walk(["В", "С", "660"], [])
         assert "сондаж" in result["response"]
 
     def test_unrecognised_laying_answer_asks_again(self):
@@ -596,3 +601,80 @@ class TestUnknownStep:
         state = _base_state("wrong")
         h._handle_sequence_answer("генерирай", state)
         mock.assert_not_called()
+
+
+# ===========================================================================
+# Q1в: договорният срок
+# ===========================================================================
+
+class TestContractDeadlineQuestion:
+    """Срокът се ПИТА, защото в документите на търга го няма като количество.
+
+    Измерено 24.08.2026: нито техническата спецификация (30 реда), нито
+    количествената сметка (70 реда) на реалния търг носят ред с
+    продължителност.  Затова оразмеряването на екипите не се задействаше
+    НИКОГА: падаше се на подадения брой и срокът ставаше следствие вместо цел.
+
+    Пита се веднага след метода на полагане нарочно: обект без именувани
+    участъци — един довеждащ водопровод например — прескача всичко надолу.
+    """
+
+    def _до_срока(self, h, sections=None):
+        state = _base_state("q1", sections=sections or [])
+        след_q1 = h._handle_sequence_answer("В", state)["pending_sequence"]
+        return h._handle_sequence_answer("И", след_q1)
+
+    def test_the_deadline_is_asked_right_after_the_method(self):
+        h = _handler()
+        mock = _mock_continue(h)
+        отговор = self._до_срока(h)
+
+        mock.assert_not_called(), "не бива да генерира, преди да е питал за срока"
+        assert отговор["pending_sequence"]["step"] == "q_deadline"
+        assert "дни" in отговор["response"]
+
+    def test_an_object_without_sections_is_still_asked(self):
+        """Точно тук се губеше: без участъци потокът прескачаше всичко."""
+        h = _handler()
+        отговор = self._до_срока(h, sections=[])
+
+        assert отговор["pending_sequence"]["step"] == "q_deadline"
+
+    def test_the_declared_days_reach_the_generator(self):
+        h = _handler()
+        mock = _mock_continue(h)
+        след = self._до_срока(h)["pending_sequence"]
+
+        h._handle_sequence_answer("660", след)
+
+        assert mock.call_args.kwargs["tender"]["contract_days"] == 660
+
+    def test_an_unknown_deadline_is_allowed(self):
+        """„няма" е редовен отговор — не всеки търг обявява срок."""
+        h = _handler()
+        mock = _mock_continue(h)
+        след = self._до_срока(h)["pending_sequence"]
+
+        h._handle_sequence_answer("няма", след)
+
+        mock.assert_called_once()
+        assert "contract_days" not in mock.call_args.kwargs["tender"]
+
+    def test_nonsense_asks_again(self):
+        h = _handler()
+        mock = _mock_continue(h)
+        след = self._до_срока(h)["pending_sequence"]
+
+        отговор = h._handle_sequence_answer("скоро", след)
+
+        mock.assert_not_called()
+        assert отговор["pending_sequence"]["step"] == "q_deadline"
+
+    def test_the_deadline_is_shown_in_the_summary(self):
+        h = _handler()
+        _mock_continue(h)
+        след = self._до_срока(h)["pending_sequence"]
+
+        отговор = h._handle_sequence_answer("660", след)
+
+        assert "660 дни" in отговор["response"]

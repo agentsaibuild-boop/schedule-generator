@@ -2365,28 +2365,36 @@ class ChatHandler:
                 ), "pending_sequence": state}
 
             tender = {**(state.get("tender") or {}), "laying_method": метод}
-            new_state = {**state, "step": "q2", "tender": tender,
+            new_state = {**state, "tender": tender,
                          "_laying_label": метод_етикет}
-            sections = state.get("sections", [])
-            if not sections:
-                # Няма именувани участъци — важи за целия обект.
-                return self._generate_with_sequence(new_state)
+            return self._ask_contract_days(new_state, метод_етикет)
 
-            default = state.get("constraints", {}).get("default", "water_first")
-            choice_label = ("Водопровод → Канализация" if default == "water_first"
-                            else "Канализация → Водопровод")
-            sections_list = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(sections))
-            return {**_base,
-                "response": (
-                    f"Разбрах: **{метод_етикет}**.\n\n"
-                    f"Последователността **{choice_label}** важи ли за "
-                    f"**всички участъци**?\n"
-                    f"  **ДА** — генерирай\n"
-                    f"  **НЕ** — ще посоча изключенията\n\n"
-                    f"Намерени участъци:\n{sections_list}"
-                ),
-                "pending_sequence": new_state,
-            }
+        # ── Q1в: колко дни дава договорът за строителството? ────────────
+        #
+        # ТУК, А НЕ ПО-НАДОЛУ.  Когато обектът няма именувани участъци — както
+        # един довеждащ водопровод — потокът прескачаше и въпроса за екипите, и
+        # всичко след него.  А срокът е най-силният лост, който имаме: с него
+        # Илиянци пада от 885 на 761 дни, а Харманли от 346 на 314, защото
+        # екипите се ИЗЧИСЛЯВАТ от него вместо да се приемат.
+        if step == "q_deadline":
+            дни = 0
+            ако_числа = re.findall(r"\d+", msg)
+            if ако_числа:
+                дни = max(0, int(ако_числа[0]))
+            elif not any(з in msg for з in ("НЯМА", "НЕ ЗНАМ", "-", "ПРОПУСНИ")):
+                return {**_base, "response": (
+                    "Моля, напиши **число** — колко календарни дни дава "
+                    "договорът за строителството (напр. **660**).  Ако още не "
+                    "е известен, напиши **няма**."
+                ), "pending_sequence": state}
+
+            tender = {**(state.get("tender") or {})}
+            if дни:
+                tender["contract_days"] = дни
+            state = {**state, "step": "q2", "tender": tender,
+                     "_deadline_label": (f"{дни} дни" if дни
+                                         else "не е обявен")}
+            return self._after_deadline(state)
 
         # ── Q2: same for all sections? ──────────────────────────────────
         if step == "q2":
@@ -2478,6 +2486,66 @@ class ChatHandler:
         # Unknown step — clear and restart
         return {**_base, "response": "Нещо се обърка. Напиши **генерирай график** отново."}
 
+    def _ask_contract_days(self, state: dict, метод_етикет: str) -> dict:
+        """Питай за договорния срок — той решава колко екипа трябват.
+
+        Срокът стои в обявлението и в проекта на договор, НЕ в количествената
+        сметка.  Измерено 24.08.2026: нито техническата спецификация, нито
+        сметката на реалния търг носят ред с продължителност, тоест дотук
+        оразмеряването на екипите не се задействаше никога.
+        """
+        _base = {
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "generate_schedule",
+            "model_used": "none",
+        }
+        return {**_base,
+            "response": (
+                f"Разбрах: **{метод_етикет}**.\n\n"
+                "**Колко календарни дни дава договорът за СТРОИТЕЛСТВОТО?**\n\n"
+                "Пише го в обявлението, не в количествата.  От него се "
+                "изчислява колко екипа трябват, за да се събере работата в "
+                "срока — иначе срокът излиза какъвто се получи.\n\n"
+                "  напиши **число** (напр. **660**)\n"
+                "  **няма** — ако още не е известен"
+            ),
+            "pending_sequence": {**state, "step": "q_deadline"},
+        }
+
+    def _after_deadline(self, state: dict) -> dict:
+        """Или въпросът за участъците, или направо генериране."""
+        _base = {
+            "schedule_updated": False,
+            "schedule_data": None,
+            "correction_info": None,
+            "intent": "generate_schedule",
+            "model_used": "none",
+        }
+        sections = state.get("sections", [])
+        if not sections:
+            # Няма именувани участъци — важи за целия обект.
+            return self._generate_with_sequence(state)
+
+        default = state.get("constraints", {}).get("default", "water_first")
+        choice_label = ("Водопровод → Канализация" if default == "water_first"
+                        else "Канализация → Водопровод")
+        sections_list = "\n".join(f"  {i+1}. {s}"
+                                  for i, s in enumerate(sections))
+        срок = state.get("_deadline_label", "")
+        return {**_base,
+            "response": (
+                (f"Договорен срок: **{срок}**.\n\n" if срок else "")
+                + f"Последователността **{choice_label}** важи ли за "
+                  f"**всички участъци**?\n"
+                  f"  **ДА** — генерирай\n"
+                  f"  **НЕ** — ще посоча изключенията\n\n"
+                  f"Намерени участъци:\n{sections_list}"
+            ),
+            "pending_sequence": state,
+        }
+
     def _ask_parallel_teams(self, state: dict) -> dict:
         """Ask Q3: how many teams."""
         _base = {
@@ -2542,6 +2610,9 @@ class ChatHandler:
         laying_label = state.get("_laying_label")
         if laying_label:
             summary += f"\nПолагане на водопровода: **{laying_label}**"
+        deadline_label = state.get("_deadline_label")
+        if deadline_label:
+            summary += f"\nДоговорен срок за строителството: **{deadline_label}**"
         num_teams = state.get("num_teams", 1)
         parallel = state.get("parallel", num_teams > 1)
         if num_teams > 1:
