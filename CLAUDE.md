@@ -111,6 +111,11 @@ src/
   речника на provenance._PRODUCTION_CLASSES, иначе покритието не ги вижда.
   Топологията (predecessor/relation/lag_days) също е извлечена, по датите:
   `tools/extract_chain_topology.py <график> --chain sewer_section --write`.
+  `observed_length_m` (канал 4075 м, водопровод 3247 м) е ДРУГАТА половина на
+  анкера: `observed_length_m / observed_count` е дължината на един еталонен
+  участък, а нашите метри, разделени на нея, казват на колко такива се равнява
+  ТОЗИ обект (`segment_scale`). Без него овърхедът на всеки търг оставаше
+  закован за размера на еталона.
 - config/resource_capacity.json — наличността на всеки ресурс, ИЗМЕРЕНА от
   еталона (`tools/extract_resource_capacity.py`), не предположена. Тя решава
   срока: преди измерването бетоновозът стоеше на тавана си 685 от 1129 дни.
