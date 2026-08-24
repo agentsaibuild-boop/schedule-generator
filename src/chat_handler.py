@@ -2412,7 +2412,12 @@ class ChatHandler:
                           "declared_teams": num_teams}
                 state = {**state, "tender": tender}
                 if num_teams == 1:
-                    return self._generate_with_sequence({**state, "num_teams": 1, "parallel": False})
+                    # ЕДИН ЕКИП: паралелността е без значение, но отговорът
+                    # трябва да СТИГНЕ до изчислението на темпото — от него
+                    # зависи дали срокът се дели на екипите (`deadline_pace`).
+                    return self._generate_with_sequence(
+                        {**state, "num_teams": 1, "parallel": False,
+                         "tender": {**tender, "parallel_teams": False}})
                 return self._ask_parallel_question({**state, "num_teams": num_teams})
             return {**_base, "response": (
                 "Моля, напиши **число** — колко екипи ще работят (напр. **2**)."
@@ -2420,10 +2425,20 @@ class ChatHandler:
 
         # ── Q4: parallel or sequential? ─────────────────────────────────
         if step == "q4_parallel":
+            # ОТГОВОРЪТ РЕШАВА ТЕМПОТО (24.08.2026).  „Паралелно" значи, че
+            # всички операции текат едновременно и срокът се дели на екипите:
+            # темпо = метри ÷ дни ÷ екипи.  „Последователно" — вторият екип
+            # чака първия, тоест броят им не скъсява срока.  Виж
+            # `deadline_pace.derive`.
+            _тендер = dict(state.get("tender") or {})
             if "ДА" in msg or msg in ("Д", "YES", "Y", "DA"):
-                return self._generate_with_sequence({**state, "parallel": True})
+                return self._generate_with_sequence(
+                    {**state, "parallel": True,
+                     "tender": {**_тендер, "parallel_teams": True}})
             if "НЕ" in msg or msg in ("Н", "NO", "N", "NE"):
-                return self._generate_with_sequence({**state, "parallel": False})
+                return self._generate_with_sequence(
+                    {**state, "parallel": False,
+                     "tender": {**_тендер, "parallel_teams": False}})
             return {**_base, "response": (
                 "Моля, отговори с **ДА** (паралелно) или **НЕ** (последователно)."
             ), "pending_sequence": state}

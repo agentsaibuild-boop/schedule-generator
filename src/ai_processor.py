@@ -1178,10 +1178,25 @@ class AIProcessor:
         for note in scale_notes:
             _prog(note)
 
+        # НЯМА НОРМИ ЗА ПОЛАГАНЕ (изпълнителят, 24.08.2026).  Когато графикът
+        # не се оценява по методика, срокът е ДАДЕНОСТ, а производителността
+        # се ИЗЧИСЛЯВА от него и от заявените екипи — виж `deadline_pace`.
+        # Нормите от productivities.json остават само за прогон без обявен
+        # срок и за сверка.
+        from src.deadline_pace import derive as _темпо_от_срока
+        from src.tender_parameters import teams_work_in_parallel
+
+        изведени, pace_from_deadline = _темпо_от_срока(
+            packages, days=срок, crews=екипи,
+            parallel=teams_work_in_parallel())
+        for note in pace_from_deadline:
+            _prog(note)
+
         # ОБЯВЕНОТО ТЕМПО Е ПО-СИЛНО ОТ НОРМИТЕ (19.08.2026): изпълнителят
         # казва колко метра на ден кара един екип по ЦЕЛИЯ цикъл, а нормите
         # са средни.  Свива се сборът; стъпките пазят пропорцията си.
-        tasks, pace_notes = calibrate_to_declared_pace(tasks, packages, boq_index)
+        tasks, pace_notes = calibrate_to_declared_pace(
+            tasks, packages, boq_index, overrides=изведени)
         for note in pace_notes:
             _prog(note)
 

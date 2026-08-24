@@ -556,7 +556,22 @@ class TestFullQuestionnaireWalk:
         _, mock = self._walk(["К", "С", "660", "ДА", "3", "ДА"], ["А", "Б"])
         tender = mock.call_args.kwargs["tender"]
         assert tender == {"network_order": "К", "laying_method": "hdd",
-                          "contract_days": 660, "declared_teams": 3}
+                          "contract_days": 660, "declared_teams": 3,
+                          "parallel_teams": True}
+
+    def test_parallel_answer_reaches_the_generator(self):
+        """„Паралелно ли работят" РЕШАВА темпото, не само описанието.
+
+        От 24.08.2026 производителността се извежда от срока и екипите:
+        паралелно значи метри ÷ дни ÷ екипи, последователно — метри ÷ дни.
+        Дотук отговорът стигаше само до обобщението на екрана.
+        """
+        _, mock = self._walk(["К", "С", "660", "ДА", "3", "НЕ"], ["А", "Б"])
+        assert mock.call_args.kwargs["tender"]["parallel_teams"] is False
+
+    def test_edin_ekip_e_posledovatelen(self):
+        _, mock = self._walk(["К", "С", "660", "ДА", "1"], ["А", "Б"])
+        assert mock.call_args.kwargs["tender"]["parallel_teams"] is False
 
     def test_open_cut_reaches_the_generator(self):
         _, mock = self._walk(["В", "И", "660"], [])
