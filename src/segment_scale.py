@@ -146,6 +146,86 @@ def _apportion(общо: int, тегла: list[float]) -> list[int]:
     return цели
 
 
+#: Произходът на стъпка, сметната от ОБЯВЕНО темпо в м/ден.  Различава се от
+#: `calculated` (норма по диаметър за собствения ред) и от `chain_template`
+#: (дял от анкера): числото идва от норма, но за СТЪПКАТА, не за реда.
+_STEP_RATE = "step_rate"
+
+#: Кои произходи броят за „доказана работа" при разпределянето на анкера.
+_ДОКАЗАНИ = frozenset({"calculated", _STEP_RATE})
+
+
+def _темпа_на_стъпки() -> dict:
+    """Обявените темпа `<верига>.<стъпка>` → м/ден, от productivities.json."""
+    try:
+        from src.duration_calculator import load_productivities
+        cfg = load_productivities()
+    except Exception as exc:      # noqa: BLE001 — конфигът не бива да спира прогона
+        logger.warning("Темпата на стъпките не се прочетоха: %s", exc)
+        return {}
+    раздел = cfg.get("step_productivities") if isinstance(cfg, dict) else None
+    return раздел if isinstance(раздел, dict) else {}
+
+
+def _по_темпо(
+    chain_of: dict[str, str],
+    дължина_на: dict[str, float],
+    листа_на: dict[str, list[dict]],
+) -> tuple[int, list[str]]:
+    """Стъпките с ОБЯВЕНО темпо се смятат от метрите на своя участък.
+
+    ЗАЩО (24.08.2026).  Изкопът, разкъртването и извозването нямат свой ред в
+    количествата — те са вътре в тръбния ред на търга — затова вземаха време от
+    анкера на еталона.  Числото беше вярно по големина, но НЕВИДИМО: темпото
+    излизаше наум, от `median_days × observed_count` върху метрите, и нямаше
+    какво да поправи човекът, който знае колко се копае на ден.
+
+    Стъпка с темпо НАПУСКА анкера (произходът ѝ вече не е `chain_template`),
+    затова работата ѝ не се брои два пъти.  Пипа се само шаблонна стъпка:
+    когато стъпката си има собствен ред с количество, нормата по диаметър вече
+    е казала думата си и не бива да бъде надписвана.
+
+    Returns:
+        (брой пипнати задачи, бележки).
+    """
+    темпа = _темпа_на_стъпки()
+    if not темпа:
+        return 0, []
+
+    пипнати = 0
+    по_ключ: dict[str, list[float]] = {}
+    for pkg_id, листа in листа_на.items():
+        верига = chain_of.get(pkg_id, "")
+        метри = дължина_на.get(pkg_id, 0.0)
+        if not верига or метри <= 0:
+            continue
+        for t in листа:
+            if str(t.get("duration_source") or "") != _TEMPLATE:
+                continue
+            ключ = f"{верига}.{str(t.get('chain_step') or '')}"
+            запис = темпа.get(ключ)
+            темпо = _num(запис.get("effective_rate")) if isinstance(запис, dict) else 0.0
+            if темпо <= 0:
+                continue
+            дни = max(1, math.ceil(метри / темпо))
+            t["duration"] = дни
+            t["duration_source"] = _STEP_RATE
+            t["step_rate"] = темпо
+            t["step_rate_key"] = ключ
+            по_ключ.setdefault(ключ, []).append(float(дни))
+            пипнати += 1
+
+    бележки = []
+    for ключ, дни in sorted(по_ключ.items()):
+        темпо = _num((темпа.get(ключ) or {}).get("effective_rate"))
+        бележки.append(
+            f"Стъпка по обявено темпо: {ключ} — {темпо:g} м/ден, "
+            f"{len(дни)} участъка, Σ {sum(дни):.0f} дни (извън анкера).")
+    for бележка in бележки:
+        logger.info("%s", бележка)
+    return пипнати, бележки
+
+
 def scale_segment_overhead(
     tasks: list[dict],
     packages: Iterable[Any],
@@ -185,6 +265,13 @@ def scale_segment_overhead(
     #: Колко „еталонни участъка" се равнява всяка верига — казва се, защото
     #: това е числото, което мени срока.
     мащаби: list[str] = []
+
+    # ТЕМПОТО НА СТЪПКАТА, КОГАТО Е ОБЯВЕНО, ИДВА ПРЕДИ АНКЕРА (24.08.2026).
+    # Стъпка с норма в м/ден се смята от метрите на СВОЯ участък и напуска
+    # анкера — виж `_по_темпо`.
+    темпови, темпо_бележки = _по_темпо(chain_of, дължина_на, листа_на)
+    пипнати += темпови
+    бележки.extend(темпо_бележки)
 
     for верига, pkg_ids in пакети_на_верига.items():
         chain = chain_defs.get(верига)
@@ -258,7 +345,7 @@ def scale_segment_overhead(
         for pid in pkg_ids:
             по_стъпка: dict[str, float] = {}
             for t in листа_на[pid]:
-                if str(t.get("duration_source") or "") == "calculated":
+                if str(t.get("duration_source") or "") in _ДОКАЗАНИ:
                     k = str(t.get("chain_step") or "")
                     по_стъпка[k] = max(по_стъпка.get(k, 0.0),
                                        _num(t.get("duration")))

@@ -317,3 +317,115 @@ def test_mashtabut_se_obyavyava():
 
     assert any("еталонни участъка" in b and "8000" in b for b in бележки), (
         f"мащабът не е обявен: {бележки}")
+
+
+# ---------------------------------------------------------------------------
+# Стъпка с ОБЯВЕНО темпо (24.08.2026)
+#
+# Изкопът няма свой ред в количествата и затова взимаше време от анкера.
+# Числото беше вярно по големина, но НЕВИДИМО — темпото излизаше наум.
+# ---------------------------------------------------------------------------
+
+ВЕРИГА_С_ИЗКОП = {
+    "chains": {
+        "sewer_section": {
+            "wbs_root": "construction",
+            "observed_count": 46,
+            "observed_length_m": 4075.0,
+            "steps": [
+                {"key": "demolition_excavation", "median_days": 3.5,
+                 "covers": ["excavation"]},
+                {"key": "laying", "median_days": 3.0, "covers": ["laying"]},
+                {"key": "cctv", "median_days": 1.0, "covers": []},
+            ],
+        },
+    }
+}
+
+
+def _участък_с_изкоп(pid: str, сметнати_дни: float) -> list[dict]:
+    return [
+        {"id": f"{pid}_dig", "parent_id": pid,
+         "chain_step": "demolition_excavation",
+         "duration": 3.0, "duration_source": "chain_template"},
+        {"id": f"{pid}_laying", "parent_id": pid, "chain_step": "laying",
+         "duration": сметнати_дни, "duration_source": "calculated"},
+        {"id": f"{pid}_cctv", "parent_id": pid, "chain_step": "cctv",
+         "duration": 1.0, "duration_source": "chain_template"},
+    ]
+
+
+def _прогон_с_изкоп(дължини: list[float]):
+    задачи, пакети = [], []
+    for i, м in enumerate(дължини):
+        pid = f"D{i}"
+        задачи += _участък_с_изкоп(pid, м / 12.0)
+        пакети.append(ПакетСМетри(pid, "sewer_section", [Ред("laying", м)]))
+    _, бележки = scale_segment_overhead(задачи, пакети, ВЕРИГА_С_ИЗКОП)
+    return задачи, бележки
+
+
+def _изкопи(задачи):
+    return [t for t in задачи if t["chain_step"] == "demolition_excavation"]
+
+
+def test_izkopat_se_smyata_ot_metrite_na_svoya_uchastuk():
+    """253 м ÷ 25.3 м/ден = 10 дни; 506 м → 20.  Дължината решава."""
+    задачи, _ = _прогон_с_изкоп([253.0, 506.0])
+    дни = [t["duration"] for t in _изкопи(задачи)]
+
+    assert дни == [10, 20], f"изкопът не следва метрите: {дни}"
+
+
+def test_izkopat_kazva_s_kakvo_tempo_e_smetnat():
+    """Числото без темпо е неразличимо от гадаене."""
+    задачи, _ = _прогон_с_изкоп([253.0])
+    изкоп = _изкопи(задачи)[0]
+
+    assert изкоп["duration_source"] == "step_rate"
+    assert изкоп["step_rate"] == 25.3
+    assert изкоп["step_rate_key"] == "sewer_section.demolition_excavation"
+
+
+def test_izkopat_napuska_ankera_i_ne_se_broi_dvazh():
+    """Стъпка с темпо не бива да взима И дял от еталонния обем."""
+    задачи, бележки = _прогон_с_изкоп([253.0, 506.0])
+
+    from_anchor = [t for t in _изкопи(задачи)
+                   if t["duration_source"] == "chain_template"]
+    assert not from_anchor, "изкопът е останал и в анкера"
+    assert any("извън анкера" in b for b in бележки), бележки
+
+
+def test_stapka_bez_tempo_si_ostava_na_ankera():
+    """CCTV няма обявено темпо — пази дела си от еталона."""
+    задачи, _ = _прогон_с_изкоп([253.0, 506.0])
+    cctv = [t for t in задачи if t["chain_step"] == "cctv"]
+
+    assert all(t["duration_source"] == "chain_template" for t in cctv)
+    assert sum(float(t["duration"]) for t in cctv) > 2, (
+        "CCTV е останало на медианата за един участък")
+
+
+def test_uchastuk_bez_metri_ne_poluchava_tempo():
+    """Без дължина темпото няма на какво да стъпи — остава анкерът."""
+    задачи = _участък_с_изкоп("N0", 10.0) + _участък_с_изкоп("N1", 10.0)
+    пакети = [ПакетСМетри("N0", "sewer_section", [Ред("manhole", 5.0, "бр")]),
+              ПакетСМетри("N1", "sewer_section", [Ред("manhole", 5.0, "бр")])]
+
+    scale_segment_overhead(задачи, пакети, ВЕРИГА_С_ИЗКОП)
+
+    assert all(t["duration_source"] == "chain_template" for t in _изкопи(задачи))
+
+
+def test_sobstveniyat_red_bie_tempoto_na_stapkata():
+    """Има ли стъпката свой ред с количество, нормата по диаметър е по-силна."""
+    задачи = _участък_с_изкоп("C0", 30.0)
+    изкоп = _изкопи(задачи)[0]
+    изкоп["duration"] = 7.0
+    изкоп["duration_source"] = "calculated"
+    пакети = [ПакетСМетри("C0", "sewer_section", [Ред("laying", 500.0)])]
+
+    scale_segment_overhead(задачи, пакети, ВЕРИГА_С_ИЗКОП)
+
+    assert изкоп["duration"] == 7.0 and изкоп["duration_source"] == "calculated"
