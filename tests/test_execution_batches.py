@@ -391,3 +391,36 @@ def test_a_row_named_only_in_the_file_still_gets_packages():
 
     assert резултат["packages"], "редът пак остава без верига"
     assert not резултат["unroutable"]
+
+
+def test_network_is_read_from_the_row_itself_last():
+    """Когато и листът, и файлът мълчат, редът сам си казва мрежата.
+
+    Проба 24.08.2026, търг „ВиК Хасково — Харманли довеждащ": цялата
+    спецификация е ЕДИН ред „Главни водопроводни клонове DN300 CI — 673,09 m"
+    в таблица без раздели.  Нито името на листа („таблица 1"), нито името на
+    файла казват мрежата — а редът я пише.  Без този прочит генерацията
+    спираше при напълно четим вход.
+    """
+    редове = [_Ред("ТЕХНИЧЕСКА СПЕЦИФИКАЦИЯ ОП3.docx!таблица 1!2", 673.09,
+                   "Главни водопроводни клонове DN300 CI")]
+
+    резултат = allocate_execution_batches(редове, 8)
+
+    assert резултат["packages"]
+    assert not резултат["unroutable"]
+    assert {p["network"] for p in резултат["packages"]} == {"В"}
+
+
+def test_the_container_still_wins_over_the_description():
+    """Ред „възстановяване на настилка над водопровода" е ПЪТНА работа.
+
+    Описанието е последният източник нарочно — то е най-шумното.
+    """
+    from src.execution_batches import _network_of_row
+
+    class _Р:
+        ref = "КСС.xlsx!4. Пътна!7"
+        description = "Възстановяване на настилка над водопровода"
+
+    assert _network_of_row(_Р()) == "П"
