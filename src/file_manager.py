@@ -22,7 +22,12 @@ _FILE_CONVERT_TIMEOUT = 120  # seconds per file
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".csv", ".json", ".txt", ".docx"}
+#: „.doc" е тук, защото тръжните документи в България масово са в него.  Проба
+#: 24.08.2026: в „ВиК Хасково — Харманли довеждащ" ЦЯЛАТА техническа
+#: спецификация е един `.doc`, тоест единственият вход за графика — а файлът не
+#: се и виждаше.  Чете се от `src/doc_reader.py`, без външна зависимост.
+SUPPORTED_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".csv", ".json", ".txt",
+                        ".docx", ".doc"}
 
 #: Папката, в която се вадят архивите.  Отделна е нарочно: да се вижда какво е
 #: дошло от архив и да може да се изтрие, без да се пипа даденото от клиента.
@@ -784,6 +789,7 @@ class FileManager:
             ".xlsx": self._convert_excel,
             ".xls": self._convert_excel,
             ".docx": self._convert_docx,
+            ".doc": self._convert_doc,
             ".csv": self._convert_csv,
             ".json": self._copy_json_txt,
             ".txt": self._copy_json_txt,
@@ -1301,6 +1307,42 @@ class FileManager:
     # ------------------------------------------------------------------
     # DOCX conversion
     # ------------------------------------------------------------------
+
+    def _convert_doc(self, filepath: str) -> dict:
+        """Convert an old binary DOC file to structured JSON.
+
+        Резултатът е с ТОЧНО формата на `_convert_docx`, за да върви надолу по
+        същия път: количествената таблица влиза в индекса, а текстът — в гейта
+        за съдържание.
+        """
+        from src.doc_reader import DocError, read_doc
+
+        try:
+            прочетено = read_doc(filepath)
+        except DocError as exc:
+            return {
+                "status": "error",
+                "data": {},
+                "method": "doc_reader",
+                "detail": f"старият Word файл не се чете: {exc}",
+                "pages_or_rows": 0,
+            }
+
+        data = {
+            "source_file": Path(filepath).name,
+            "type": "doc",
+            "paragraphs": прочетено["paragraphs"],
+            "tables": прочетено["tables"],
+            "full_text": прочетено["full_text"],
+        }
+        return {
+            "status": "ok",
+            "data": data,
+            "method": "doc_reader",
+            "detail": (f"{len(прочетено['paragraphs'])} параграфа, "
+                       f"{len(прочетено['tables'])} таблици"),
+            "pages_or_rows": len(прочетено["paragraphs"]),
+        }
 
     def _convert_docx(self, filepath: str) -> dict:
         """Convert a DOCX file to structured JSON."""
