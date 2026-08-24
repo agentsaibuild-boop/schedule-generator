@@ -40,17 +40,10 @@ sys.path.insert(0, str(ROOT))
 logging.basicConfig(level=logging.WARNING,
                     format="%(levelname)s %(name)s: %(message)s")
 
-#: Листът в КСС → мрежа.  Речникът е нарочно тесен: непознат лист пада в
-#: канализацията само ако класът му го позволява, иначе се вижда в отчета.
-_SHEET_NETWORK = (
-    ("vodoprovod", "В"),
-    ("водопровод", "В"),
-    ("kanaliz", "К"),
-    ("канализац", "К"),
-    ("пътни", "П"),
-    ("patni", "П"),
-    ("ел и тт", "ЕЛ"),
-)
+#: Мрежата на реда се чете от ПРОДУКТА, не от копие тук.  Копието се беше
+#: разминало: продуктът чете и от самия ред (комит 0111b09), а прогонът
+#: гледаше само листа и файла — тоест мерилото мереше друго.
+from src.execution_batches import _network_of_row  # noqa: E402
 
 #: Клас на реда → веригата, която ГАРАНТИРАНО го покрива, независимо от листа.
 #: Настилките и кабелите живеят в собствени пакети и в еталона.
@@ -61,22 +54,6 @@ _NETWORK_CHAIN = {"В": "water_section", "К": "sewer_section",
 
 _CHAIN_NETWORK = {"water_section": "В", "sewer_section": "К",
                   "pavement_section": "П", "cable_section": "ЕЛ"}
-
-
-def _sheet_of(ref: str) -> str:
-    parts = str(ref).split("!")
-    return parts[1] if len(parts) >= 3 else ""
-
-
-def _network_of(ref: str) -> str:
-    """Като `execution_batches._network_of`: листът, после ИМЕТО НА ФАЙЛА."""
-    части = str(ref).split("!")
-    документ = части[0].lower() if части else ""
-    for текст in (_sheet_of(ref).lower(), документ):
-        for needle, network in _SHEET_NETWORK:
-            if needle in текст:
-                return network
-    return ""
 
 
 def _split_exactly(total: float, parts: int) -> list[float]:
@@ -107,8 +84,13 @@ def build_perfect_allocation(boq_index: list[Any], per_chain: int) -> dict:
         if not activity:
             unroutable.append(str(row.ref))
             continue
+        # МРЕЖАТА СЕ ЧЕТЕ И ОТ САМИЯ РЕД, не само от листа и файла (комит
+        # 0111b09).  Тук стоеше старият `_network_of(row.ref)` и мерилото се
+        # разминаваше с продукта: при вход без листове — техническа
+        # спецификация или ръчно въведени количества — 7 от 9 реда излизаха
+        # „БЕЗ ВЕРИГА" в прогона, докато конвейерът ги разпределя коректно.
         chain = _CLASS_CHAIN.get(activity) or _NETWORK_CHAIN.get(
-            _network_of(row.ref), "")
+            _network_of_row(row), "")
         if not chain:
             unroutable.append(str(row.ref))
             continue

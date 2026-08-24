@@ -842,6 +842,100 @@ with st.sidebar:
         else:
             st.warning("Моля, изберете папка.")
 
+    # --- Ръчно въведени количества ---
+    #
+    # ЗАЩО (24.08.2026).  Приложението чете тръжни документи, но човек без
+    # такива — или с документи, които не се четат — нямаше как да влезе
+    # изобщо.  А за линеен график трябват около четиринайсет числа.
+    #
+    # Въведеното се ЗАПИСВА КАТО ТАБЛИЦА в папката на проекта и оттам минава
+    # по същия път като всеки друг документ: конверсия, индекс, произход.
+    # Никакъв втори вход и никакъв специален случай надолу по веригата.
+    with st.expander("✍️ Въведи количества без файл", expanded=False):
+        st.caption(
+            "За график трябват количества, не документи. Диаметърът и "
+            "материалът са задължителни — от тях идват нормите."
+        )
+
+        import pandas as pd
+
+        from src.manual_quantities import ВЪЗСТАНОВЯВАНЕ, ТОЧКОВИ, Тръба
+        from src.manual_quantities import save as _запиши_количества
+
+        _празни_тръби = pd.DataFrame([
+            {"Мрежа": "К", "Диаметър": 300, "Материал": "PP",
+             "Метод": "открит изкоп", "Дължина (м)": 0.0},
+        ])
+        тръби_вход = st.data_editor(
+            st.session_state.get("ръчни_тръби", _празни_тръби),
+            key="ръчни_тръби_редактор",
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "Мрежа": st.column_config.SelectboxColumn(
+                    options=["К", "В"], required=True, width="small"),
+                "Диаметър": st.column_config.NumberColumn(
+                    min_value=0, step=10, format="DN %d", width="small"),
+                "Материал": st.column_config.SelectboxColumn(
+                    options=["PP", "PE", "PVC", "CI", "GRP"], width="small"),
+                "Метод": st.column_config.SelectboxColumn(
+                    options=["открит изкоп", "сондаж"], width="small"),
+                "Дължина (м)": st.column_config.NumberColumn(
+                    min_value=0.0, step=10.0, format="%.2f"),
+            },
+        )
+
+        st.caption("Съоръжения и отклонения (брой)")
+        точкови: dict[str, int] = {}
+        for колона, ключ in zip(st.columns(len(ТОЧКОВИ)), ТОЧКОВИ):
+            with колона:
+                точкови[ключ] = st.number_input(
+                    ключ, min_value=0, step=1, value=0, key=f"ръчно_{ключ}")
+
+        st.caption("Възстановяване")
+        възстановяване: dict[str, float] = {}
+        _етикети = {"асфалт": "Асфалт (кв.м)", "унипаваж": "Унипаваж (кв.м)",
+                    "бордюри": "Бордюри (м)"}
+        for колона, ключ in zip(st.columns(len(ВЪЗСТАНОВЯВАНЕ)), ВЪЗСТАНОВЯВАНЕ):
+            with колона:
+                възстановяване[ключ] = st.number_input(
+                    _етикети.get(ключ, ключ), min_value=0.0, step=10.0,
+                    value=0.0, key=f"ръчно_{ключ}")
+
+        if st.button("Запиши количествата", use_container_width=True,
+                     key="запиши_ръчни"):
+            тръби = []
+            for _, ред in тръби_вход.iterrows():
+                try:
+                    тръби.append(Тръба(
+                        network=str(ред["Мрежа"]),
+                        dn=int(ред["Диаметър"] or 0),
+                        material=str(ред["Материал"] or ""),
+                        length_m=float(ред["Дължина (м)"] or 0),
+                        method=("HDD" if str(ред["Метод"]).startswith("сонд")
+                                else "open"),
+                    ))
+                except (TypeError, ValueError):
+                    continue
+
+            if st.session_state.project_path:
+                папка = Path(st.session_state.project_path)
+            else:
+                import tempfile
+                папка = Path(tempfile.mkdtemp(prefix="vik_project_"))
+                st.session_state.project_path = str(папка)
+
+            try:
+                път = _запиши_количества(папка, тръби, точкови, възстановяване)
+            except ValueError as грешка:
+                st.warning(str(грешка))
+            else:
+                st.session_state["ръчни_тръби"] = тръби_вход
+                st.success(f"Записани в {път.name}")
+                _load_project_by_path(str(папка))
+                _run_conversion(force=True)
+                st.rerun()
+
     # --- Drag & Drop file upload ---
     with st.expander("📎 Влачи файлове тук", expanded=False):
         # Типовете се извеждат от това, което конверторът НАИСТИНА поддържа.
@@ -858,9 +952,10 @@ with st.sidebar:
         st.caption(
             "Приемат се: "
             + ", ".join(sorted(SUPPORTED_EXTENSIONS))
-            + ". ЗАДЪЛЖИТЕЛЕН е файл с КСС — името му трябва да съдържа "
-            "'КСС', 'количествен' или 'сметка'. Без него генерирането се "
-            "блокира (урок #06)."
+            + ". Нужна е таблица с КОЛИЧЕСТВА — количествена сметка, "
+            "техническа спецификация или списък с дължини. Количествена "
+            "сметка НЕ е задължителна; ако нямаш никакъв файл, въведи "
+            "числата на ръка отгоре."
         )
         if dropped_files:
             current_names = {uf.name for uf in dropped_files}

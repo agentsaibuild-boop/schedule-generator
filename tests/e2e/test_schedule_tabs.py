@@ -31,6 +31,16 @@ TABS_TIMEOUT = 90000
 #: чака вечно и после съобщава „Експорт не е видим".  Измерено 17.08.2026.
 TAB = '[data-testid="stTab"]'
 
+#: ВИДИМАТА таблица, не първата в DOM-а (24.08.2026).  Страничната лента също
+#: държи таблица — формата за ръчно въведени количества е `st.data_editor`,
+#: тоест също `stDataFrame`.  Селектор през цялата страница с `.first` хващаше
+#: НЕЯ: скрита в свит експандър, тестът чакаше 30 секунди и съобщаваше
+#: „Разделът Таблица не показва график" — неверен извод за верен екран.
+#:
+#: Филтърът е по ВИДИМОСТ, а не по контейнер: `stMain` го няма в Streamlit
+#: 1.60 (там е `stMainBlockContainer`), а името на контейнера се мени между
+#: версиите — видимостта е това, което тестът наистина проверява.
+ТАБЛИЦА = '[data-testid="stDataFrame"]:visible, table:visible'
 
 
 def _tab(page, име: str):
@@ -51,7 +61,7 @@ def test_table_tab_shows_the_schedule(app_page):
     _tab(app_page, "Таблица").first.click()
     app_page.wait_for_timeout(2000)
 
-    таблица = app_page.locator('[data-testid="stDataFrame"], table').first
+    таблица = app_page.locator(ТАБЛИЦА).first
     таблица.wait_for(state="visible", timeout=30000)
     assert таблица.is_visible(), 'Разделът Таблица не показва график'
 
