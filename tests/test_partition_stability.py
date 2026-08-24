@@ -196,8 +196,11 @@ class TestTheGateAsksAgainInsteadOfBuildingOnSand:
         второ = роутер.calls[1]["messages"][0]["content"]
         assert "НЕ Е ГОДНО" in второ, "моделът не разбра какво не е наред"
         assert изход["partition_diagnosis"]["ok"] is True
-        assert [p.id for p in изход["packages"] if not p.id.startswith("ФАЗА_")] \
-            == ["K1", "K2"]
+        # СБОРЪТ, не редът: редът на канализационните пакети вече е редът на
+        # ИЗПЪЛНЕНИЕ — от заустването нагоре, едрите тръби първи — а не редът,
+        # в който моделът ги е изброил.  Виж `order_sewer_by_flow`.
+        assert sorted(p.id for p in изход["packages"]
+                      if not p.id.startswith("ФАЗА_")) == ["K1", "K2"]
 
     def test_a_sound_split_is_not_questioned(self, monkeypatch):
         monkeypatch.setenv("PARTITION_RETRIES", "1")
@@ -223,8 +226,8 @@ class TestTheGateAsksAgainInsteadOfBuildingOnSand:
 
         изход = proc.generate_packages({"analysis": "{}"}, КСС)
 
-        assert [p.id for p in изход["packages"] if not p.id.startswith("ФАЗА_")] \
-            == ["D1", "D2"]
+        assert sorted(p.id for p in изход["packages"]
+                      if not p.id.startswith("ФАЗА_")) == ["D1", "D2"]
 
     def test_the_previous_attempt_feedback_reaches_the_prompt(self):
         роутер = _Роутер(ПО_ТРАСЕТА)

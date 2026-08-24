@@ -645,7 +645,8 @@ class AIProcessor:
                                       link_contract_phases,
                                       number_execution_batches,
                                       merge_restoration_zones,
-                                      normalize_over_allocation, packages_from_ai,
+                                      normalize_over_allocation,
+                                      order_sewer_by_flow, packages_from_ai,
                                       partition_diagnosis,
                                       reroute_uncoverable_items)
 
@@ -1123,6 +1124,15 @@ class AIProcessor:
         # Без тях готовият файл съдържа само СТРОИТЕЛСТВО и нула milestone-и.
         packages = packages + contract_packages(
             chains, with_design=with_design_early)
+
+        # КАНАЛЪТ ТРЪГВА ОТ ЗАУСТВАНЕТО (изпълнителят, 24.08.2026).  Редът в
+        # списъка е приоритетът при раздаването на екипи и машини — виж
+        # `order_sewer_by_flow`.  Преди номерирането, за да носят и номерата
+        # реда на изпълнение, а не реда на прочитане от чертежа.
+        packages, flow_notes = order_sewer_by_flow(packages)
+        for note in flow_notes:
+            _prog(note)
+            parse_errors.append(note)
 
         # Пак, защото зонирането и разделянето по-горе раждат нови пакети:
         # номерацията се пресмята от нулата и е безопасна за повтаряне.
