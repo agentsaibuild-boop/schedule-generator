@@ -633,6 +633,7 @@ class AIProcessor:
         from src.schedule_builder import ScheduleBuilder
         from src.road_works import merge_level_of_effort
         from src.segment_scale import (calibrate_to_declared_pace,
+                                       enforce_declared_phase_terms,
                                        scale_segment_overhead)
         from src.work_package import (applied_resolutions, assign_fronts,
                                       check_conservation,
@@ -1207,6 +1208,21 @@ class AIProcessor:
         if leveled["shifted"]:
             _prog(f"Ресурсно изравняване: {len(leveled['shifted'])} задачи "
                   f"отложени до свободен ресурс.")
+
+        # ОБЯВЕНИЯТ СРОК НА ФАЗАТА НАДДЕЛЯВА НАД СМЕТНАТИЯ (изпълнителят,
+        # 24.08.2026): „когато има зададени срокове за проектиране,
+        # строителство и/или други, трябва да се използват максимално".
+        # Прилага се СЛЕД изравняването, защото то мести работата — обхватът
+        # преди него не е този, който човекът ще види.  Виж
+        # `enforce_declared_phase_terms`.
+        def _преразпиши(текущи: list[dict]) -> list[dict]:
+            текущи = ScheduleBuilder().reschedule(текущи)["schedule"]
+            return ScheduleBuilder().level_resources(текущи)["schedule"]
+
+        tasks, term_notes = enforce_declared_phase_terms(
+            tasks, packages, chains, _преразпиши)
+        for note in term_notes:
+            _prog(note)
 
         # НАДЗОРЪТ ТРАЕ КОЛКОТО ОБЕКТЪТ (одит 10.08.2026, P0.3).  Прилага се
         # СЛЕД изравняването — то мести строителството, а надзорът трябва да
