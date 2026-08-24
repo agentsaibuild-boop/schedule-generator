@@ -200,3 +200,30 @@ class TestСрокътЕТаван:
 
         assert _обхват(задачи, "D") == 5
         assert any("събра точно" in б for б in бележки), бележки
+
+
+class TestГаранцията:
+    """Не късмет на последната итерация, а върнато най-добро съвместимо."""
+
+    def test_koga_iteraciite_svarshvat_nad_tavana_se_vrushtame(self, monkeypatch):
+        # Мерено на контролния прогон (Илиянци, 24.08.2026): строителството се
+        # разтягаше 591 → 782 при обявени 780 и спираше ДВА ДНИ НАД тавана.
+        monkeypatch.setenv("CONSTRUCTION_DAYS", "780")
+        задачи = _верижка("В1", "water_section", 1, [200, 200, 191])  # 591
+
+        задачи, бележки = enforce_declared_phase_terms(
+            задачи, [Пакет("В1", "water_section")], ВЕРИГИ, _преразпиши,
+            опити=3)
+
+        стана = _обхват(задачи, "В1")
+        assert стана <= 780, f"{стана} дни при обявени 780 — над тавана"
+        assert стана >= 770, f"{стана} дни — срокът не се използва"
+
+    def test_edin_opit_ne_ostavya_faza_nad_tavana(self, monkeypatch):
+        monkeypatch.setenv("DESIGN_DAYS", "70")
+        задачи = _верижка("D", "design", 1, [40, 40, 44])
+
+        задачи, _ = enforce_declared_phase_terms(
+            задачи, [Пакет("D", "design")], ВЕРИГИ, _преразпиши, опити=1)
+
+        assert _обхват(задачи, "D") <= 70
