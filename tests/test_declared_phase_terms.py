@@ -22,7 +22,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.segment_scale import enforce_declared_phase_terms  # noqa: E402
+from src.segment_scale import (  # noqa: E402
+    enforce_declared_phase_terms,
+    verify_declared_terms,
+)
 
 ВЕРИГИ = {
     "chains": {
@@ -286,3 +289,62 @@ class TestКаквоПокриваСрокътЗаСМР:
                   - min(t["start_day"] for t in приемане) + 1)
         assert 29 <= обхват <= 30, (
             f"приемането е {обхват} дни при свой обявен срок 30")
+
+
+class TestНеотменимо:
+    """График над обявения срок НЕ излиза мълчаливо."""
+
+    def test_narushenieto_se_dokladva(self, monkeypatch):
+        monkeypatch.setenv("DESIGN_DAYS", "70")
+        задачи = _верижка("D", "design", 1, [40, 40, 44])   # 124 дни
+
+        нарушения = verify_declared_terms(
+            задачи, [Пакет("D", "design")], ВЕРИГИ)
+
+        assert нарушения and "70" in нарушения[0] and "124" in нарушения[0]
+        assert "МАКСИМУМ" in нарушения[0], нарушения
+
+    def test_spazeniyat_srok_ne_se_doklad(self, monkeypatch):
+        monkeypatch.setenv("DESIGN_DAYS", "70")
+        задачи = _верижка("D", "design", 1, [35, 35])
+
+        assert not verify_declared_terms(
+            задачи, [Пакет("D", "design")], ВЕРИГИ)
+
+    def test_milestone_ite_se_broyat_v_obhvata(self, monkeypatch):
+        # Съгласувателните milestone-и стоят СЛЕД работната част и всеки заема
+        # ден.  Мереше се само работата и графикът излизаше 124 при „спазени"
+        # 120 — тоест правилото рапортуваше едно, а файлът показваше друго.
+        monkeypatch.setenv("DESIGN_DAYS", "70")
+        задачи = _верижка("D", "design", 1, [35, 34])
+        задачи.append({"id": "D_m1", "parent_id": "D", "chain_step": "approve",
+                       "duration": 0, "milestone": True,
+                       "start_day": 70, "end_day": 70})
+        задачи.append({"id": "D_m2", "parent_id": "D", "chain_step": "approve",
+                       "duration": 0, "milestone": True,
+                       "start_day": 71, "end_day": 71})
+
+        нарушения = verify_declared_terms(
+            задачи, [Пакет("D", "design")], ВЕРИГИ)
+
+        assert нарушения, "milestone-ите извън тавана не се броят"
+
+    def test_sboryat_na_srokovete_sasho_e_tavan(self, monkeypatch):
+        monkeypatch.setenv("DESIGN_DAYS", "70")
+        monkeypatch.setenv("CONSTRUCTION_DAYS", "100")
+        задачи = (_верижка("D", "design", 1, [35, 35])
+                  + _верижка("В1", "water_section", 71, [50, 49]))
+
+        нарушения = verify_declared_terms(
+            задачи, [Пакет("D", "design"), Пакет("В1", "water_section")],
+            ВЕРИГИ)
+
+        assert not нарушения, нарушения
+
+        # Същите фази, но строителството е с 30 дни по-дълго.
+        задачи = (_верижка("D", "design", 1, [35, 35])
+                  + _верижка("В1", "water_section", 71, [65, 65]))
+        нарушения = verify_declared_terms(
+            задачи, [Пакет("D", "design"), Пакет("В1", "water_section")],
+            ВЕРИГИ)
+        assert any("Целият график" in н for н in нарушения), нарушения

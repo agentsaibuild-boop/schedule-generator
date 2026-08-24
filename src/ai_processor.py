@@ -634,7 +634,8 @@ class AIProcessor:
         from src.road_works import merge_level_of_effort
         from src.segment_scale import (calibrate_to_declared_pace,
                                        enforce_declared_phase_terms,
-                                       scale_segment_overhead)
+                                       scale_segment_overhead,
+                                       verify_declared_terms)
         from src.work_package import (applied_resolutions, assign_fronts,
                                       check_conservation,
                                       conservation_messages, expand_packages,
@@ -1263,6 +1264,18 @@ class AIProcessor:
         for note in loe_notes:
             _prog(note)
 
+        # ВТОРО НАЛАГАНЕ, СЛЕД СЛИВАНЕТО.  Обединяването на непрекъснатите
+        # дейности мести с ден-два, а обявеният срок е ТАВАН, не пожелание:
+        # мерено на контролния прогон, налагането връщаше 654 дни при обявени
+        # 660, а изнесеният файл показваше 661.  Затова се минава пак, върху
+        # последното състояние.
+        tasks, again_notes = enforce_declared_phase_terms(
+            tasks, packages, chains, _преразпиши)
+        for note in again_notes:
+            _prog(note)
+        if again_notes:
+            tasks, _ = enforce_construction_span(tasks)
+
         cpm = builder.compute_critical_path(tasks)
         if not cpm["warnings"]:
             tasks = cpm["schedule"]
@@ -1272,6 +1285,11 @@ class AIProcessor:
         tasks = builder.roll_up_summaries(tasks)["schedule"]
 
         blockers = conservation_messages(conservation)
+
+        # НЕОТМЕНИМО: график над обявения срок е неотговаряща оферта и НЕ
+        # излиза мълчаливо.  Проверява се ПОСЛЕДНОТО състояние — това, което
+        # човекът вижда и изнася — а не онова отпреди последното местене.
+        blockers.extend(verify_declared_terms(tasks, packages, chains))
         if expansion.unplaced:
             blockers.append(
                 f"{len(expansion.unplaced)} количества не попадат в нито една "

@@ -693,15 +693,40 @@ def enforce_declared_phase_terms(
         if pid and isinstance(верига, dict):
             фаза_на_пакет[str(pid)] = str(верига.get("wbs_root") or "")
 
+    def _водеща(t: dict) -> str | None:
+        return управлява.get(фаза_на_пакет.get(str(t.get("parent_id") or "")))
+
     def листа_по_фаза(текущи: list[dict]) -> dict[str, list[dict]]:
+        """Задачите, чиято ПРОДЪЛЖИТЕЛНОСТ може да се мени."""
         по_фаза: dict[str, list[dict]] = {}
         for t in текущи or []:
             if not t.get("chain_step") or t.get("milestone") or t.get("is_milestone"):
                 continue
-            водеща = управлява.get(фаза_на_пакет.get(str(t.get("parent_id") or "")))
+            водеща = _водеща(t)
             if водеща in обявени:
                 по_фаза.setdefault(водеща, []).append(t)
         return по_фаза
+
+    def обхват_по_фаза(текущи: list[dict]) -> dict[str, tuple[int, int]]:
+        """Обхватът, КАКТО ГО ВИЖДА ЧОВЕКЪТ — с milestone-ите вътре.
+
+        Мереше се само по работните задачи, а съгласувателните milestone-и
+        стоят СЛЕД тях, всеки на свой ден.  Следствието беше срок над тавана
+        при „спазен" срок в бележките: проектирането на Илиянци излизаше 124
+        дни при обявени 120, а на Русе 74 при 70.  Фазата в графика е това,
+        което се брои, а не работната ѝ част.
+        """
+        обхвати: dict[str, tuple[int, int]] = {}
+        for t in текущи or []:
+            if t.get("is_summary") or not t.get("start_day"):
+                continue
+            водеща = _водеща(t)
+            if водеща not in обявени:
+                continue
+            a, b = int(_num(t.get("start_day"))), int(_num(t.get("end_day")))
+            ако = обхвати.get(водеща)
+            обхвати[водеща] = ((min(ако[0], a), max(ако[1], b)) if ако else (a, b))
+        return обхвати
 
     бележки: list[str] = []
     първи_обхват: dict[str, int] = {}
@@ -721,11 +746,12 @@ def enforce_declared_phase_terms(
 
     for опит in range(max(опити, 1)):
         по_фаза = листа_по_фаза(tasks)
+        обхвати = обхват_по_фаза(tasks)
         ощe_има_работа = False
 
         for фаза, задачи in по_фаза.items():
             цел = обявени[фаза]
-            начало, край = _обхват(задачи)
+            начало, край = обхвати.get(фаза, _обхват(задачи))
             сега = край - начало + 1
             if сега <= 0:
                 continue
@@ -754,8 +780,9 @@ def enforce_declared_phase_terms(
     # Затова, ако някоя итерация е постигнала обхват под тавана, се връщаме
     # към нея; иначе казваме честно, че не се е събрала.
     върнати = False
+    обхвати = обхват_по_фаза(tasks)
     for фаза, задачи in листа_по_фаза(tasks).items():
-        начало, край = _обхват(задачи)
+        начало, край = обхвати.get(фаза, _обхват(задачи))
         if край - начало + 1 <= обявени[фаза]:
             continue
         запомнено = най_добро.get(фаза)
@@ -771,11 +798,12 @@ def enforce_declared_phase_terms(
         tasks = разпиши(tasks) or tasks
 
     крайни = листа_по_фаза(tasks)
+    обхвати = обхват_по_фаза(tasks)
     for фаза, цел in sorted(обявени.items()):
         задачи = крайни.get(фаза) or []
         if not задачи:
             continue
-        начало, край = _обхват(задачи)
+        начало, край = обхвати.get(фаза, _обхват(задачи))
         стана = край - начало + 1
         беше = първи_обхват.get(фаза, стана)
         if abs(беше - цел) <= 1:
@@ -792,3 +820,89 @@ def enforce_declared_phase_terms(
     for бележка in бележки:
         logger.info("%s", бележка)
     return tasks, бележки
+
+
+def verify_declared_terms(
+    tasks: list[dict],
+    packages: Iterable[Any],
+    chains: dict,
+) -> list[str]:
+    """Проверява НАКРАЯ, че нито един обявен срок не е надхвърлен.
+
+    НЕОТМЕНИМО ПРАВИЛО (изпълнителят, 24.08.2026): максималният срок в тръжната
+    документация е максимумът и на нашия график.  Не приблизително, не „почти".
+
+    `enforce_declared_phase_terms` налага срока, но след него по графика
+    минават още стъпки — сливане на непрекъснатите дейности, критичен път,
+    разтягане на обобщаващите — и всяка от тях може да измести с ден.  Мерено:
+    налагането връщаше 654 дни при обявени 660, а изнесеният файл показваше
+    661.  Затова тук се мери ПОСЛЕДНОТО състояние, същото, което човекът вижда.
+
+    Проверява се и СБОРЪТ: щом всяка обявена фаза има таван, графикът не бива
+    да ги надхвърля и заедно.
+
+    Returns:
+        Списък с нарушения — празен, когато всичко се събира.  Извикващият ги
+        слага при блокерите: график над обявения срок е неотговаряща оферта и
+        не бива да излиза мълчаливо.
+    """
+    from src.tender_parameters import declared_phase_days
+
+    обявени = {ф: д for ф, д in (declared_phase_days() or {}).items()
+               if ф not in _БЕЗ_СРОК and д > 0}
+    if not обявени:
+        return []
+
+    управлява: dict[str, str] = {ф: ф for ф in обявени}
+    for водеща, покрити in _ПОКРИТИ_ФАЗИ.items():
+        if водеща in обявени:
+            for фаза in покрити:
+                if фаза not in обявени:
+                    управлява[фаза] = водеща
+
+    chain_defs = (chains or {}).get("chains", chains) or {}
+    фаза_на_пакет: dict[str, str] = {}
+    for pkg in packages or []:
+        pid = _attr(pkg, "id")
+        верига = chain_defs.get(str(_attr(pkg, "chain") or ""), {})
+        if pid and isinstance(верига, dict):
+            фаза_на_пакет[str(pid)] = str(верига.get("wbs_root") or "")
+
+    обхвати: dict[str, tuple[int, int]] = {}
+    for t in tasks or []:
+        if t.get("is_summary") or not t.get("start_day"):
+            continue
+        водеща = управлява.get(фаза_на_пакет.get(str(t.get("parent_id") or "")))
+        if водеща not in обявени:
+            continue
+        a, b = int(_num(t.get("start_day"))), int(_num(t.get("end_day")))
+        ако = обхвати.get(водеща)
+        обхвати[водеща] = ((min(ако[0], a), max(ако[1], b)) if ако else (a, b))
+
+    нарушения: list[str] = []
+    for фаза, цел in sorted(обявени.items()):
+        ако = обхвати.get(фаза)
+        if not ако:
+            continue
+        стана = ако[1] - ако[0] + 1
+        if стана > цел:
+            нарушения.append(
+                f"Фаза {фаза}: {стана} дни при ОБЯВЕН МАКСИМУМ {цел} — "
+                f"{стана - цел} дни над тавана.  Срокът в тръжната документация "
+                "е максимумът и на графика.")
+
+    таван = sum(обявени.values())
+    краища = [int(_num(t.get("end_day"))) for t in tasks or []
+              if t.get("end_day") and not t.get("is_summary")]
+    начала = [int(_num(t.get("start_day"))) for t in tasks or []
+              if t.get("start_day") and not t.get("is_summary")]
+    if краища and начала and len(обявени) > 1:
+        общо = max(краища) - min(начала) + 1
+        if общо > таван:
+            нарушения.append(
+                f"Целият график е {общо} дни при сбор на обявените срокове "
+                f"{таван} — {общо - таван} дни над тавана.")
+
+    for нарушение in нарушения:
+        logger.error("%s", нарушение)
+    return нарушения
