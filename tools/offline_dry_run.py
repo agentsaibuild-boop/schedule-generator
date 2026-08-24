@@ -212,6 +212,19 @@ def main() -> int:
         print(f"няма индексируем КСС в {project}")
         return 2
 
+    # ТОЧКОВИТЕ ПОЗИЦИИ ОТ ЧЕРТЕЖА — преди разпределението, за да получат
+    # участък.  Спецификацията дава метри тръба и мълчи за шахтите, оттоците и
+    # сградните отклонения; където таблица ги дава, важи таблицата.
+    if args.situation:
+        from src.situation_reader import (merge_node_rows,
+                                          nodes_as_quantity_rows,
+                                          read_sewer_nodes)
+        възли = read_sewer_nodes(args.situation)
+        boq_index, бележки_възли = merge_node_rows(
+            boq_index, nodes_as_quantity_rows(възли))
+        for бележка in бележки_възли:
+            print(f"точкови: {бележка}")
+
     allocation = build_perfect_allocation(boq_index, args.packages)
     unroutable = allocation.pop("_unroutable")
     print(f"КСС: {len(boq_index)} реда")

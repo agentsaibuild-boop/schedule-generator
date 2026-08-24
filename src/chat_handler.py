@@ -658,6 +658,29 @@ class ChatHandler:
             logger.debug("Не мога да индексирам количествата: %s", exc)
             return []
 
+    @staticmethod
+    def _with_drawing_counts(boq: list, nodes: list, notes: list[str]) -> list:
+        """Долива преброените от чертежа точкови позиции към количествата.
+
+        ЧЕРТЕЖЪТ ДОПЪЛВА, ТАБЛИЦАТА НАДДЕЛЯВА.  Шахтите, оттоците и сградните
+        отклонения влизат само там, където таблиците мълчат — договорното
+        количество е онова, което възложителят е купил, а не онова, което сме
+        преброили.  Какво е добавено и какво е премълчано се КАЗВА: иначе
+        „преброено, но неизползвано" и „непреброено" изглеждат еднакво отвън.
+        """
+        if not nodes:
+            return boq
+        try:
+            from src.situation_reader import (merge_node_rows,
+                                              nodes_as_quantity_rows)
+            редове, бележки = merge_node_rows(boq, nodes_as_quantity_rows(nodes))
+            notes.extend(бележки)
+            return редове
+        except Exception as exc:      # noqa: BLE001
+            logger.warning("Точковите позиции не се сляха с количествата: %s",
+                           exc)
+            return boq
+
     def _verify_quantities(self, gen_result: dict) -> dict:
         """Свери количествата в графика срещу редовете в КСС (BACKLOG т.3).
 
@@ -1184,87 +1207,8 @@ class ChatHandler:
             }
 
         # Step 1c: Extract locations from situation / site-plan files (ground-truth toponyms)
-        situation_locations: list[str] = []
-        situation_segments: list[dict] = []
-        if self.files and self.ai:
-            classification = self.files.classify_files(ai_processor=self.ai)
-            situation_paths = classification.get("situation_paths", [])
-            if situation_paths:
-                self._progress(0.20, f"Четене на ситуация ({len(situation_paths)} файл/а)...")
-                # ЕДНА МРЕЖА, МНОГО ЛИСТА.  Тръжният пакет дава един и същи
-                # чертеж по няколко пъти: `5_СИТ_ИНВЕСТИЦИИ_R.pdf` и
-                # `Prilojenie_…_SEWERAGE_R.pdf` са БАЙТ ПО БАЙТ еднакви, а
-                # водопроводът идва в три варианта — „нормална работа", „при
-                # пожар" и инвестиционното приложение.  Без отсяване
-                # канализацията се удвоява, а водопроводът се утроява.
-                видени_файлове: set[str] = set()
-                видени_отсечки: set[tuple] = set()
-                for sit_path in situation_paths:
-                    отпечатък = _отпечатък(sit_path)
-                    if отпечатък and отпечатък in видени_файлове:
-                        logger.info("Ситуация %s е същият файл като вече "
-                                    "прочетен — пропуска се.", sit_path)
-                        continue
-                    if отпечатък:
-                        видени_файлове.add(отпечатък)
-                    locs = self.ai.extract_situation_locations(sit_path)
-                    situation_locations.extend(locs)
-                    # Отсечките между възли (РШ/ОТ) са в ЧЕРТЕЖА, не в КСС —
-                    # без тях пакетите не могат да се кръстят като в еталона.
-                    # Пропуск тук не спира генерацията (виж generate_packages).
-                    if os.getenv("SITUATION_SEGMENTS", "1") != "0":
-                        # ПЪРВО ЧЕТЕНЕ, ЧАК ПОСЛЕ ПИТАНЕ.  Тръжните ситуации са
-                        # векторни: етикетите „Кл.48 / DN 700 / L=618.74м" се
-                        # четат с координати, а легендата казва кои линии са на
-                        # ТАЗИ процедура.  Детерминистичният четец не струва
-                        # токени, повтаря се и обяснява всяко отпадане.  Vision
-                        # остава само за чертежи, които той не разбира.
-                        # Кой чертеж е кой не се гадае по името: пробват се и
-                        # двата прочита и се взима този, който е разбрал нещо.
-                        # Канализационният иска ЛЕГЕНДА с цветни пера;
-                        # водопроводният — етикети „PEHD DN…".  Чертеж, който
-                        # не е нито едното, връща празно и минава към vision.
-                        прочетени = []
-                        try:
-                            from src.situation_reader import (
-                                read_sewer_situation, read_water_situation)
-                            from src.tender_parameters import sub_project
-                            подобект = sub_project()
-                            for чети in (
-                                read_sewer_situation,
-                                lambda п: read_water_situation(п, area=подобект),
-                            ):
-                                прочетени = [dict(о._asdict())
-                                             for о in чети(sit_path) if о.in_scope]
-                                if прочетени:
-                                    break
-                        except Exception as exc:      # noqa: BLE001
-                            logger.warning("Четенето на ситуация се провали: %s", exc)
-                        # Същата отсечка от друг лист е същата работа.
-                        нови = []
-                        for о in прочетени:
-                            ключ = (о.get("network"), str(о.get("branch")),
-                                    о.get("dn"),
-                                    round(float(о.get("length_m") or 0), 2))
-                            if ключ in видени_отсечки:
-                                continue
-                            видени_отсечки.add(ключ)
-                            нови.append(о)
-                        if прочетени:
-                            situation_segments.extend(нови)
-                            logger.info("Ситуация %s: %d участъка ПРОЧЕТЕНИ "
-                                        "(без модел), %d нови",
-                                        sit_path, len(прочетени), len(нови))
-                            continue
-                        try:
-                            situation_segments.extend(
-                                self.ai.extract_situation_segments(sit_path))
-                        except Exception as exc:      # noqa: BLE001
-                            logger.warning("Отсечки от ситуация се провалиха: %s", exc)
-                if situation_locations or situation_segments:
-                    logger.info(
-                        "Ситуация: %d места, %d отсечки",
-                        len(situation_locations), len(situation_segments))
+        situation_locations, situation_segments, situation_nodes = \
+            self._read_situation_files()
 
         # Step 2: Generate schedule with verification
         self._progress(0.25, "Генериране на график...")
@@ -1308,7 +1252,8 @@ class ChatHandler:
         # водопровод/канализация/пътна) не се събира в едно AI извикване дори
         # на 8192 токена → отрязан JSON.  Ако количествата обхващат ≥2 листа,
         # генерираме по части и сливаме.  Иначе — обикновеният път.
-        _boq = self._boq_index()
+        _boq = self._with_drawing_counts(self._boq_index(), situation_nodes,
+                                         progress_messages)
         # Броим (документ, лист) — одит v13 #6: два файла с лист „КСС" не бива
         # да се считат за една част (иначе staging не се задейства и голям
         # проект пак се отрязва).
@@ -2626,6 +2571,123 @@ class ChatHandler:
         result.pop("pending_sequence", None)
         return result
 
+    def _read_situation_files(self) -> tuple[list[str], list[dict], list]:
+        """Чертежите, прочетени ВЕДНЪЖ — места, отсечки и точкови позиции.
+
+        ЗАЩО Е ОБЩ МЕТОД (24.08.2026).  Четенето стоеше вътре в `handle_generate`,
+        а той връща управлението на въпросника още преди да стигне дотук: при
+        реален проект генерацията минава през `_continue_generation`, който
+        четеше САМО местата.  Тоест прочетените отсечки и преброените шахти не
+        стигаха до пътя, по който върви истинската работа — виждаха се само в
+        `tools/offline_dry_run.py`.
+
+        Returns:
+            (места, отсечки, точкови позиции) — всяко празно, ако няма чертежи.
+        """
+        situation_locations: list[str] = []
+        situation_segments: list[dict] = []
+        #: Точковите позиции от чертежа — шахти, оттоци, сградни отклонения.
+        #: Спецификацията рядко ги изброява, а чертежът ги показва всичките.
+        situation_nodes: list = []
+        if not (self.files and self.ai):
+            return situation_locations, situation_segments, situation_nodes
+
+        classification = self.files.classify_files(ai_processor=self.ai)
+        situation_paths = classification.get("situation_paths", [])
+        if not situation_paths:
+            return situation_locations, situation_segments, situation_nodes
+
+        self._progress(0.20,
+                       f"Четене на ситуация ({len(situation_paths)} файл/а)...")
+        # ЕДНА МРЕЖА, МНОГО ЛИСТА.  Тръжният пакет дава един и същи
+        # чертеж по няколко пъти: `5_СИТ_ИНВЕСТИЦИИ_R.pdf` и
+        # `Prilojenie_…_SEWERAGE_R.pdf` са БАЙТ ПО БАЙТ еднакви, а
+        # водопроводът идва в три варианта — „нормална работа", „при
+        # пожар" и инвестиционното приложение.  Без отсяване
+        # канализацията се удвоява, а водопроводът се утроява.
+        видени_файлове: set[str] = set()
+        видени_отсечки: set[tuple] = set()
+        for sit_path in situation_paths:
+            отпечатък = _отпечатък(sit_path)
+            if отпечатък and отпечатък in видени_файлове:
+                logger.info("Ситуация %s е същият файл като вече "
+                            "прочетен — пропуска се.", sit_path)
+                continue
+            if отпечатък:
+                видени_файлове.add(отпечатък)
+            locs = self.ai.extract_situation_locations(sit_path)
+            situation_locations.extend(locs)
+            # ТОЧКОВИТЕ ПОЗИЦИИ СЕ БРОЯТ ОТ ЧЕРТЕЖА (изпълнителят,
+            # 24.08.2026).  Спецификацията дава метри тръба и мълчи за
+            # шахтите, оттоците и сградните отклонения; чертежът ги
+            # изписва всичките.  Каквото таблиците дават, си остава
+            # тяхно — сливането по-долу отсява.
+            if os.getenv("SITUATION_NODES", "1") != "0":
+                try:
+                    from src.situation_reader import read_sewer_nodes
+                    situation_nodes.extend(read_sewer_nodes(sit_path))
+                except Exception as exc:      # noqa: BLE001
+                    logger.warning("Точковите позиции от %s не се "
+                                   "прочетоха: %s", sit_path, exc)
+            # Отсечките между възли (РШ/ОТ) са в ЧЕРТЕЖА, не в КСС —
+            # без тях пакетите не могат да се кръстят като в еталона.
+            # Пропуск тук не спира генерацията (виж generate_packages).
+            if os.getenv("SITUATION_SEGMENTS", "1") != "0":
+                # ПЪРВО ЧЕТЕНЕ, ЧАК ПОСЛЕ ПИТАНЕ.  Тръжните ситуации са
+                # векторни: етикетите „Кл.48 / DN 700 / L=618.74м" се
+                # четат с координати, а легендата казва кои линии са на
+                # ТАЗИ процедура.  Детерминистичният четец не струва
+                # токени, повтаря се и обяснява всяко отпадане.  Vision
+                # остава само за чертежи, които той не разбира.
+                # Кой чертеж е кой не се гадае по името: пробват се и
+                # двата прочита и се взима този, който е разбрал нещо.
+                # Канализационният иска ЛЕГЕНДА с цветни пера;
+                # водопроводният — етикети „PEHD DN…".  Чертеж, който
+                # не е нито едното, връща празно и минава към vision.
+                прочетени = []
+                try:
+                    from src.situation_reader import (
+                        read_sewer_situation, read_water_situation)
+                    from src.tender_parameters import sub_project
+                    подобект = sub_project()
+                    for чети in (
+                        read_sewer_situation,
+                        lambda п: read_water_situation(п, area=подобект),
+                    ):
+                        прочетени = [dict(о._asdict())
+                                     for о in чети(sit_path) if о.in_scope]
+                        if прочетени:
+                            break
+                except Exception as exc:      # noqa: BLE001
+                    logger.warning("Четенето на ситуация се провали: %s", exc)
+                # Същата отсечка от друг лист е същата работа.
+                нови = []
+                for о in прочетени:
+                    ключ = (о.get("network"), str(о.get("branch")),
+                            о.get("dn"),
+                            round(float(о.get("length_m") or 0), 2))
+                    if ключ in видени_отсечки:
+                        continue
+                    видени_отсечки.add(ключ)
+                    нови.append(о)
+                if прочетени:
+                    situation_segments.extend(нови)
+                    logger.info("Ситуация %s: %d участъка ПРОЧЕТЕНИ "
+                                "(без модел), %d нови",
+                                sit_path, len(прочетени), len(нови))
+                    continue
+                try:
+                    situation_segments.extend(
+                        self.ai.extract_situation_segments(sit_path))
+                except Exception as exc:      # noqa: BLE001
+                    logger.warning("Отсечки от ситуация се провалиха: %s", exc)
+        if situation_locations or situation_segments:
+            logger.info(
+                "Ситуация: %d места, %d отсечки",
+                len(situation_locations), len(situation_segments))
+
+        return situation_locations, situation_segments, situation_nodes
+
     def _continue_generation(
         self, analysis: dict, sequence_constraints: dict, project_context: dict | None = None,
         num_teams: int = 1, tender: dict | None = None,
@@ -2638,12 +2700,12 @@ class ChatHandler:
         """
         all_text = self.files.get_all_text() if self.files else ""
 
-        # Situation locations
-        situation_locations: list[str] = []
-        if self.files and self.ai:
-            classification = self.files.classify_files(ai_processor=self.ai)
-            for sit_path in classification.get("situation_paths", []):
-                situation_locations.extend(self.ai.extract_situation_locations(sit_path))
+        # ЧЕРТЕЖИТЕ СЕ ЧЕТАТ И ТУК (24.08.2026).  Това е пътят, по който върви
+        # реалният проект — след въпросника.  Дотук той вадеше само МЕСТАТА, а
+        # отсечките и точковите позиции оставаха в другия клон на кода: тоест
+        # прочетеното от чертежа не стигаше до графика, който човекът получава.
+        situation_locations, situation_segments, situation_nodes = \
+            self._read_situation_files()
 
         project_type = self._extract_project_type(analysis, project_context)
 
@@ -2660,7 +2722,8 @@ class ChatHandler:
         # STAGING и в потока след въпросника (проба 2026-07-31): това е пътят
         # за реален проект (след въпроса за екипи).  Ако КСС има ≥2 части,
         # генерираме по части — иначе голям проект пак се отрязва.
-        _boq = self._boq_index()
+        _boq = self._with_drawing_counts(self._boq_index(), situation_nodes,
+                                         progress_messages)
         # Броим (документ, лист) — одит v13 #6: два файла с лист „КСС" не бива
         # да се считат за една част (иначе staging не се задейства и голям
         # проект пак се отрязва).
@@ -2669,7 +2732,8 @@ class ChatHandler:
                    for r in _boq if getattr(r, "quantity", None) is not None}
         _packaged = self._try_package_generation(
             analysis, _boq, num_teams=num_teams,
-            locations=situation_locations or None, progress=_progress,
+            locations=situation_locations or None,
+            segments=situation_segments or None, progress=_progress,
             tender=tender)
 
         if _packaged is not None:
