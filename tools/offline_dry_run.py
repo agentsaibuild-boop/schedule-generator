@@ -69,10 +69,13 @@ def _sheet_of(ref: str) -> str:
 
 
 def _network_of(ref: str) -> str:
-    sheet = _sheet_of(ref).lower()
-    for needle, network in _SHEET_NETWORK:
-        if needle in sheet:
-            return network
+    """Като `execution_batches._network_of`: листът, после ИМЕТО НА ФАЙЛА."""
+    части = str(ref).split("!")
+    документ = части[0].lower() if части else ""
+    for текст in (_sheet_of(ref).lower(), документ):
+        for needle, network in _SHEET_NETWORK:
+            if needle in текст:
+                return network
     return ""
 
 

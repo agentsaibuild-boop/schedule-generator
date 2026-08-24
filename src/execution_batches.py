@@ -80,11 +80,27 @@ def _sheet_of(ref: str) -> str:
     return parts[1] if len(parts) >= 3 else ""
 
 
+def _document_of(ref: str) -> str:
+    parts = str(ref).split("!")
+    return parts[0] if parts else ""
+
+
 def _network_of(ref: str) -> str:
-    sheet = _sheet_of(ref).lower()
-    for needle, network in _SHEET_NETWORK:
-        if needle in sheet:
-            return network
+    """Коя мрежа е редът — по листа, а ако той мълчи, по ИМЕТО НА ФАЙЛА.
+
+    Мрежата не винаги е в името на листа.  Проба 24.08.2026, търг „Община
+    Казанлък": файлът се казва „КСС ВОДОПРОВОД Енина - първи етап.xlsx", а
+    листът вътре — просто „КСС първи етап".  Без този прочит 1311 от 1647
+    реда с количество оставаха без верига и генерацията спираше, преди да
+    излезе график.
+
+    Първо листът, защото при КСС на няколко части той е по-точният: един файл
+    може да носи и водопровод, и канализация на отделни листове.
+    """
+    for текст in (_sheet_of(ref).lower(), _document_of(ref).lower()):
+        for needle, network in _SHEET_NETWORK:
+            if needle in текст:
+                return network
     return ""
 
 

@@ -354,3 +354,40 @@ def test_no_trim_when_the_drawing_matches_the_contract():
     assert not any("не казват кои клонове" in b for b in бележки)
     assert len(_тръбни_пакети(
         allocate_execution_batches(_един_ред_110(), 8, segments=отсечки))) == 3
+
+
+# ---------------------------------------------------------------------------
+# Мрежата не винаги е в името на ЛИСТА
+# ---------------------------------------------------------------------------
+#
+# Проба 24.08.2026, търг „Община Казанлък": файлът се казва „КСС ВОДОПРОВОД
+# Енина - първи етап.xlsx", а листът вътре — просто „КСС първи етап".  Без
+# прочит на името на файла 1311 от 1647 реда с количество оставаха без верига
+# и генерацията спираше, преди да излезе график.
+
+
+def test_network_is_read_from_the_file_name_too():
+    from src.execution_batches import _network_of
+
+    ref = "КСС водопровод Енина - първи етап.xlsx!КСС първи етап!19"
+
+    assert _network_of(ref) == "В"
+
+
+def test_the_sheet_still_wins_over_the_file():
+    """При КСС на няколко листа листът е по-точният източник."""
+    from src.execution_batches import _network_of
+
+    ref = "КСС водопровод и канализация.xlsx!3. Chast Kanalizacia!19"
+
+    assert _network_of(ref) == "К"
+
+
+def test_a_row_named_only_in_the_file_still_gets_packages():
+    редове = [_Ред("КСС водопровод Енина.xlsx!КСС първи етап!19", 500.0,
+                   "Изкоп с багер в земни почви", unit="m3")]
+
+    резултат = allocate_execution_batches(редове, 8)
+
+    assert резултат["packages"], "редът пак остава без верига"
+    assert not резултат["unroutable"]
