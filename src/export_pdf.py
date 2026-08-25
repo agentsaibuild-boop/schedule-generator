@@ -13,7 +13,7 @@ from __future__ import annotations
 import io
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from reportlab.lib import colors
@@ -43,17 +43,29 @@ PAGE_H = PAGE_SIZE[1]  # ~842 pt (297mm)
 # Margins
 TOP_MARGIN = 25 * mm
 BOTTOM_MARGIN = 15 * mm
-LEFT_MARGIN = 115 * mm
+# Таблицата свършва тук, Gantt-ът започва вдясно.  Стойността се ИЗВЕЖДА от
+# ширината на таблицата (виж по-долу), а не се пише на ръка: когато колоните
+# станаха седем, фиксираните 115 mm изкараха първата колона извън листа и
+# всяко име губеше първата си буква.
+LEFT_MARGIN = 0.0  # изчислява се след ширините на колоните
 RIGHT_MARGIN = 10 * mm
 
 # Table column widths
-COL_NUM_W = 6 * mm
-COL_NAME_W = 55 * mm
-COL_DN_W = 10 * mm
-COL_LENGTH_W = 12 * mm
-COL_TEAM_W = 10 * mm
-COL_DAYS_W = 8 * mm
-TABLE_W = COL_NUM_W + COL_NAME_W + COL_DN_W + COL_LENGTH_W + COL_TEAM_W + COL_DAYS_W
+#
+# КОЛОНИТЕ СА КАТО В ЧОВЕШКИЯ ТРЪЖЕН ГРАФИК (25.08.2026).  В процедура датите
+# нямат място: стартът е неизвестен, докато не се подпише договор и Протокол
+# 2а.  Затова човешкото приложение брои ДНИ — „ID · Вид дейност / Участък ·
+# Срок · Начало (ден) · Край (ден) · Ресурси · Строителен продукт".
+COL_NUM_W = 7 * mm          # ID
+COL_NAME_W = 52 * mm        # Вид дейност / Участък
+COL_DAYS_W = 9 * mm         # Срок
+COL_START_W = 11 * mm       # Начало (ден)
+COL_END_W = 11 * mm         # Край (ден)
+COL_RES_W = 18 * mm         # Ресурси
+COL_PROD_W = 17 * mm        # Строителен продукт
+TABLE_W = (COL_NUM_W + COL_NAME_W + COL_DAYS_W + COL_START_W
+           + COL_END_W + COL_RES_W + COL_PROD_W)
+LEFT_MARGIN = 8 * mm + TABLE_W
 
 # Row heights
 ROW_H = 3.8 * mm
@@ -314,8 +326,6 @@ def _render_pdf(
     )
     total_days = max(max_end_day, 1)
 
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt = start_dt + timedelta(days=total_days)
 
     # Calculate rows per page
     # +4mm за реда с разкриването по EU AI Act чл. 50 (виж _draw_title)
@@ -329,8 +339,8 @@ def _render_pdf(
     # Gantt dimensions
     gantt_width = GANTT_RIGHT - GANTT_LEFT
 
-    # Generate months for the time axis
-    months = _generate_months(start_dt, end_dt)
+    # Скалата е В ДНИ, не в календар — тръжен график
+    months = _generate_day_blocks(total_days)
 
     # Create PDF
     buffer = io.BytesIO()
@@ -451,6 +461,9 @@ def _draw_title(
         )
     else:
         duration_text = f"Срок: {total_days} дни"
+    # Тръжен график: няма календар, защото няма подписан договор.  Броенето е
+    # от ден 1 — денят, в който тръгва изпълнението (Протокол 2а).
+    duration_text += "   ·   всички срокове са в ДНИ от ден 1"
     c.setFont(font, FONT_SIZE_SMALL + 1)
     c.drawCentredString(PAGE_W / 2, y, duration_text)
 
@@ -499,17 +512,19 @@ def _draw_table_header(
     text_y = y - HEADER_H + 2.5 * mm
 
     x = x_start + 1 * mm
-    c.drawString(x, text_y, "№")
+    c.drawString(x, text_y, "ID")
     x += COL_NUM_W
-    c.drawString(x, text_y, "Дейност")
+    c.drawString(x, text_y, "Вид дейност / Участък")
     x += COL_NAME_W
-    c.drawString(x, text_y, "DN")
-    x += COL_DN_W
-    c.drawString(x, text_y, "L(м)")
-    x += COL_LENGTH_W
-    c.drawString(x, text_y, "Екип")
-    x += COL_TEAM_W
-    c.drawString(x, text_y, "Дни")
+    c.drawString(x, text_y, "Срок")
+    x += COL_DAYS_W
+    c.drawString(x, text_y, "Начало")
+    x += COL_START_W
+    c.drawString(x, text_y, "Край")
+    x += COL_END_W
+    c.drawString(x, text_y, "Ресурси")
+    x += COL_RES_W
+    c.drawString(x, text_y, "Продукт")
 
 
 def _draw_month_header(
@@ -602,30 +617,41 @@ def _draw_task_row(
         c.drawString(x, text_y, name)
         x += COL_NAME_W
 
-    # DN
-    dn = task.get("diameter", "")
-    if dn:
-        c.drawString(x, text_y, str(dn))
-    x += COL_DN_W
-
-    # Length
-    length = task.get("length_m", "")
-    if length:
-        c.drawString(x, text_y, str(int(length)) if isinstance(length, float) else str(length))
-    x += COL_LENGTH_W
-
-    # Team
-    team = task.get("team", "")
-    if team and team != "\u2014":
-        c.setFont(font if not is_phase else font_bold, FONT_SIZE_SMALL)
-        c.drawString(x, text_y, team)
-    x += COL_TEAM_W
-
-    # Days
+    # Срок (дни)
     duration = task.get("duration", 0)
     if duration > 0:
-        c.setFont(font, FONT_SIZE)
-        c.drawString(x, text_y, str(duration))
+        цяло = int(duration) if float(duration).is_integer() else duration
+        c.drawString(x, text_y, f"{цяло} д")
+    x += COL_DAYS_W
+
+    # Начало и край — В ДНИ ОТ ДЕН 1.  Никакви календарни дати: договорът още
+    # не е подписан и стартът е неизвестен (виж коментара при колоните).
+    start_day = task.get("start_day", 0)
+    end_day = task.get("end_day", start_day + max(duration, 1) - 1)
+    if duration > 0 or start_day:
+        c.drawString(x, text_y, str(int(start_day)))
+        c.drawString(x + COL_START_W, text_y, str(int(end_day)))
+    x += COL_START_W + COL_END_W
+
+    # Ресурси
+    c.setFont(font if not is_phase else font_bold, FONT_SIZE_SMALL)
+    team = task.get("team", "")
+    if team and team != "—":
+        c.drawString(x, text_y, _подрежи(c, team, COL_RES_W - 1 * mm, font, FONT_SIZE_SMALL))
+    x += COL_RES_W
+
+    # Строителен продукт — тръбата, която се влага: DN и дължина
+    dn = task.get("diameter", "")
+    length = task.get("length_m", "")
+    парчета = []
+    if dn:
+        парчета.append(f"DN{dn}" if str(dn).isdigit() else str(dn))
+    if length:
+        парчета.append(f"{int(length)} м" if isinstance(length, float) else f"{length} м")
+    if парчета:
+        c.drawString(x, text_y, _подрежи(c, " · ".join(парчета), COL_PROD_W - 1 * mm,
+                                         font, FONT_SIZE_SMALL))
+    c.setFont(font, FONT_SIZE)
 
     # Table row bottom border
     c.setStrokeColor(HexColor("#E0E0E0"))
@@ -834,6 +860,37 @@ def _draw_legend(
 
     c.setFillColor(colors.black)
     c.drawString(x, y + 0.5 * mm, "Критичен път")
+
+
+def _подрежи(c: canvas.Canvas, текст: str, ширина: float, шрифт: str, размер: float) -> str:
+    """Съкращава текста, за да се побере в колоната (иначе влиза в съседната)."""
+    if c.stringWidth(текст, шрифт, размер) <= ширина:
+        return текст
+    while текст and c.stringWidth(текст + "…", шрифт, размер) > ширина:
+        текст = текст[:-1]
+    return текст + "…"
+
+
+def _generate_day_blocks(total_days: int, стъпка: int = 30) -> list[dict]:
+    """Дели срока на блокове по 30 дни — оста брои ДНИ, не календарни месеци.
+
+    Тръжният график не може да носи дати: началото е Протокол 2а, който още го
+    няма.  Човешките графици, с които се сравняваме, също броят дни.
+    """
+    блокове = []
+    ден = 1
+    n = 1
+    while ден <= max(total_days, 1):
+        край = min(ден + стъпка - 1, total_days)
+        блокове.append({
+            "start_day": ден,
+            "end_day": край,
+            "label": f"дни {ден}–{край}",
+            "short_label": str(край),
+        })
+        ден = край + 1
+        n += 1
+    return блокове
 
 
 def _generate_months(start_dt: datetime, end_dt: datetime) -> list[dict]:

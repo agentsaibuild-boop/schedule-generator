@@ -160,6 +160,9 @@ def main() -> int:
                         help="участъци на верига")
     parser.add_argument("--teams", type=int, default=2)
     parser.add_argument("--xml", default="", help="запиши MSPDI тук")
+    parser.add_argument("--pdf", default="", help="запиши линеен график (PDF) тук")
+    parser.add_argument("--name", default="Офлайн проба",
+                        help="име на обекта — влиза в изнесените файлове")
     parser.add_argument("--situation", default="",
                         help="ситуационен чертеж: участъците идват от него, "
                              "вместо да се делят на равни етапи")
@@ -277,12 +280,21 @@ def main() -> int:
     if args.xml:
         from src.export_xml import export_to_mspdi_xml
         target = Path(args.xml)
-        payload = export_to_mspdi_xml(tasks, "Офлайн проба",
+        payload = export_to_mspdi_xml(tasks, args.name,
                                       filename=str(target))
         if not payload:
             print("\nXML: експортът не върна нищо")
             return 1
         print(f"\nXML: {target} ({len(payload)} байта)")
+
+    if args.pdf:
+        from src.export_pdf import export_to_pdf
+        цел = Path(args.pdf)
+        данни = export_to_pdf(tasks, args.name, filename=str(цел))
+        if not данни:
+            print("\nPDF: експортът не върна нищо")
+            return 1
+        print(f"\nPDF: {цел} ({len(данни)} байта)")
 
     if args.bundle:
         # ЦЕЛИЯТ КОМПЛЕКТ ОТ ЕДНА ВЕРСИЯ (одит 18.08.2026, P0.4).

@@ -64,11 +64,17 @@ def test_the_design_chain_declares_its_links():
     assert all(s.get("relation") in {"FS", "SS"} for s in linked)
 
 
+#: Осем застъпвания са ИЗВЛЕЧЕНИ от еталона.  Деветото е ВОД, добавена на
+#: 25.08.2026 като САМОСТОЯТЕЛНА част (тръжните спецификации я искат отделно
+#: от „Пътна“) — тя върви успоредно с пътната част, затова също е SS.
+ЗАСТЪПВАНИЯ = 9
+
+
 def test_the_chain_keeps_the_overlaps_from_the_reference():
     steps = load_chains()["chains"]["design"]["steps"]
     overlapping = [s for s in steps if s.get("relation") == "SS"]
 
-    assert len(overlapping) == 8
+    assert len(overlapping) == ЗАСТЪПВАНИЯ
 
 
 def test_the_declared_predecessors_exist():
@@ -96,7 +102,7 @@ def test_the_lag_is_carried_where_the_reference_has_one():
 def test_the_overlaps_reach_the_generated_tasks():
     links = [d for t in _design_tasks() for d in (t.get("dependencies") or [])]
 
-    assert sum(1 for d in links if d.get("type") == "SS") == 8
+    assert sum(1 for d in links if d.get("type") == "SS") == ЗАСТЪПВАНИЯ
 
 
 def test_a_step_is_linked_to_its_declared_predecessor():

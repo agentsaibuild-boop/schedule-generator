@@ -648,8 +648,11 @@ class AIProcessor:
                                       number_execution_batches,
                                       merge_restoration_zones,
                                       chain_sections_sequentially,
+                                      close_design_after_all_parts,
                                       normalize_over_allocation,
+                                      order_chronologically,
                                       order_sewer_by_flow, packages_from_ai,
+                                      scale_design_parts_to_networks,
                                       partition_diagnosis,
                                       reroute_uncoverable_items)
 
@@ -1159,6 +1162,19 @@ class AIProcessor:
         tasks = link_cross_discipline(
             expansion.tasks, packages, chains,
             spatial_authoritative=spatial_authoritative)
+        # ПРОЕКТНАТА ЧАСТ СЛЕДВА РАЗМЕРА НА СВОЯТА МРЕЖА (изпълнителят,
+        # 25.08.2026).  Веригата идва от обект със съизмерими мрежи и дава
+        # равни дни на „Водоснабдяване" и „Канализация"; при 11 664 срещу
+        # 4 183 метра това е просто невярно.  Сборът се запазва.
+        tasks, design_notes = scale_design_parts_to_networks(
+            tasks, packages, chains)
+        for note in design_notes:
+            _prog(note)
+
+        tasks, close_notes = close_design_after_all_parts(tasks, packages, chains)
+        for note in close_notes:
+            _prog(note)
+
         tasks, phase_notes = link_contract_phases(tasks, packages, chains)
 
         # ПОСЛЕДОВАТЕЛНА РАБОТА (изпълнителят, 24.08.2026).  Отговорът на
@@ -1342,6 +1358,12 @@ class AIProcessor:
         # Обобщаващите се разтеглят по децата си — иначе Gantt-ът и таблицата
         # показват друго от MS Project (одит 2026-08-07: 26 от 26 грешни).
         tasks = builder.roll_up_summaries(tasks)["schedule"]
+
+        # ФАЗИТЕ ИЗЛИЗАТ ПО РЕДА, В КОЙТО СЕ СЛУЧВАТ.  Договорните фази се
+        # дописват накрая на списъка, а MS Project чете файла отгоре надолу:
+        # проектирането (ден 1–45) лягаше ПОД строителството и клиентът каза
+        # „не го виждам в графика" (Тръстеник, 25.08.2026).
+        tasks = order_chronologically(tasks)
 
         blockers = conservation_messages(conservation)
 
