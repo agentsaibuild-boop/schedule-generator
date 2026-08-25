@@ -568,6 +568,16 @@ def _template_complete(packages, chains, tasks) -> bool:
             обединени[str(task["chain"])] |= {
                 str(s) for s in (task.get("merged_steps") or []) if s}
 
+    # ЕДНОКРАТНИТЕ СТЪПКИ също не стоят под всеки пакет (25.08.2026): при
+    # обявено единично трасе изпитването, дезинфекцията и присъединяването са
+    # ЕДНА задача за целия водопровод (`single_route`).  Изваждат се по същото
+    # правило като обединените — само когато свитата задача наистина е в
+    # графика, иначе гейтът пази старото си искане.
+    за_цялото_трасе: dict[str, set[str]] = defaultdict(set)
+    for task in tasks:
+        if task.get("route_wide") and task.get("chain") and task.get("chain_step"):
+            за_цялото_трасе[str(task["chain"])].add(str(task["chain_step"]))
+
     checked = 0
     for package in packages:
         key = getattr(package, "chain", "")
@@ -583,6 +593,7 @@ def _template_complete(packages, chains, tasks) -> bool:
 
         expected = {str(s.get("key")) for s in effective_chain_steps(package, chain)}
         expected -= обединени.get(key, set())
+        expected -= за_цялото_трасе.get(key, set())
         if not expected:
             continue
         checked += 1

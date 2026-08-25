@@ -62,6 +62,17 @@ def _mock_continue(h: ChatHandler) -> MagicMock:
 # Q1 — water or sewer first?
 # ===========================================================================
 
+def _след_метода_и_трасето(h, след_q1: dict) -> dict:
+    """Отговаря на метода на полагане И на въпроса за единичното трасе.
+
+    От 25.08.2026 между двата стои нов въпрос: едно непрекъснато трасе ли е
+    обектът, или разпределителна мрежа.  Тук се отговаря „М" (мрежа) —
+    поведението, което тези тестове мерят открай време.
+    """
+    след_метода = h._handle_sequence_answer("И", след_q1)["pending_sequence"]
+    return h._handle_sequence_answer("М", след_метода)["pending_sequence"]
+
+
 class TestQ1NoSections:
     """Q1 без именувани участъци — води към въпроса за полагането.
 
@@ -82,7 +93,7 @@ class TestQ1NoSections:
         mock = _mock_continue(h)
         state = _base_state("q1", sections=[])
         след_q1 = h._handle_sequence_answer("В", state)["pending_sequence"]
-        след_метода = h._handle_sequence_answer("И", след_q1)["pending_sequence"]
+        след_метода = _след_метода_и_трасето(h, след_q1)
         result = h._handle_sequence_answer("660", след_метода)
         mock.assert_called_once()
         assert result["schedule_updated"] is True
@@ -92,7 +103,7 @@ class TestQ1NoSections:
         mock = _mock_continue(h)
         state = _base_state("q1", sections=[])
         след_q1 = h._handle_sequence_answer("К", state)["pending_sequence"]
-        след_метода = h._handle_sequence_answer("И", след_q1)["pending_sequence"]
+        след_метода = _след_метода_и_трасето(h, след_q1)
         h._handle_sequence_answer("660", след_метода)
         mock.assert_called_once()
         _, kwargs_constraints, *_ = mock.call_args[0]
@@ -103,7 +114,7 @@ class TestQ1NoSections:
         mock = _mock_continue(h)
         state = _base_state("q1", sections=[])
         след_q1 = h._handle_sequence_answer("Водопровод", state)["pending_sequence"]
-        след_метода = h._handle_sequence_answer("И", след_q1)["pending_sequence"]
+        след_метода = _след_метода_и_трасето(h, след_q1)
         h._handle_sequence_answer("660", след_метода)
         _, constraints, *_ = mock.call_args[0]
         assert constraints["default"] == "water_first"
@@ -135,7 +146,7 @@ class TestQ1WithSections:
     def _след_полагането(self, h, sections, отговор="В"):
         state = _base_state("q1", sections=sections)
         след_q1 = h._handle_sequence_answer(отговор, state)["pending_sequence"]
-        след_метода = h._handle_sequence_answer("И", след_q1)["pending_sequence"]
+        след_метода = _след_метода_и_трасето(h, след_q1)
         return h._handle_sequence_answer("660", след_метода)
 
     def test_q1_water_with_sections_goes_to_q2(self):
@@ -514,7 +525,7 @@ class TestFullQuestionnaireWalk:
         return result, mock
 
     def test_water_first_all_sections_one_team(self):
-        result, mock = self._walk(["В", "И", "660", "ДА", "1"], ["Участък 1", "Участък 2"])
+        result, mock = self._walk(["В", "И", "М", "660", "ДА", "1"], ["Участък 1", "Участък 2"])
         mock.assert_called_once()
         _, constraints, *_ = mock.call_args[0]
         assert constraints == {"default": "water_first"}
@@ -523,7 +534,7 @@ class TestFullQuestionnaireWalk:
 
     def test_sewer_first_with_exception_two_parallel_teams(self):
         result, mock = self._walk(
-            ["К", "С", "660", "НЕ", "2", "2", "ДА"],
+            ["К", "С", "М", "660", "НЕ", "2", "2", "ДА"],
             ["Участък 1", "Участък 2", "Участък 3"]
         )
         mock.assert_called_once()
@@ -535,13 +546,13 @@ class TestFullQuestionnaireWalk:
 
     def test_exception_label_reaches_the_final_summary(self):
         result, _ = self._walk(
-            ["В", "И", "660", "НЕ", "1, 3", "1"],
+            ["В", "И", "М", "660", "НЕ", "1, 3", "1"],
             ["Участък 1", "Участък 2", "Участък 3"]
         )
         assert "Участък 1, Участък 3" in result["response"]
 
     def test_no_sections_skips_straight_to_generation(self):
-        result, mock = self._walk(["В", "И", "660"], [])
+        result, mock = self._walk(["В", "И", "М", "660"], [])
         mock.assert_called_once()
         assert result["schedule_updated"] is True
 
@@ -553,11 +564,11 @@ class TestFullQuestionnaireWalk:
         детерминистичния път нямаше никакъв ефект, а методът на полагане
         изобщо не се питаше.
         """
-        _, mock = self._walk(["К", "С", "660", "ДА", "3", "ДА"], ["А", "Б"])
+        _, mock = self._walk(["К", "С", "М", "660", "ДА", "3", "ДА"], ["А", "Б"])
         tender = mock.call_args.kwargs["tender"]
         assert tender == {"network_order": "К", "laying_method": "hdd",
-                          "contract_days": 660, "declared_teams": 3,
-                          "parallel_teams": True}
+                          "single_route": "", "contract_days": 660,
+                          "declared_teams": 3, "parallel_teams": True}
 
     def test_parallel_answer_reaches_the_generator(self):
         """„Паралелно ли работят" РЕШАВА темпото, не само описанието.
@@ -566,19 +577,19 @@ class TestFullQuestionnaireWalk:
         паралелно значи метри ÷ дни ÷ екипи, последователно — метри ÷ дни.
         Дотук отговорът стигаше само до обобщението на екрана.
         """
-        _, mock = self._walk(["К", "С", "660", "ДА", "3", "НЕ"], ["А", "Б"])
+        _, mock = self._walk(["К", "С", "М", "660", "ДА", "3", "НЕ"], ["А", "Б"])
         assert mock.call_args.kwargs["tender"]["parallel_teams"] is False
 
     def test_edin_ekip_e_posledovatelen(self):
-        _, mock = self._walk(["К", "С", "660", "ДА", "1"], ["А", "Б"])
+        _, mock = self._walk(["К", "С", "М", "660", "ДА", "1"], ["А", "Б"])
         assert mock.call_args.kwargs["tender"]["parallel_teams"] is False
 
     def test_open_cut_reaches_the_generator(self):
-        _, mock = self._walk(["В", "И", "660"], [])
+        _, mock = self._walk(["В", "И", "М", "660"], [])
         assert mock.call_args.kwargs["tender"]["laying_method"] == "open"
 
     def test_laying_answer_is_shown_back(self):
-        result, _ = self._walk(["В", "С", "660"], [])
+        result, _ = self._walk(["В", "С", "М", "660"], [])
         assert "сондаж" in result["response"]
 
     def test_unrecognised_laying_answer_asks_again(self):
@@ -637,7 +648,8 @@ class TestContractDeadlineQuestion:
     def _до_срока(self, h, sections=None):
         state = _base_state("q1", sections=sections or [])
         след_q1 = h._handle_sequence_answer("В", state)["pending_sequence"]
-        return h._handle_sequence_answer("И", след_q1)
+        след_метода = h._handle_sequence_answer("И", след_q1)["pending_sequence"]
+        return h._handle_sequence_answer("М", след_метода)
 
     def test_the_deadline_is_asked_right_after_the_method(self):
         h = _handler()

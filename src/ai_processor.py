@@ -1160,6 +1160,24 @@ class AIProcessor:
         packages = number_execution_batches(packages)
 
         expansion = expand_packages(packages, chains)
+
+        # ЕДНОКРАТНАТА РАБОТА СЕ ПРАВИ ВЕДНЪЖ, когато обектът е ЕДНО ТРАСЕ
+        # (човешкият график на тласкателя, ВиК Русе).  Изпитването,
+        # дезинфекцията и присъединяването на един непрекъснат водопровод са по
+        # една задача за целия обект, а ние ги повтаряхме на всеки от осемте
+        # етапа.  Само при ОБЯВЕНО единично трасе — при разпределителна мрежа
+        # всеки клон се изпитва сам, както е в еталона за Илиянци.
+        #
+        # ПРЕДИ кръстосаните връзки и продължителностите: свиването мени
+        # зависимости и брой задачи, а анкерът на метър раздава дните по
+        # ОСТАВАЩИТЕ задачи — така единствената останала получава целия анкер.
+        from src.single_route import collapse_route_wide_steps
+
+        expansion.tasks, route_notes = collapse_route_wide_steps(
+            expansion.tasks, packages, chains)
+        for note in route_notes:
+            _prog(note)
+
         tasks = link_cross_discipline(
             expansion.tasks, packages, chains,
             spatial_authoritative=spatial_authoritative)
