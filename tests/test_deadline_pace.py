@@ -208,13 +208,35 @@ class TestПоследователнатаРаботаМениГрафика:
         assert not втори["P2_excavation"]["dependencies"], (
             "вързана е грешна стъпка — редицата е между участъци, не вътре")
 
-    def test_paralelno_ne_vrazva_nishto(self, monkeypatch):
+    def test_i_pri_paralelno_edin_front_e_v_redica(self, monkeypatch):
+        """Един екип не кара два участъка наведнъж — това е ФИЗИКА.
+
+        Първата версия връзваше участъците само при „не паралелно" и смесваше
+        две различни неща: колко екипа работят едновременно, и дали ЕДИН екип
+        може да е на две места.  Мерено на Тръстеник: при „паралелно" с два
+        екипа участъците се разтягаха на 123–149 дни с празнини по две седмици.
+        """
+        from src.work_package import chain_sections_sequentially
+
+        monkeypatch.setenv("TEAMS_PARALLEL", "1")
+        задачи, пакети = self._обект()      # двата пакета са на ЕДИН фронт
+
+        задачи, бележки = chain_sections_sequentially(задачи, пакети, self.ВЕРИГИ)
+
+        връзки = [d["predecessor_id"]
+                  for t in задачи if t["id"] == "P2_survey"
+                  for d in t["dependencies"]]
+        assert "P1_laying" in връзки, връзки
+
+    def test_razni_frontove_ne_se_vrazvat(self, monkeypatch):
+        """Два екипа = две редици, които вървят едновременно."""
         from src.work_package import chain_sections_sequentially
 
         monkeypatch.setenv("TEAMS_PARALLEL", "1")
         задачи, пакети = self._обект()
+        пакети[1].front = "Екип В2"          # вторият участък е на друг екип
 
-        задачи, бележки = chain_sections_sequentially(задачи, пакети, self.ВЕРИГИ)
+        задачи, _ = chain_sections_sequentially(задачи, пакети, self.ВЕРИГИ)
 
-        assert not бележки
-        assert all(not t["dependencies"] for t in задачи)
+        assert all(not t["dependencies"] for t in задачи), (
+            "участъци на РАЗЛИЧНИ екипи не бива да се чакат")

@@ -245,13 +245,22 @@ def declared_crews_for(изчислени: dict[str, int] | int) -> dict[str, in
     Args:
         изчислени: каквото дозирането е решило — за да се знаят кои вериги има.
     """
-    from src.tender_parameters import declared
+    from src.tender_parameters import declared, declared_crews
 
     параметри = declared()
     поименно = параметри.get("crews")
     if isinstance(поименно, dict) and поименно:
         return {str(к): int(n) for к, n in поименно.items()
                 if str(n).isdigit() and int(n) > 0} or None
+
+    # И ОТ СРЕДАТА (25.08.2026).  `CREWS=water_section:2,sewer_section:2` се
+    # четеше от `tender_parameters.declared_crews`, но НИКОЙ не го питаше —
+    # тук се гледаха само отговорите от въпросника.  Мерено на реален търг
+    # (Тръстеник): човекът обяви 2+2 екипа, а сметката сложи 6 и 3 и темпото
+    # излезе три пъти по-бавно от обявеното.
+    от_средата = declared_crews()
+    if от_средата:
+        return от_средата
 
     брой = параметри.get("declared_teams")
     try:
