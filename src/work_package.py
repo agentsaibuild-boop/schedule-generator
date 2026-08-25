@@ -2897,3 +2897,102 @@ def _dep_id(dep: Any) -> str:
     if isinstance(dep, dict):
         return str(dep.get("predecessor_id") or dep.get("id") or "").strip()
     return str(dep or "").strip().split()[0] if dep else ""
+
+
+#: Вериги, чиито участъци се нареждат в редица при последователна работа.
+#: Настилките, кабелите и съоръженията имат своя логика.
+_ЛИНЕЙНИ_ЗА_РЕДИЦА = frozenset({"sewer_section", "water_section",
+                                "water_section_hdd"})
+
+
+def chain_sections_sequentially(
+    tasks: list[dict],
+    packages: Sequence[SpatialWorkPackage],
+    chains: dict[str, Any] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Когато екипите НЕ работят паралелно, участъкът чака предишния.
+
+    ВТОРИЯТ ВЪПРОС ТРЯБВА ДА МЕНИ ГРАФИКА, НЕ САМО СМЕТКАТА (24.08.2026).
+    Отговорът „паралелно ли ще работят екипите" влизаше само в изчислението на
+    темпото (`deadline_pace`), а подредбата оставаше поточна линия: осемте
+    етапа тръгваха заедно, всяка операция чакаше реда си на бригадата и
+    участък от 40 дни работа се влачеше 140 дни с паузи по две седмици.
+
+    Човешкият график за същата поръчка прави обратното: три участъка по 420 м,
+    СТРОГО един след друг (92→122, 123→153, 154→183), всеки непрекъснат, с
+    едни и същи ресурси.  Това е моделът на един екип по едно трасе.
+
+    Затова тук първата стъпка на всеки следващ участък се закача за последната
+    на предишния (FS, лаг 0).  Вътре във фронта: при няколко екипа всеки си
+    има своя редица, а тя е тази, която `assign_fronts` вече е направила.
+
+    Пипа само линейните вериги.  Настилките, кабелите и съоръженията си имат
+    своя логика и не се нареждат в редица зад тръбите.
+
+    Returns:
+        (задачи, бележки) — непроменени, когато екипите работят паралелно.
+    """
+    from src.tender_parameters import teams_work_in_parallel
+
+    # ПРАВИЛОТО Е В САМАТА ФУНКЦИЯ, не само при извикващия: „свържи
+    # участъците в редица" не бива да значи различно според това кой я вика.
+    if teams_work_in_parallel():
+        return tasks, []
+
+    от_пакет: dict[str, list[dict]] = {}
+    for t in tasks or []:
+        if t.get("chain_step") and not t.get("is_summary"):
+            от_пакет.setdefault(str(t.get("parent_id") or ""), []).append(t)
+
+    редици: dict[tuple[str, str], list[str]] = {}
+    for pkg in packages or []:
+        if pkg.chain not in _ЛИНЕЙНИ_ЗА_РЕДИЦА:
+            continue
+        if str(pkg.id) in от_пакет:
+            редици.setdefault((pkg.chain, str(pkg.front or "")), []).append(str(pkg.id))
+
+    # РЕДЪТ Е НА ВЕРИГАТА, НЕ НА ДАТИТЕ.  Тук дати още няма — разписването е
+    # по-надолу — и подреждането по `start_day` връзваше произволни стъпки:
+    # участъците пак тръгваха заедно.  Стъпките си имат обявен ред в
+    # `tech_chains`, и той е верният.
+    chain_defs = (chains or {}).get("chains", chains) or {}
+
+    def _ред_на_стъпките(верига: str) -> dict[str, int]:
+        стъпки = (chain_defs.get(верига) or {}).get("steps") or []
+        return {str(с.get("key")): i for i, с in enumerate(стъпки)}
+
+    by_id = {str(t.get("id")): t for t in tasks or []}
+    вързани = 0
+    for (верига, фронт), pids in sorted(редици.items()):
+        if len(pids) < 2:
+            continue
+        ред = _ред_на_стъпките(верига)
+
+        def _по_веригата(t: dict) -> tuple[int, str]:
+            return (ред.get(str(t.get("chain_step") or ""), 10 ** 6),
+                    str(t.get("id")))
+
+        for предишен, следващ in zip(pids, pids[1:]):
+            край = max(от_пакет[предишен], key=_по_веригата)
+            начало = min(от_пакет[следващ], key=_по_веригата)
+            задача = by_id.get(str(начало.get("id")))
+            if задача is None:
+                continue
+            deps = list(задача.get("dependencies") or [])
+            if any(_dep_id(d) == str(край.get("id")) for d in deps):
+                continue
+            deps.append({"predecessor_id": str(край.get("id")), "type": "FS",
+                         "lag_days": 0,
+                         "reason": "последователна работа: участъкът чака "
+                                   "предишния (екипите не работят паралелно)"})
+            задача["dependencies"] = deps
+            вързани += 1
+
+    бележки = []
+    if вързани:
+        бележки.append(
+            f"Последователна работа: {вързани} участъка чакат предишния — "
+            "екипите не работят паралелно, затова трасето се прави едно по "
+            "едно, както в човешкия график.")
+        logger.info("%s", бележки[0])
+    return tasks, бележки

@@ -647,6 +647,7 @@ class AIProcessor:
                                       link_contract_phases,
                                       number_execution_batches,
                                       merge_restoration_zones,
+                                      chain_sections_sequentially,
                                       normalize_over_allocation,
                                       order_sewer_by_flow, packages_from_ai,
                                       partition_diagnosis,
@@ -1145,6 +1146,13 @@ class AIProcessor:
             expansion.tasks, packages, chains,
             spatial_authoritative=spatial_authoritative)
         tasks, phase_notes = link_contract_phases(tasks, packages, chains)
+
+        # ПОСЛЕДОВАТЕЛНА РАБОТА (изпълнителят, 24.08.2026).  Отговорът на
+        # въпрос 4 мени и ПОДРЕДБАТА, не само сметката за темпото: при „не"
+        # участъкът чака предишния, както в човешкия график.
+        tasks, seq_notes = chain_sections_sequentially(tasks, packages, chains)
+        for note in seq_notes:
+            _prog(note)
         for note in phase_notes:
             _prog(note)
 

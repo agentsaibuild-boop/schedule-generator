@@ -155,3 +155,66 @@ class TestТемпотоРешаваПродължителностите:
 
         assert задачи[0]["computed_duration"] == 12.0
         assert задачи[0]["declared_pace"] == 3.52
+
+
+class TestПоследователнатаРаботаМениГрафика:
+    """Вторият въпрос мени ПОДРЕДБАТА, не само сметката за темпото."""
+
+    ВЕРИГИ = {"chains": {"water_section": {"wbs_root": "construction", "steps": [
+        {"key": "survey"}, {"key": "excavation"}, {"key": "laying"}]}}}
+
+    def _обект(self):
+        задачи, пакети = [], []
+        for i in (1, 2):
+            pid = f"P{i}"
+            for стъпка in ("survey", "excavation", "laying"):
+                задачи.append({"id": f"{pid}_{стъпка}", "parent_id": pid,
+                               "chain_step": стъпка, "duration": 3,
+                               "dependencies": []})
+            пакети.append(Пакет(pid, "water_section", 500.0))
+            пакети[-1].front = "Екип В1"
+        return задачи, пакети
+
+    def test_vtoriyat_uchastak_chaka_parviya(self, monkeypatch):
+        from src.work_package import chain_sections_sequentially
+
+        monkeypatch.setenv("TEAMS_PARALLEL", "0")
+        задачи, пакети = self._обект()
+
+        задачи, бележки = chain_sections_sequentially(задачи, пакети, self.ВЕРИГИ)
+
+        първата_на_втория = [t for t in задачи
+                             if t["id"] == "P2_survey"][0]
+        връзки = [d["predecessor_id"] for d in първата_на_втория["dependencies"]]
+        assert "P1_laying" in връзки, (
+            "вторият участък не чака ПОСЛЕДНАТА стъпка на първия — "
+            f"{връзки}")
+        assert any("Последователна" in б for б in бележки), бележки
+
+    def test_redat_e_na_verigata_a_ne_na_datite(self, monkeypatch):
+        # Дати още няма, когато правилото се прилага.  Подреждането по
+        # `start_day` връзваше произволни стъпки и участъците пак тръгваха
+        # заедно — мерено на Русе.
+        from src.work_package import chain_sections_sequentially
+
+        monkeypatch.setenv("TEAMS_PARALLEL", "0")
+        задачи, пакети = self._обект()
+        for t in задачи:
+            t.pop("start_day", None)
+
+        задачи, _ = chain_sections_sequentially(задачи, пакети, self.ВЕРИГИ)
+
+        втори = {t["id"]: t for t in задачи if t["parent_id"] == "P2"}
+        assert not втори["P2_excavation"]["dependencies"], (
+            "вързана е грешна стъпка — редицата е между участъци, не вътре")
+
+    def test_paralelno_ne_vrazva_nishto(self, monkeypatch):
+        from src.work_package import chain_sections_sequentially
+
+        monkeypatch.setenv("TEAMS_PARALLEL", "1")
+        задачи, пакети = self._обект()
+
+        задачи, бележки = chain_sections_sequentially(задачи, пакети, self.ВЕРИГИ)
+
+        assert not бележки
+        assert all(not t["dependencies"] for t in задачи)
