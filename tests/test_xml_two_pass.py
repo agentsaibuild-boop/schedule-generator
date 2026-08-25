@@ -156,7 +156,7 @@ def test_empty_id_does_not_break_export():
 
 def test_duration_format_still_days():
     """Урок #19 — two-pass не бива да пипне това."""
-    assert "<DurationFormat>5</DurationFormat>" in _xml([_task("A")])
+    assert "<DurationFormat>7</DurationFormat>" in _xml([_task("A")])
 
 
 def test_empty_schedule_returns_none_not_a_broken_file():

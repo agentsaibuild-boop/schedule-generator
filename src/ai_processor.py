@@ -799,7 +799,15 @@ class AIProcessor:
 
         from src.spatial_source import (SpatialSource, describe,
                                         is_authoritative)
-        spatial_source = (SpatialSource.PDF_SUGGESTIONS_ONLY if segments
+        # ОТСЕЧКАТА КАЗВА ОТКЪДЕ Е.  Прочетеното от PDF с око остава
+        # „подсказка"; отсечка от СТРУКТУРИРАН източник (таблица с клон, възли,
+        # улица, дължина и диаметър — например готов график на изпълнителя) е
+        # геометрия и възлите ѝ могат да излязат в нашия график.
+        структурирани = bool(segments) and all(
+            str(s.get("spatial_source") or "") == SpatialSource.STRUCTURED_SEGMENTS.value
+            for s in segments)
+        spatial_source = (SpatialSource.STRUCTURED_SEGMENTS if структурирани
+                          else SpatialSource.PDF_SUGGESTIONS_ONLY if segments
                           else SpatialSource.NONE)
         spatial_authoritative = is_authoritative(spatial_source)
 
@@ -814,9 +822,18 @@ class AIProcessor:
         # класификацията кодът я прави сам (28 от 28).  Тоест искахме от
         # модела да СЪЧИНИ данни, които ги няма във входа.
         #
+        # И ОБРАТНОТО: КОГАТО ГЕОМЕТРИЯТА Е СТРУКТУРИРАНА, РАЗДЕЛЯНЕТО ВЕЧЕ Е
+        # НАПРАВЕНО.  Клон с име, възли, улица, дължина и диаметър Е участък —
+        # питането на модела може само да го развали.  Дотук авторитетната
+        # геометрия пращаше пътя ПРИ модела и 107-те клона на Тръстеник се
+        # свиваха обратно до осем етапа.
+        партицията_е_дадена = (
+            bool(segments)
+            and spatial_source == SpatialSource.STRUCTURED_SEGMENTS)
+
         # Изключва се с DETERMINISTIC_BATCHES=0 — тогава се пита пак моделът.
         детерминистично = (
-            not spatial_authoritative
+            (not spatial_authoritative or партицията_е_дадена)
             and os.getenv("DETERMINISTIC_BATCHES", "1") not in ("0", "false", "")
         )
         if детерминистично:

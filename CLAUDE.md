@@ -149,7 +149,9 @@ src/
   Върхът в еталона е ДОЛНА граница за наличния парк — истинските бройки идват
   от изпълнителя. `supervisory` роли не участват в твърдото изравняване, и
   проверката за претоварване брои по СЪЩОТО правило (`_is_leveling_resource`).
-- XML експорт ЗАДЪЛЖИТЕЛНО с DurationFormat=5. Режим 'milestones' (по
+- XML експорт ЗАДЪЛЖИТЕЛНО с DurationFormat=**7** (ДНИ).  В MSPDI 5 е
+  ЧАСОВЕ — дотук стоеше то и MS Project показваше „48 hrs" вместо „6 дни".
+  Числото е проверено в собствения експорт на MS Project. Режим 'milestones' (по
   подразбиране) дава Manual=0 + ConstraintType=0 и constraint само по договорни
   milestone-и (Deadline + FNLT); 'pinned' → ConstraintType=2 (старото поведение);
   'flexible' → ConstraintType=0 без изключения

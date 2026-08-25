@@ -106,11 +106,11 @@ def test_repaired_schedule_exports_to_mspdi_xml():
     tasks = root.findall(".//m:Task", _NS)
     assert len([t for t in tasks if t.find("m:Name", _NS) is not None]) >= 3
 
-    # Договорът с MS Project: дните са дни (DurationFormat=5).
+    # Договорът с MS Project: дните са ДНИ (DurationFormat=7; 5 е часове).
     for task in tasks:
         fmt = task.find("m:DurationFormat", _NS)
         if fmt is not None:
-            assert fmt.text == "5"
+            assert fmt.text == "7"
 
     # Режим 'milestones' (по подразбиране от 2026-08-06): работните задачи са
     # auto-scheduled, за да може MS Project реално да планира по зависимостите.

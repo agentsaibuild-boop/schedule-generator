@@ -174,10 +174,17 @@ def main() -> int:
                         help="водопроводна ситуация (етикети PEHD)")
     parser.add_argument("--water-area", default="",
                         help="подобект на водопровода: И / Р / ПЗ")
+    parser.add_argument("--segments", default="",
+                        help="готови отсечки (JSON) — участъците идват от тях, "
+                             "вместо да се делят на равни етапи; така ги вади "
+                             "`tools/read_mpp.py --segments`")
     parser.add_argument("--bundle", default="",
                         help="папка за ЦЕЛИЯ комплект от една версия: график, "
                              "опис, диагностика, сравнение на календарите и "
                              "audit_manifest.json")
+    parser.add_argument("--constraints", default="milestones",
+                        choices=("milestones", "pinned", "flexible"),
+                        help="как да се закове графикът в MS Project")
     parser.add_argument("--dump", default="",
                         help="запиши задачите като JSON тук (за оглед)")
     parser.add_argument("--notes", action="store_true",
@@ -239,6 +246,16 @@ def main() -> int:
         print(f"ситуация: {обобщение['segments']} участъка в обхват, "
               f"{обобщение['dropped']} отпаднали, "
               f"{обобщение['total_m']} м")
+
+    # ГОТОВИ ОТСЕЧКИ.  Когато клоновете вече са известни — от чертеж, от
+    # таблица или от график на изпълнителя — участъците са ТЕ, а не равни
+    # етапи.  Оттам идва и подредбата „по клонове" вместо „Етап N от 8".
+    if args.segments:
+        готови = json.loads(Path(args.segments).read_text(encoding="utf-8"))
+        situation_segments += [с for с in готови if с.get("in_scope", True)]
+        метри = sum(float(с.get("length_m") or 0) for с in готови)
+        print(f"клонове: {len(готови)} отсечки, {метри:.0f} м "
+              f"(от {Path(args.segments).name})")
 
     if args.water:
         from src.situation_reader import read_water_situation, summarize
@@ -315,7 +332,8 @@ def main() -> int:
         from src.export_xml import export_to_mspdi_xml
         target = Path(args.xml)
         payload = export_to_mspdi_xml(tasks, args.name,
-                                      filename=str(target))
+                                      filename=str(target),
+                                      constraint_mode=args.constraints)
         if not payload:
             print("\nXML: експортът не върна нищо")
             return 1

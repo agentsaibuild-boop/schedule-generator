@@ -2162,6 +2162,36 @@ class ExpansionResult:
     warnings: list[str] = field(default_factory=list)
 
 
+#: Мрежа → как се казва нейният дял от строителството.  Взето от графика на
+#: изпълнителя (25.08.2026): „Изпълнение на водопроводната мрежа" и под него
+#: „Водопроводен екип 1", а чак после клоновете.
+_ДЯЛ_НА_МРЕЖАТА = {
+    "В": "Изпълнение на водопроводната мрежа",
+    "К": "Изпълнение на канализационната мрежа",
+    "П": "Възстановяване на пътни и тротоарни настилки",
+    "ЕЛ": "Кабелни и електро работи",
+}
+
+#: Мрежа → как се чете екипът ѝ с думи.  „ЕВ1" е кратко за колоната „ЕКИП";
+#: за заглавен ред на цял дял от графика човекът пише пълното име.
+_ЕКИП_С_ДУМИ = {"В": "Водопроводен екип", "К": "Канализационен екип",
+                "П": "Пътен екип", "ЕЛ": "Електро екип"}
+
+
+def _име_на_дял(мрежа: str) -> str:
+    return _ДЯЛ_НА_МРЕЖАТА.get(str(мрежа or "").strip(), "Изпълнение на мрежата")
+
+
+def _екип_с_думи(front: str, мрежа: str) -> str:
+    """„ЕВ1" → „Водопроводен екип 1"; непознато име остава каквото е."""
+    текст = str(front or "").strip()
+    водещо = _ЕКИП_С_ДУМИ.get(str(мрежа or "").strip())
+    номер = "".join(з for з in текст if з.isdigit())
+    if водещо and номер:
+        return f"{водещо} {номер}"
+    return текст or (водещо or "Екип")
+
+
 def expand_packages(
     packages: list[SpatialWorkPackage],
     chains: dict[str, Any] | None = None,
@@ -2211,6 +2241,39 @@ def expand_packages(
             })
         return roots_used[key]
 
+    # ПО КЛОНОВЕ, ПОД СВОЯ ЕКИП (изпълнителят, 25.08.2026).  В строителството
+    # между корена и участъка стоят още два заглавни реда — дялът на мрежата и
+    # екипът, който я кара — точно както в графика, който той даде за еталон.
+    # Създават се при първия пакет, който стъпва в тях: празен заглавен ред е
+    # по-лош от липсващ.
+    групи: dict[tuple[str, str], str] = {}
+
+    def група_за(pkg: SpatialWorkPackage, chain_def: dict, root_id: str) -> str:
+        if str(chain_def.get("wbs_root", "construction")) != "construction":
+            return root_id
+        мрежа = str(pkg.network or "").strip()
+        фронт = str(pkg.front or "").strip()
+        родител = root_id
+        нива: list[tuple[tuple[str, str], str]] = []
+        if мрежа:
+            нива.append((("мрежа", мрежа), _име_на_дял(мрежа)))
+            if фронт:
+                нива.append((("екип", f"{мрежа}|{фронт}"),
+                             _екип_с_думи(фронт, мрежа)))
+        for ключ, име in нива:
+            ид = групи.get(ключ)
+            if ид is None:
+                ид = f"WBS_{ключ[0]}_{len(групи) + 1}"
+                групи[ключ] = ид
+                result.tasks.append({
+                    "id": ид, "name": име, "type": "summary", "duration": 0,
+                    "parent_id": родител, "dependencies": [],
+                    "is_summary": True, "network": мрежа,
+                    "wbs_root": "construction",
+                })
+            родител = ид
+        return родител
+
     for pkg in packages:
         chain = chain_defs.get(pkg.chain)
         if chain:
@@ -2227,7 +2290,8 @@ def expand_packages(
         pkg_task_id = f"{pkg.id}"
         result.tasks.append({
             "id": pkg_task_id, "name": pkg.label, "type": "summary",
-            "parent_id": root_for(chain), "duration": 0, "dependencies": [],
+            "parent_id": група_за(pkg, chain, root_for(chain)),
+            "duration": 0, "dependencies": [],
             "is_summary": True, "network": pkg.network, "team": pkg.front,
             # БЕЗ пикетаж: обобщаващата задача е СБОР, не работа.  Ако носи
             # същите метри като децата си, пространствената проверка вижда

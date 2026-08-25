@@ -72,6 +72,10 @@ MINUTES_PER_DAY = 480           # 8h × 60 = 480 min/working day
 LINK_LAG_FACTOR = 10            # LinkLag unit = tenths of minutes (480 × 10 = 4800/day)
 
 # Custom field IDs (verified against MS Project)
+#: MSPDI DurationFormat: 3=минути, 5=ЧАСОВЕ, 7=ДНИ, 8=седмици.  Проверено в
+#: XML-а, който самият MS Project изнася (25.08.2026).
+DURATION_FORMAT_DAYS = "7"
+
 FIELD_ID_TEXT1 = "188743731"    # Text1 = DN
 FIELD_ID_TEXT2 = "188743734"    # Text2 = Мярка
 FIELD_ID_TEXT3 = "188743737"    # Text3 = Екип
@@ -95,16 +99,25 @@ FIELD_ID_TEXT7 = "188743749"    # Text7 = Улица
 FIELD_ID_TEXT8 = "188743752"    # Text8 = От възел
 FIELD_ID_TEXT9 = "188743755"    # Text9 = До възел
 FIELD_ID_TEXT10 = "188743758"   # Text10 = Запис (ID)
-FIELD_ID_NUMBER2 = "188743770"  # Number2 = Пикетаж от
-FIELD_ID_NUMBER3 = "188743773"  # Number3 = Пикетаж до
+# ЧИСЛОВИТЕ ПОЛЕТА ВЪРВЯТ ПРЕЗ ЕДНО, НЕ ПРЕЗ ТРИ (25.08.2026).  Text1…Text10
+# наистина се увеличават с 3, но Number1…Number20 — с 1.  Тук стояха номера,
+# сметнати по правилото на текстовите полета, тоест Number2…Number5 се пишеха с
+# НЕСЪЩЕСТВУВАЩИ идентификатори и MS Project ги ИЗХВЪРЛЯШЕ мълчаливо: в готовия
+# файл колоните „Начало (ден)" и „Край (ден)" бяха празни и единственото, което
+# се четеше, бяха датите — точно това, което изпълнителят не иска.
+#
+# Числата не са сметнати наизуст, а ПОПИТАНИ от самия MS Project:
+#     app.FieldNameToFieldConstant("Number4", 0) → 188743770
+FIELD_ID_NUMBER2 = "188743768"  # Number2 = Пикетаж от
+FIELD_ID_NUMBER3 = "188743769"  # Number3 = Пикетаж до
 
 # ДЕНЯТ, НЕ ДАТАТА (изпълнителят, 25.08.2026): „това е тръжна процедура,
 # трябва да пише само дни — от ден 1 до ден 210".  MSPDI не може без дати —
 # схемата ги изисква и MS Project смята по календар — затова датите остават
 # като механика, а ДЕНЯТ идва в две собствени колони, които се показват до
 # името и се четат като в човешкия график.
-FIELD_ID_NUMBER4 = "188743776"  # Number4 = Начало (ден)
-FIELD_ID_NUMBER5 = "188743779"  # Number5 = Край (ден)
+FIELD_ID_NUMBER4 = "188743770"  # Number4 = Начало (ден)
+FIELD_ID_NUMBER5 = "188743771"  # Number5 = Край (ден)
 
 #: Поле → (ключ в задачата, псевдоним в MS Project).  Държи дефиницията и
 #: стойността на едно място, за да не се разминат както Text2 („Мярка" беше
@@ -233,8 +246,19 @@ def _build_xml(
     ET.SubElement(root, "Name").text = project_name
     ET.SubElement(root, "StartDate").text = f"{start_date}T08:00:00"
     ET.SubElement(root, "FinishDate").text = finish_dt.strftime("%Y-%m-%dT17:00:00")
+    # ГРАФИКЪТ СЕ БРОИ НАПРЕД ОТ ДЕН 1 (25.08.2026).  Без този ред MS Project
+    # разписва проекта НАЗАД от датата в заглавието: мерено на Тръстеник, 888
+    # задачи лягаха ПРЕДИ началото („наш ден 2, MS Project −2"), а вносът им
+    # слагаше „Finish No Later Than" на всяка.  Изнесеният график изглеждаше
+    # като чужд график.
+    ET.SubElement(root, "ScheduleFromStart").text = "1"
     ET.SubElement(root, "CalendarUID").text = "1"
-    ET.SubElement(root, "DurationFormat").text = "5"  # CRITICAL: 5=days
+    # ДНИ, НЕ ЧАСОВЕ (изпълнителят, 25.08.2026: „както и часове, закръгли ги
+    # да пише дни").  В MSPDI 5 е ЧАСОВЕ, а 7 е ДНИ — дотук стоеше 5 с
+    # коментар „CRITICAL: 5=days" и MS Project показваше „48 hrs" вместо
+    # „6 дни".  Числото е проверено в собствения експорт на MS Project:
+    # там всяка задача носи <DurationFormat>7</DurationFormat>.
+    ET.SubElement(root, "DurationFormat").text = DURATION_FORMAT_DAYS
     ET.SubElement(root, "DefaultStartTime").text = "08:00:00"
     ET.SubElement(root, "DefaultFinishTime").text = "17:00:00"
     ET.SubElement(root, "MinutesPerDay").text = str(MINUTES_PER_DAY)
@@ -407,7 +431,7 @@ def _build_tasks(
     ET.SubElement(root_task, "Finish").text = _working_day_to_date(
         start_dt, _край, calendar_type).strftime("%Y-%m-%dT17:00:00")
     ET.SubElement(root_task, "Duration").text = f"PT{_край * 8}H0M0S"
-    ET.SubElement(root_task, "DurationFormat").text = "5"
+    ET.SubElement(root_task, "DurationFormat").text = DURATION_FORMAT_DAYS
     ET.SubElement(root_task, "Manual").text = "0"
     ET.SubElement(root_task, "Summary").text = "1"
     ET.SubElement(root_task, "CalendarUID").text = "1"
@@ -517,7 +541,7 @@ def _build_tasks(
         # Duration = цели дни × 8 часа (цяло число → 'PT16H0M0S', не 'PT12.0H').
         hours = dur_days * 8
         ET.SubElement(task_elem, "Duration").text = f"PT{hours}H0M0S"
-        ET.SubElement(task_elem, "DurationFormat").text = "5"  # days
+        ET.SubElement(task_elem, "DurationFormat").text = DURATION_FORMAT_DAYS
 
         # Auto-scheduled (Manual=0) — no pin icons in Task Mode column.
         #
@@ -743,8 +767,13 @@ def _add_predecessor_links(
         pred = ET.SubElement(task_elem, "PredecessorLink")
         ET.SubElement(pred, "PredecessorUID").text = str(dep_uid)
         ET.SubElement(pred, "Type").text = type_code
+        # Както го пише самият MS Project (проверено в негов експорт): между
+        # типа и лага стои CrossProject, а форматът е 7 = ДНИ.  Тук стоеше 5 с
+        # коментар „days" — 5 е ЧАСОВЕ и лагът излизаше „80 hrs" вместо
+        # „10 дни".
+        ET.SubElement(pred, "CrossProject").text = "0"
         ET.SubElement(pred, "LinkLag").text = link_lag
-        ET.SubElement(pred, "LagFormat").text = "5"  # days
+        ET.SubElement(pred, "LagFormat").text = DURATION_FORMAT_DAYS
 
 
 def _build_resources(

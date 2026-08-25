@@ -81,8 +81,8 @@ def test_exports():
 
             # Check DurationFormat
             df = root.find(f"{{{NAMESPACE}}}DurationFormat")
-            if df is None or df.text != "5":
-                errors.append(f"DurationFormat should be 5, got: {df.text if df else 'None'}")
+            if df is None or df.text != "7":
+                errors.append(f"DurationFormat should be 7 (дни), got: {df.text if df else 'None'}")
 
             # Check tasks
             tasks = root.findall(f".//{{{NAMESPACE}}}Task")

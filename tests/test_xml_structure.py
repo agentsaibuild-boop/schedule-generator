@@ -205,13 +205,14 @@ def test_predecessor_link_no_dependencies():
 
 
 def test_lag_format_is_days():
-    """LagFormat must always be '5' (days unit for MS Project)."""
+    """LagFormat е 7 — ДНИ.  (5 е часове: лагът излизаше „80 hrs" вместо
+    „10 дни", проверено в собствения експорт на MS Project, 25.08.2026.)"""
     task = {"id": "t2", "name": "Т2", "dependencies": ["t1"],
             "dependency_type": "SS", "lag_days": 5}
     uid_map = {"t1": 1, "t2": 2}
     task_elem = ET.Element("Task")
     _add_predecessor_links(task_elem, task, uid_map)
-    assert task_elem.find("PredecessorLink/LagFormat").text == "5"
+    assert task_elem.find("PredecessorLink/LagFormat").text == "7"
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +236,7 @@ def test_duration_format_pt_hours():
 
 
 def test_duration_format_5_on_tasks():
-    """Every task must have DurationFormat=5 (days, not elapsed days)."""
+    """Всяка задача носи DurationFormat=7 — ДНИ, не часове."""
     schedule = [
         _minimal_task("t1", "Задача 1", duration=5),
         _minimal_task("t2", "Задача 2", duration=3),
@@ -243,8 +244,8 @@ def test_duration_format_5_on_tasks():
     root = _parse_export(schedule)
     for task in _all_tasks(root):
         df = task.find(f"{{{NS}}}DurationFormat")
-        assert df is not None and df.text == "5", (
-            f"Task '{task.find(f'{{{NS}}}Name').text}' missing DurationFormat=5"
+        assert df is not None and df.text == "7", (
+            f"Task '{task.find(f'{{{NS}}}Name').text}' missing DurationFormat=7"
         )
 
 
@@ -409,10 +410,10 @@ def test_save_version_14():
 
 
 def test_duration_format_5_on_project():
-    """Project-level DurationFormat must be 5."""
+    """Проектът брои в ДНИ: DurationFormat=7 (5 е часове)."""
     schedule = [_minimal_task("t1", "Т")]
     root = _parse_export(schedule)
-    assert _xml_text(root, "DurationFormat") == "5"
+    assert _xml_text(root, "DurationFormat") == "7"
 
 
 if __name__ == "__main__":

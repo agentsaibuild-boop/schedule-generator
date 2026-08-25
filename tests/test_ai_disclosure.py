@@ -35,7 +35,7 @@ from src.ai_disclosure import (  # noqa: E402
     pdf_metadata_keywords,
     stamp_schedule,
 )
-from src.export_xml import export_to_mspdi_xml  # noqa: E402
+from src.export_xml import DURATION_FORMAT_DAYS, export_to_mspdi_xml  # noqa: E402
 
 SCHEDULE = [
     {"id": "В01", "name": "Полагане DN110 PE", "start_day": 1, "end_day": 30,
@@ -165,8 +165,8 @@ def test_xml_category_is_machine_readable(xml_root):
 
 
 def test_xml_still_has_critical_duration_format(xml_root):
-    """Урок #19: добавянето на метаданни не бива да чупи DurationFormat=5."""
-    assert _text(xml_root, "DurationFormat") == "5"
+    """Урок #19: добавянето на метаданни не бива да чупи DurationFormat."""
+    assert _text(xml_root, "DurationFormat") == DURATION_FORMAT_DAYS
 
 
 def test_xml_still_lists_the_tasks(xml_root):

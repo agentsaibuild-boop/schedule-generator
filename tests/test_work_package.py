@@ -203,7 +203,13 @@ def test_parse_package_name_survives_garbage():
 
 
 def test_expand_builds_wbs_hierarchy():
-    """Еталонът има 3 нива: корен → участък → стъпки.  Нашият имаше 1."""
+    """Корен → дял на мрежата → участък → стъпки.
+
+    От 25.08.2026 между корена и участъка стои дялът на мрежата, а когато
+    участъкът има свой екип — и екипът.  Така е в графика, който изпълнителят
+    даде за еталон: „Изпълнение на водопроводната мрежа" → „Водопроводен екип
+    1" → клон → стъпки.
+    """
     pkg = SpatialWorkPackage(
         id="P1", network="К", chain="sewer_section", street="ул. Първа",
         branch="кл. 48", start_node="РШ 36", end_node="РШ 40",
@@ -218,11 +224,35 @@ def test_expand_builds_wbs_hierarchy():
 
     root = by_id["WBS_CONSTRUCTION"]
     assert root["is_summary"] is True
-    assert by_id["P1"]["parent_id"] == "WBS_CONSTRUCTION"
+    дял = by_id[by_id["P1"]["parent_id"]]
+    assert дял["name"] == "Изпълнение на канализационната мрежа"
+    assert дял["parent_id"] == "WBS_CONSTRUCTION"
     assert by_id["P1"]["name"] == "кл. 48 от РШ 36 до РШ 40"
     steps = [t for t in result.tasks if t.get("parent_id") == "P1"]
     assert steps, "участъкът трябва да има стъпки"
     assert all(t["parent_id"] == "P1" for t in steps)
+
+
+def test_each_crew_gets_its_own_heading():
+    """Клоновете стоят под СВОЯ екип, както в графика на изпълнителя."""
+    пакети = [
+        SpatialWorkPackage(id="В1", network="В", chain="water_section",
+                           front="ЕВ1", branch="кл.83",
+                           items=(PackageItem("КСС!В!4", "laying", 100.0, "m"),)),
+        SpatialWorkPackage(id="В2", network="В", chain="water_section",
+                           front="ЕВ2", branch="кл.37",
+                           items=(PackageItem("КСС!В!4", "laying", 50.0, "m"),)),
+    ]
+    by_id = {t["id"]: t for t in expand_packages(пакети).tasks}
+
+    първи = by_id[by_id["В1"]["parent_id"]]
+    втори = by_id[by_id["В2"]["parent_id"]]
+    assert първи["name"] == "Водопроводен екип 1"
+    assert втори["name"] == "Водопроводен екип 2"
+    assert първи["parent_id"] == втори["parent_id"], "двата екипа са в един дял"
+    дял = by_id[първи["parent_id"]]
+    assert дял["name"] == "Изпълнение на водопроводната мрежа"
+    assert дял["parent_id"] == "WBS_CONSTRUCTION"
 
 
 def test_expand_chains_steps_finish_to_start():
@@ -501,8 +531,9 @@ def test_design_package_goes_under_its_own_wbs_root():
 
     by_id = {t["id"]: t for t in expand_packages([design, build]).tasks}
 
-    assert by_id["D1"]["parent_id"] == "WBS_DESIGN"
-    assert by_id["K1"]["parent_id"] == "WBS_CONSTRUCTION"
+    assert by_id["D1"]["parent_id"] == "WBS_DESIGN", "проектирането има свой клон"
+    строителен = by_id[by_id["K1"]["parent_id"]]
+    assert строителен["parent_id"] == "WBS_CONSTRUCTION"
     assert by_id["WBS_DESIGN"]["name"] == "ПРОЕКТИРАНЕ"
 
 

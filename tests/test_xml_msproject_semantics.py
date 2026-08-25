@@ -221,7 +221,7 @@ def test_seven_day_export_is_unchanged():
 
 def test_duration_format_still_days():
     """Урок #19 — не бива да се губи при тези промени."""
-    assert "<DurationFormat>5</DurationFormat>" in _xml([NORMAL])
+    assert "<DurationFormat>7</DurationFormat>" in _xml([NORMAL])
 
 
 # ===================================================================
