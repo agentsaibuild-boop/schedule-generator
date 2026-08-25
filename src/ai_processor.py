@@ -1110,6 +1110,7 @@ class AIProcessor:
         # знае с какво разполага; сметката остава ВИДИМА, за да се види
         # разликата — това е решение за пари, не само за срок.
         from src.crew_sizing import declared_crews_for
+        from src.tender_parameters import teams_work_in_parallel
 
         обявени = declared_crews_for(екипи)
         if обявени is not None:
@@ -1118,6 +1119,19 @@ class AIProcessor:
             екипи = обявени
             _prog(f"Обявени са {sorted(set(обявени.values()))[0]} екипа на "
                   f"верига — важи обявеното, не сметката (тя даваше {беше}).")
+
+        # „НЕ РАБОТЯТ ПАРАЛЕЛНО" ЗНАЧИ ЕДИН ФРОНТ (24.08.2026).  Мерено на
+        # Русе: при отговор „не" излизаха ДВЕ редици участъци — 1→3→5→7 и
+        # 2→4→6→8 — тоест два екипа наведнъж, при положение че човекът е казал
+        # обратното.  Броят екипи се смята от срока и надделяваше над
+        # отговора; тук отговорът си взима думата обратно.
+        if not teams_work_in_parallel():
+            беше = (", ".join(f"{к}×{n}" for к, n in sorted(екипи.items()))
+                    if isinstance(екипи, dict) else str(екипи))
+            if беше not in ("1", ""):
+                _prog(f"Екипите не работят паралелно — един фронт наведнъж "
+                      f"(сметката даваше {беше}).")
+            екипи = 1
 
         packages = assign_fronts(packages, екипи)
 
@@ -1192,7 +1206,6 @@ class AIProcessor:
         # Нормите от productivities.json остават само за прогон без обявен
         # срок и за сверка.
         from src.deadline_pace import derive as _темпо_от_срока
-        from src.tender_parameters import teams_work_in_parallel
 
         изведени, pace_from_deadline = _темпо_от_срока(
             packages, days=срок, crews=екипи,
