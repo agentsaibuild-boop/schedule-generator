@@ -1867,7 +1867,7 @@ def assign_fronts(
         return max(int(по_верига.get(pkg.chain, подразбиране)), 1)
 
     if not по_верига and подразбиране == 1:
-        return [_with_front(p, f"Екип {p.network}1") for p in packages]
+        return [_with_front(p, _име_на_екип(p.network, 1)) for p in packages]
 
     def weight(pkg: SpatialWorkPackage) -> float:
         return sum(abs(float(i.quantity)) for i in pkg.items) or 1.0
@@ -1902,8 +1902,18 @@ def assign_fronts(
         # В1" — воден екип на канализационна работа, при това докато същият
         # В1 кара своя клон.
         for i, bucket in enumerate(buckets, 1):
-            out.extend(_with_front(p, f"Екип {p.network}{i}") for p in bucket)
+            out.extend(_with_front(p, _име_на_екип(p.network, i)) for p in bucket)
     return sorted(out, key=lambda p: p.id)
+
+
+def _име_на_екип(мрежа: str, номер: int) -> str:
+    """ЕВ1, ЕВ2, ЕК1, ЕК2 — както изпълнителят ги нарича (25.08.2026).
+
+    Същите имена стоят и в човешкия еталон: ЕК1 и ЕК2 правят само канализация,
+    ЕВ1 и ЕВ2 само водопровод.  Дотук пишеше „Екип В1" — същото нещо с други
+    букви, но графикът отива при хора, които четат своите имена.
+    """
+    return f"Е{str(мрежа or '').strip()}{номер}"
 
 
 def _with_front(pkg: SpatialWorkPackage, front: str) -> SpatialWorkPackage:
@@ -2986,8 +2996,8 @@ def chain_sections_sequentially(
     # РЕДИЦАТА Е НА ЕКИПА, НЕ НА ВЕРИГАТА (изпълнителят, 25.08.2026:
     # „различните екипи В работят по различни клонове").  Един екип не може да
     # е на два обекта наведнъж — независимо дали вторият е клон, или шахта.
-    # Ключът е (мрежа, фронт): всичко, което „Екип В1" държи, върви едно след
-    # друго; „Екип В2" кара своя клон паралелно.
+    # Ключът е (мрежа, фронт): всичко, което ЕВ1 държи, върви едно след
+    # друго; ЕВ2 кара своя клон паралелно.
     редици: dict[tuple[str, str], list[str]] = {}
     верига_на: dict[str, str] = {}
     for ред, pkg in enumerate(packages or []):

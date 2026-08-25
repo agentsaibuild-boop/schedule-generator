@@ -52,20 +52,35 @@ RIGHT_MARGIN = 10 * mm
 
 # Table column widths
 #
-# КОЛОНИТЕ СА КАТО В ЧОВЕШКИЯ ТРЪЖЕН ГРАФИК (25.08.2026).  В процедура датите
-# нямат място: стартът е неизвестен, докато не се подпише договор и Протокол
-# 2а.  Затова човешкото приложение брои ДНИ — „ID · Вид дейност / Участък ·
-# Срок · Начало (ден) · Край (ден) · Ресурси · Строителен продукт".
+# ШАБЛОНЪТ Е ЧОВЕШКИЯТ ГРАФИК НА ИЛИЯНЦИ (изпълнителят, 25.08.2026: „използвай
+# като темплейт графика за Илиянци, наименувай колоните по същия начин").
+# Прочетено от самия файл (`1.2.А.1.-линеен график Илиянци.pdf`, заглавен ред):
+#
+#   ID · Вид дейност / Участък · ед.мярка · диаметър · к-во · Срок ·
+#   Последователност · Начало (ден) · Край (ден) · ЕКИП · Ресурси
+#
+# и чак СЛЕД тях започва скалата на дните.  Стойностите там са „46 d", „159 d",
+# „6SS+10 d" — дни, не дати.  В процедура датите нямат място: стартът е
+# неизвестен, докато не се подпише договорът и не се състави Протокол 2а.
 COL_NUM_W = 7 * mm          # ID
-COL_NAME_W = 52 * mm        # Вид дейност / Участък
+COL_NAME_W = 56 * mm        # Вид дейност / Участък
+COL_UNIT_W = 9 * mm         # ед.мярка
+COL_DN_W = 10 * mm          # диаметър
+COL_QTY_W = 13 * mm         # к-во
 COL_DAYS_W = 9 * mm         # Срок
+COL_PRED_W = 13 * mm        # Последователност
 COL_START_W = 11 * mm       # Начало (ден)
 COL_END_W = 11 * mm         # Край (ден)
-COL_RES_W = 18 * mm         # Ресурси
-COL_PROD_W = 17 * mm        # Строителен продукт
-TABLE_W = (COL_NUM_W + COL_NAME_W + COL_DAYS_W + COL_START_W
-           + COL_END_W + COL_RES_W + COL_PROD_W)
-LEFT_MARGIN = 8 * mm + TABLE_W
+COL_CREW_W = 9 * mm         # ЕКИП
+COL_RES_W = 34 * mm         # Ресурси
+TABLE_W = (COL_NUM_W + COL_NAME_W + COL_UNIT_W + COL_DN_W + COL_QTY_W
+           + COL_DAYS_W + COL_PRED_W + COL_START_W + COL_END_W
+           + COL_CREW_W + COL_RES_W)
+LEFT_MARGIN = 6 * mm + TABLE_W
+
+#: Скалата почва ПРЕДИ ден 1 — „за да се вижда по-ясно кога започва всичко"
+#: (изпълнителят, 25.08.2026).  Еталонът също оставя ден пред началото.
+ОСТА_ЗАПОЧВА = -2
 
 # Row heights
 ROW_H = 3.8 * mm
@@ -215,11 +230,65 @@ def _download_dejavu_fonts(target_dir: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
+#: Заглавията и ширините — един източник за реда и за шапката.
+_КОЛОНИ = (
+    ("ID", COL_NUM_W),
+    ("Вид дейност / Участък", COL_NAME_W),
+    ("ед.мярка", COL_UNIT_W),
+    ("диаметър", COL_DN_W),
+    ("к-во", COL_QTY_W),
+    ("Срок", COL_DAYS_W),
+    ("Послед.", COL_PRED_W),
+    ("Начало (ден)", COL_START_W),
+    ("Край (ден)", COL_END_W),
+    ("ЕКИП", COL_CREW_W),
+    ("Ресурси", COL_RES_W),
+)
+
+
+def _количество(task: dict) -> str:
+    """Количеството, както се пише на български: 545,50."""
+    стойност = task.get("quantity")
+    if стойност in (None, ""):
+        стойност = task.get("length_m")
+    if стойност in (None, ""):
+        return ""
+    try:
+        число = float(стойност)
+    except (TypeError, ValueError):
+        return str(стойност)
+    ако = f"{число:,.2f}".replace(",", " ").replace(".", ",")
+    return ако.replace(",00", "") if число.is_integer() else ако
+
+
+def _последователност(task: dict, row_of: dict[str, int]) -> str:
+    """Предшествениците с НОМЕРА НА РЕДОВЕ, както ги пише еталонът: „6SS+10 d".
+
+    Вътрешните ключове („В10_excavation") не значат нищо за човека, който чете
+    графика; номерът на реда сочи точно нагоре в същата таблица.
+    """
+    парчета = []
+    for dep in task.get("dependencies") or []:
+        ид = (str(dep.get("predecessor_id") or "").strip()
+              if isinstance(dep, dict) else str(dep or "").strip())
+        ред = row_of.get(ид)
+        if not ред:
+            continue
+        вид = str(dep.get("type") or "FS").upper() if isinstance(dep, dict) else "FS"
+        лаг = int(dep.get("lag_days") or 0) if isinstance(dep, dict) else 0
+        текст = f"{ред}{'' if вид == 'FS' else вид}"
+        if лаг:
+            текст += f"{'+' if лаг > 0 else ''}{лаг} d"
+        парчета.append(текст)
+    return ";".join(парчета)
+
+
 def _day_to_x(day: int, total_days: int, gantt_left: float, gantt_width: float) -> float:
-    """Convert day number to X coordinate on the PDF page."""
-    if total_days <= 0:
+    """Ден → X на листа.  Оста почва на `ОСТА_ЗАПОЧВА`, не на ден 1."""
+    обхват = total_days - ОСТА_ЗАПОЧВА + 1
+    if обхват <= 0:
         return gantt_left
-    return gantt_left + (day - 1) / total_days * gantt_width
+    return gantt_left + (day - ОСТА_ЗАПОЧВА) / обхват * gantt_width
 
 
 def _format_task_name(task: dict, is_phase: bool = False) -> str:
@@ -231,15 +300,50 @@ def _format_task_name(task: dict, is_phase: bool = False) -> str:
 
 
 def _flatten_schedule(schedule_data: list[dict]) -> list[dict]:
-    """Flatten hierarchical schedule into a display list with metadata."""
+    """Списъкът за показване: дълбочина, обобщаващи редове, номер на ред.
+
+    Приема и двете форми, в които графикът стига дотук: вложена
+    (`sub_activities`) и ПЛОСКА с `parent_id` — пакетният път връща плоска и
+    дотук цялата йерархия се губеше, тоест всеки ред изглеждаше еднакво важен.
+    """
+    if any(t.get("sub_activities") for t in schedule_data or []):
+        result = []
+        for task in schedule_data:
+            is_phase = bool(task.get("sub_activities"))
+            result.append({**task, "_is_phase": is_phase, "_is_sub": False,
+                           "_indent": 0})
+            for sub in task.get("sub_activities") or []:
+                result.append({**sub, "_is_phase": False, "_is_sub": True,
+                               "_indent": 1})
+        return _номерирай(result)
+
+    родител = {str(t.get("id")): str(t.get("parent_id") or "")
+               for t in schedule_data or []}
+
+    def дълбочина(ид: str) -> int:
+        ниво, текущ, пазач = 0, ид, 0
+        while родител.get(текущ) and пазач < 8:
+            текущ = родител[текущ]
+            ниво += 1
+            пазач += 1
+        return ниво
+
     result = []
-    for task in schedule_data:
-        is_phase = bool(task.get("sub_activities"))
-        result.append({**task, "_is_phase": is_phase, "_is_sub": False, "_indent": 0})
-        if task.get("sub_activities"):
-            for sub in task["sub_activities"]:
-                result.append({**sub, "_is_phase": False, "_is_sub": True, "_indent": 1})
-    return result
+    for task in schedule_data or []:
+        ниво = дълбочина(str(task.get("id")))
+        обобщаващ = bool(task.get("is_summary") or task.get("type") == "summary")
+        result.append({**task,
+                       "_is_phase": обобщаващ and ниво == 0,
+                       "_is_sub": ниво >= 2,
+                       "_indent": ниво})
+    return _номерирай(result)
+
+
+def _номерирай(редове: list[dict]) -> list[dict]:
+    """Номерът на реда е ID-то в таблицата — и адресът в „Последователност"."""
+    for i, ред in enumerate(редове, 1):
+        ред["_row"] = i
+    return редове
 
 
 def _calculate_pages(num_tasks: int, rows_per_page: int) -> int:
@@ -342,6 +446,9 @@ def _render_pdf(
     # Скалата е В ДНИ, не в календар — тръжен график
     months = _generate_day_blocks(total_days)
 
+    # Кой ред е коя задача — „Последователност" сочи НОМЕРА, не вътрешния ключ.
+    row_of = {str(t.get("id")): int(t.get("_row") or 0) for t in flat if t.get("id")}
+
     # Create PDF
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=PAGE_SIZE)
@@ -382,9 +489,9 @@ def _render_pdf(
                 c.rect(GANTT_LEFT - 4 * mm, y - row_h, gantt_width + 4 * mm, row_h, fill=1, stroke=0)
 
             _draw_task_row(
-                c, task, y, row_h, start_idx + i + 1,
+                c, task, y, row_h, int(task.get("_row", start_idx + i + 1)),
                 total_days, gantt_width, show_critical_path,
-                font, font_bold, is_sub,
+                font, font_bold, is_sub, row_of,
             )
 
             y -= row_h
@@ -512,19 +619,9 @@ def _draw_table_header(
     text_y = y - HEADER_H + 2.5 * mm
 
     x = x_start + 1 * mm
-    c.drawString(x, text_y, "ID")
-    x += COL_NUM_W
-    c.drawString(x, text_y, "Вид дейност / Участък")
-    x += COL_NAME_W
-    c.drawString(x, text_y, "Срок")
-    x += COL_DAYS_W
-    c.drawString(x, text_y, "Начало")
-    x += COL_START_W
-    c.drawString(x, text_y, "Край")
-    x += COL_END_W
-    c.drawString(x, text_y, "Ресурси")
-    x += COL_RES_W
-    c.drawString(x, text_y, "Продукт")
+    for заглавие, ширина in _КОЛОНИ:
+        c.drawString(x, text_y, заглавие)
+        x += ширина
 
 
 def _draw_month_header(
@@ -570,6 +667,18 @@ def _draw_month_header(
             c.setLineWidth(0.2)
             c.line(x1, y, x1, y - HEADER_H)
 
+    # ТУК ЗАПОЧВА ВСИЧКО.  Водещите дни пред ден 1 съществуват само за да се
+    # вижда този ръб (изпълнителят, 25.08.2026).  Без надпис ръбът е поредната
+    # разделителна чертица.
+    x_старт = _day_to_x(1, total_days, GANTT_LEFT, gantt_width)
+    c.setStrokeColor(HexColor("#8B0000"))
+    c.setLineWidth(0.8)
+    c.line(x_старт, y, x_старт, y - HEADER_H)
+    c.setFillColor(HexColor("#8B0000"))
+    c.setFont(FONT_NAME if _font_registered else "Helvetica", FONT_SIZE_SMALL)
+    c.drawString(x_старт + 0.5 * mm, y - 2.2 * mm, "ден 1")
+    c.setFillColor(colors.black)
+
 
 def _draw_task_row(
     c: canvas.Canvas,
@@ -583,8 +692,10 @@ def _draw_task_row(
     font: str,
     font_bold: str,
     is_sub: bool,
+    row_of: dict[str, int] | None = None,
 ) -> None:
     """Draw a single task row (table + Gantt bar)."""
+    row_of = row_of or {}
     x_start = LEFT_MARGIN - TABLE_W
     text_y = y - row_h + 1.0 * mm
     is_phase = task.get("_is_phase", False)
@@ -602,54 +713,60 @@ def _draw_task_row(
     # Table columns
     x = x_start + 1 * mm
 
-    # Row number
-    if not is_sub:
-        c.drawString(x, text_y, str(row_num))
+    # ID
+    c.drawString(x, text_y, str(row_num))
     x += COL_NUM_W
 
-    # Task name
+    # Вид дейност / Участък
     name = _format_task_name(task, is_phase)
-    if is_sub:
-        x += 3 * mm  # indent
-        c.drawString(x, text_y, name)
-        x = x_start + 1 * mm + COL_NUM_W + COL_NAME_W
-    else:
-        c.drawString(x, text_y, name)
-        x += COL_NAME_W
+    отстъп = min(int(task.get("_indent", 0)), 3) * 2 * mm
+    c.drawString(x + отстъп, text_y,
+                 _подрежи(c, name, COL_NAME_W - отстъп - 1 * mm, font, c._fontsize))
+    x += COL_NAME_W
 
-    # Срок (дни)
-    duration = task.get("duration", 0)
+    # ед.мярка · диаметър · к-во — стоят на реда, който носи количеството
+    c.setFont(font, FONT_SIZE_SMALL)
+    c.drawString(x, text_y, str(task.get("unit") or ""))
+    x += COL_UNIT_W
+    dn = task.get("dn") or task.get("diameter") or ""
+    c.drawString(x, text_y, str(dn))
+    x += COL_DN_W
+    c.drawString(x, text_y, _количество(task))
+    x += COL_QTY_W
+
+    # Срок · Последователност · Начало (ден) · Край (ден) — В ДНИ, като еталона
+    c.setFont(font if not is_phase else font_bold, FONT_SIZE)
+    duration = task.get("duration", 0) or 0
     if duration > 0:
         цяло = int(duration) if float(duration).is_integer() else duration
-        c.drawString(x, text_y, f"{цяло} д")
+        c.drawString(x, text_y, f"{цяло} d")
     x += COL_DAYS_W
 
-    # Начало и край — В ДНИ ОТ ДЕН 1.  Никакви календарни дати: договорът още
-    # не е подписан и стартът е неизвестен (виж коментара при колоните).
+    c.setFont(font, FONT_SIZE_SMALL)
+    c.drawString(x, text_y, _подрежи(c, _последователност(task, row_of),
+                                     COL_PRED_W - 1 * mm, font, FONT_SIZE_SMALL))
+    x += COL_PRED_W
+
+    c.setFont(font if not is_phase else font_bold, FONT_SIZE)
     start_day = task.get("start_day", 0)
     end_day = task.get("end_day", start_day + max(duration, 1) - 1)
     if duration > 0 or start_day:
-        c.drawString(x, text_y, str(int(start_day)))
-        c.drawString(x + COL_START_W, text_y, str(int(end_day)))
+        c.drawString(x, text_y, f"{int(start_day)} d")
+        c.drawString(x + COL_START_W, text_y, f"{int(end_day)} d")
     x += COL_START_W + COL_END_W
 
-    # Ресурси
-    c.setFont(font if not is_phase else font_bold, FONT_SIZE_SMALL)
-    team = task.get("team", "")
-    if team and team != "—":
-        c.drawString(x, text_y, _подрежи(c, team, COL_RES_W - 1 * mm, font, FONT_SIZE_SMALL))
-    x += COL_RES_W
+    # ЕКИП
+    c.setFont(font, FONT_SIZE_SMALL)
+    екип = str(task.get("team") or task.get("crew_id") or "")
+    if екип and екип != "—":
+        c.drawString(x, text_y, _подрежи(c, екип, COL_CREW_W - 1 * mm,
+                                         font, FONT_SIZE_SMALL))
+    x += COL_CREW_W
 
-    # Строителен продукт — тръбата, която се влага: DN и дължина
-    dn = task.get("diameter", "")
-    length = task.get("length_m", "")
-    парчета = []
-    if dn:
-        парчета.append(f"DN{dn}" if str(dn).isdigit() else str(dn))
-    if length:
-        парчета.append(f"{int(length)} м" if isinstance(length, float) else f"{length} м")
-    if парчета:
-        c.drawString(x, text_y, _подрежи(c, " · ".join(парчета), COL_PROD_W - 1 * mm,
+    # Ресурси — както в еталона: имената, разделени с „;"
+    ресурси = ";".join(str(r) for r in (task.get("resources") or []))
+    if ресурси:
+        c.drawString(x, text_y, _подрежи(c, ресурси, COL_RES_W - 1 * mm,
                                          font, FONT_SIZE_SMALL))
     c.setFont(font, FONT_SIZE)
 
@@ -771,6 +888,10 @@ def _draw_month_grid(
     bottom_y: float,
 ) -> None:
     """Draw vertical grid lines for month boundaries and zebra stripes."""
+    x_старт = _day_to_x(1, total_days, GANTT_LEFT, gantt_width)
+    c.setStrokeColor(HexColor("#8B0000"))
+    c.setLineWidth(0.5)
+    c.line(x_старт, top_y, x_старт, bottom_y)
     for i, month in enumerate(months):
         x = _day_to_x(month["start_day"], total_days, GANTT_LEFT, gantt_width)
 
@@ -877,7 +998,8 @@ def _generate_day_blocks(total_days: int, стъпка: int = 30) -> list[dict]:
     Тръжният график не може да носи дати: началото е Протокол 2а, който още го
     няма.  Човешките графици, с които се сравняваме, също броят дни.
     """
-    блокове = []
+    блокове = [{"start_day": ОСТА_ЗАПОЧВА, "end_day": 0,
+                "label": f"ден {ОСТА_ЗАПОЧВА}", "short_label": "0"}]
     ден = 1
     n = 1
     while ден <= max(total_days, 1):

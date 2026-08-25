@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.export_pdf import (
+    ОСТА_ЗАПОЧВА,
     _calculate_pages,
     _day_to_x,
     _flatten_schedule,
@@ -31,35 +32,48 @@ from src.export_pdf import (
 
 
 class TestDayToX:
-    def test_day_one_maps_to_gantt_left(self):
-        """Day 1 starts at gantt_left (zero offset)."""
-        result = _day_to_x(1, total_days=100, gantt_left=50.0, gantt_width=500.0)
-        assert result == 50.0
+    """Оста почва ПРЕДИ ден 1.
+
+    FAILURE означава, че началото на обекта пак опира о лявата рамка и не се
+    вижда кога точно тръгва — изпълнителят, 25.08.2026: „дните трябва да
+    започват от ден -2, за да се вижда по-ясно кога започва всичко".
+    Еталонът на Илиянци също оставя ден пред началото.
+    """
+
+    def test_the_axis_starts_before_day_one(self):
+        """Ден -2 стои на самата рамка; ден 1 е вече навътре."""
+        от = _day_to_x(ОСТА_ЗАПОЧВА, total_days=100, gantt_left=50.0,
+                       gantt_width=500.0)
+        ден1 = _day_to_x(1, total_days=100, gantt_left=50.0, gantt_width=500.0)
+        assert от == 50.0
+        assert ден1 > 50.0
+
+    def test_the_lead_in_is_three_days(self):
+        """От -2 до 1 има точно три дни разстояние."""
+        стъпка = (_day_to_x(2, total_days=100, gantt_left=0.0, gantt_width=103.0)
+                  - _day_to_x(1, total_days=100, gantt_left=0.0, gantt_width=103.0))
+        водещи = _day_to_x(1, total_days=100, gantt_left=0.0, gantt_width=103.0)
+        assert abs(водещи - 3 * стъпка) < 0.01
+
+    def test_the_last_day_fills_the_width(self):
+        """Денят СЛЕД последния опира десния край — там свършва лентата."""
+        край = _day_to_x(101, total_days=100, gantt_left=0.0, gantt_width=103.0)
+        assert abs(край - 103.0) < 0.01
 
     def test_proportional_midpoint(self):
-        """Day 51 of 100 maps to 50% across gantt width."""
-        result = _day_to_x(51, total_days=100, gantt_left=0.0, gantt_width=100.0)
-        assert abs(result - 50.0) < 0.01
+        """Средата на срока е по средата на скалата (с водещите дни)."""
+        резултат = _day_to_x(50, total_days=100, gantt_left=0.0, gantt_width=103.0)
+        assert abs(резултат - 52.0) < 0.01
 
-    def test_last_day_near_right_edge(self):
-        """Last day starts at (total-1)/total, not at the right edge."""
-        result = _day_to_x(100, total_days=100, gantt_left=0.0, gantt_width=100.0)
-        assert abs(result - 99.0) < 0.01
+    def test_empty_schedule_does_not_divide_by_zero(self):
+        """Пазач: график без задачи не бива да гърми."""
+        assert _day_to_x(1, total_days=0, gantt_left=42.0,
+                         gantt_width=300.0) == 342.0
 
-    def test_zero_total_days_returns_gantt_left(self):
-        """Guard: total_days=0 must not divide by zero."""
-        result = _day_to_x(5, total_days=0, gantt_left=42.0, gantt_width=300.0)
-        assert result == 42.0
-
-    def test_gantt_left_offset_is_applied(self):
-        """gantt_left offset shifts the result correctly."""
-        result = _day_to_x(1, total_days=10, gantt_left=100.0, gantt_width=200.0)
-        assert result == 100.0  # day 1 → always gantt_left
-
-    def test_negative_total_days_returns_gantt_left(self):
-        """Negative total_days treated same as zero (guard path)."""
-        result = _day_to_x(3, total_days=-5, gantt_left=10.0, gantt_width=100.0)
-        assert result == 10.0
+    def test_broken_span_returns_gantt_left(self):
+        """Безсмислен обхват — връща лявата рамка, без да гърми."""
+        assert _day_to_x(3, total_days=-5, gantt_left=10.0,
+                         gantt_width=100.0) == 10.0
 
 
 # ---------------------------------------------------------------------------

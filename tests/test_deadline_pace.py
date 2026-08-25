@@ -172,7 +172,7 @@ class TestПоследователнатаРаботаМениГрафика:
                                "chain_step": стъпка, "duration": 3,
                                "dependencies": []})
             пакети.append(Пакет(pid, "water_section", 500.0))
-            пакети[-1].front = "Екип В1"
+            пакети[-1].front = "ЕВ1"
         return задачи, пакети
 
     def test_vtoriyat_uchastak_chaka_parviya(self, monkeypatch):

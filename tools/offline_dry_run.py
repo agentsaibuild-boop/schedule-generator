@@ -178,6 +178,8 @@ def main() -> int:
                         help="папка за ЦЕЛИЯ комплект от една версия: график, "
                              "опис, диагностика, сравнение на календарите и "
                              "audit_manifest.json")
+    parser.add_argument("--dump", default="",
+                        help="запиши задачите като JSON тук (за оглед)")
     parser.add_argument("--notes", action="store_true",
                         help="печатай бележките на конвейера (какво е решило "
                              "всяко правило)")
@@ -302,6 +304,12 @@ def main() -> int:
 
     for blocker in result.get("blockers") or []:
         print(f"  БЛОКИРА: {blocker}")
+
+    if args.dump:
+        import json as _json
+        Path(args.dump).write_text(
+            _json.dumps(tasks, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"\nJSON: {args.dump} ({len(tasks)} задачи)")
 
     if args.xml:
         from src.export_xml import export_to_mspdi_xml

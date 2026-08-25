@@ -38,7 +38,7 @@ def _задача(ид, родител, стъпка, начало, дни, **о
     return задача
 
 
-def _пакет(ид, верига="water_section", мрежа="В", фронт="Екип В1"):
+def _пакет(ид, верига="water_section", мрежа="В", фронт="ЕВ1"):
     return SpatialWorkPackage(
         id=ид, name=ид, network=мрежа, chain=верига, street="—", front=фронт,
         items=(PackageItem(source_ref=f"{ид}!1", activity_class="laying",
@@ -116,7 +116,7 @@ def _редица(пакети, задачи):
 
 
 def test_one_crew_takes_its_sections_one_after_another():
-    """„Екип В1" не може да кара два клона наведнъж."""
+    """ЕВ1 не може да кара два клона наведнъж."""
     задачи = [_задача("a_laying", "A", "laying", 1, 5),
               _задача("b_survey", "B", "survey", 1, 5)]
     изход, _ = _редица([_пакет("A"), _пакет("B")], задачи)
@@ -138,7 +138,7 @@ def test_different_crews_do_not_wait_for_each_other():
     """Различните екипи В работят по различни клонове — паралелно."""
     задачи = [_задача("a_laying", "A", "laying", 1, 5),
               _задача("b_survey", "B", "survey", 1, 5)]
-    пакети = [_пакет("A", фронт="Екип В1"), _пакет("B", фронт="Екип В2")]
+    пакети = [_пакет("A", фронт="ЕВ1"), _пакет("B", фронт="ЕВ2")]
     изход, _ = _редица(пакети, задачи)
     начало = next(t for t in изход if t["id"] == "b_survey")
     assert not (начало.get("dependencies") or [])

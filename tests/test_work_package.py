@@ -140,7 +140,7 @@ def test_assign_fronts_preserves_total_quantity():
     # ЕК1 и ЕК2 правят само канализация, ЕВ1 и ЕВ2 само водопровод.  Дотук
     # името беше общо („Фронт 1") и водопроводът чакаше зад канала на своя
     # фронт: 3247 м за 544 дни е 6 м/ден, при 17 в еталона.
-    assert {p.front for p in spread} == {"Екип К1", "Екип К2"}
+    assert {p.front for p in spread} == {"ЕК1", "ЕК2"}
 
 
 def test_assign_fronts_balances_each_network_separately():
@@ -170,7 +170,7 @@ def test_assign_fronts_single_front_labels_everything():
 
     spread = assign_fronts(packages, 1)
 
-    assert {p.front for p in spread} == {"Екип К1"}
+    assert {p.front for p in spread} == {"ЕК1"}
 
 
 # ---------------------------------------------------------------------------
