@@ -3064,7 +3064,9 @@ def chain_sections_sequentially(
     # друго; ЕВ2 кара своя клон паралелно.
     редици: dict[tuple[str, str], list[str]] = {}
     верига_на: dict[str, str] = {}
+    ред_на_пакета: dict[str, int] = {}
     for ред, pkg in enumerate(packages or []):
+        ред_на_пакета[str(pkg.id)] = ред
         if pkg.chain not in _ЗА_РЕДИЦА_НА_ЕКИПА:
             continue
         if str(pkg.id) in от_пакет:
@@ -3132,8 +3134,11 @@ def chain_sections_sequentially(
             continue
         # Тръбите първо, съоръженията след тях — екипът копае трасето и чак
         # после прави шахтите по него.
+        # РЕДЪТ Е НА ИЗПЪЛНЕНИЕТО, НЕ АЗБУЧЕН.  Сортирането по низ подрежда
+        # „В100, В101, … В11, В110" — тоест редицата на екипа се навързваше в
+        # случаен ред и участъци оставаха без предшественик.
         pids.sort(key=lambda pid: (0 if верига_на[pid] in _ЛИНЕЙНИ_ЗА_РЕДИЦА
-                                   else 1, pid))
+                                   else 1, ред_на_пакета.get(pid, 0)))
         for предишен, следващ in zip(pids, pids[1:]):
             край = _краен(предишен)
             начало = _начален(следващ)
@@ -3377,6 +3382,84 @@ def order_chronologically(tasks: list[dict]) -> list[dict]:
     # Каквото е останало извън дървото, върви накрая — нищо не се губи.
     изход.extend(t for t in tasks if id(t) not in видени)
     return изход
+
+
+def queue_sections_per_crew(
+    tasks: list[dict],
+    packages: Sequence[SpatialWorkPackage],
+) -> tuple[list[dict], list[str]]:
+    """Един екип — една редица от клонове, БЕЗ застъпване в датите.
+
+    ЗАЩО (изпълнителят, 25.08.2026): „ЕВ1 започва единия етап, ЕВ2 започва
+    другия и всеки като приключи започва следващ… от графиката не се вижда
+    нищо".  Прав е: мерено на Тръстеник, ЕВ1 държеше 36 клона, от които 19
+    двойки се застъпваха във времето — един екип на два клона наведнъж.
+
+    Връзките в редицата ги слага `chain_sections_sequentially`, но след нея
+    минават ресурсното изравняване, налагането на срока и сливането на
+    непрекъснатите действия; те разтеглят отделни стъпки и застъпването се
+    връща.  Затова ТУК, накрая, редицата се налага върху самите ДАТИ: клонът
+    започва в първия ден, в който неговият екип е свободен.
+
+    Само измества НАПРЕД — предшественик не може да бъде нарушен от закъснение.
+
+    Returns:
+        (задачи, бележки) — колко клона са преместени и с колко дни.
+    """
+    деца: dict[str, list[dict]] = {}
+    for t in tasks or []:
+        if t.get("is_summary") or t.get("type") == "summary":
+            continue
+        деца.setdefault(str(t.get("parent_id") or ""), []).append(t)
+
+    редици: dict[tuple[str, str], list[str]] = {}
+    for pkg in packages or []:
+        if pkg.chain not in _ЗА_РЕДИЦА_НА_ЕКИПА:
+            continue
+        фронт = str(getattr(pkg, "front", "") or "")
+        if not фронт or str(pkg.id) not in деца:
+            continue
+        редици.setdefault((str(getattr(pkg, "network", "") or ""), фронт),
+                          []).append(str(pkg.id))
+
+    преместени = 0
+    дни_общо = 0
+    for (_мрежа, _фронт), pids in sorted(редици.items()):
+        обхвати = []
+        for pid in pids:
+            листа = деца[pid]
+            начало = min(int(_num(t.get("start_day")) or 0) for t in листа)
+            край = max(int(_num(t.get("end_day")) or 0) for t in листа)
+            обхвати.append((начало, край, pid))
+        обхвати.sort()
+
+        свободен = 0
+        for начало, _край, pid in обхвати:
+            изместване = max(0, свободен - начало)
+            листа = деца[pid]
+            if изместване:
+                for t in листа:
+                    t["start_day"] = int(_num(t.get("start_day"))) + изместване
+                    t["end_day"] = int(_num(t.get("end_day"))) + изместване
+                    t["queued_for_crew"] = изместване
+                преместени += 1
+                дни_общо += изместване
+            свободен = max(int(_num(t.get("end_day")) or 0) for t in листа) + 1
+
+    бележки: list[str] = []
+    if преместени:
+        бележки.append(
+            f"Редица на екипа: {преместени} клона изместени с общо {дни_общо} "
+            "дни, за да не се застъпват — един екип кара един клон наведнъж.")
+        logger.info("%s", бележки[0])
+    return tasks, бележки
+
+
+def _num(стойност: Any) -> float:
+    try:
+        return float(стойност)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 #: Изключването на непрекъснатите действия — за сравнение при мерене.

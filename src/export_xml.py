@@ -554,6 +554,12 @@ def _build_tasks(
         # Затова режимът е избираем.  'pinned' пази досегашното поведение
         # (урок #19); 'flexible' оставя MS Project да планира по зависимости.
         ET.SubElement(task_elem, "Manual").text = "0"
+        # ФИКСИРАНА ПРОДЪЛЖИТЕЛНОСТ (25.08.2026).  При типа по подразбиране
+        # („фиксирани ресурси") MS Project смята продължителността от обема
+        # работа — а нашите задачи нямат такъв — и я връща на НУЛА.  Мерено:
+        # 328 задачи излизаха „0 days" в готовия файл.  Графикът на
+        # изпълнителя носи същия тип на всяка задача.
+        ET.SubElement(task_elem, "Type").text = "1"
         _apply_constraint(task_elem, task, constraint_mode, start_str, finish_str)
 
         # Calendar

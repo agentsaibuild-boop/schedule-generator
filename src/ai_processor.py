@@ -638,6 +638,7 @@ class AIProcessor:
                                        verify_declared_terms)
         from src.work_package import (applied_resolutions, assign_fronts,
                                       check_conservation,
+                                      queue_sections_per_crew,
                                       conservation_messages, expand_packages,
                                       enforce_network_order,
                                       link_cross_discipline, load_chains,
@@ -1393,6 +1394,20 @@ class AIProcessor:
         tasks, cont_notes = make_actions_continuous(tasks)
         for note in cont_notes:
             _prog(note)
+
+        # РЕДИЦАТА НА ЕКИПА — НАКРАЯ, ВЪРХУ ДАТИТЕ (изпълнителят, 25.08.2026).
+        # Връзките в редицата ги слага `chain_sections_sequentially`, но след
+        # нея изравняването, налагането на срока и сливането разтеглят стъпки и
+        # застъпването се връща: ЕВ1 държеше 36 клона с 19 застъпени двойки.
+        # Тук клонът се измества до първия ден, в който неговият екип е
+        # свободен — само напред.
+        # Изключено по подразбиране: местенето на дати накрая къса връзката с
+        # договорните фази (приемането оставаше ПРЕДИ края на строителството).
+        # Редицата се държи от зависимостите — виж `chain_sections_sequentially`.
+        if os.getenv("CREW_QUEUE_HARD", "0") not in ("0", "false", ""):
+            tasks, queue_notes = queue_sections_per_crew(tasks, packages)
+            for note in queue_notes:
+                _prog(note)
 
         cpm = builder.compute_critical_path(tasks)
         if not cpm["warnings"]:
