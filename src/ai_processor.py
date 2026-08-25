@@ -639,6 +639,8 @@ class AIProcessor:
         from src.work_package import (applied_resolutions, assign_fronts,
                                       check_conservation,
                                       queue_sections_per_crew,
+                                      sync_durations_to_span,
+                                      fit_contract_span,
                                       conservation_messages, expand_packages,
                                       enforce_network_order,
                                       link_cross_discipline, load_chains,
@@ -1196,8 +1198,21 @@ class AIProcessor:
         for note in route_notes:
             _prog(note)
 
+        # РЕДИЦАТА НА ЕКИПА Е ПЪРВА (изпълнителят, 25.08.2026: „графиката по
+        # дейностите на един екип в един участък трябва да върви една след
+        # друга… може едновременно да работят екипите, на различни клонове").
+        #
+        # Дотук първи минаваха кръстосаните връзки и редицата отстъпваше пред
+        # тях: 14 връзки не се слагаха, защото биха затворили кръг, и екипът
+        # оставаше на два клона наведнъж.  Един екип на два клона е физика, а
+        # кръстосаната връзка е предпочитание — затова редът се обръща.
+        tasks, seq_notes = chain_sections_sequentially(
+            expansion.tasks, packages, chains)
+        for note in seq_notes:
+            _prog(note)
+
         tasks = link_cross_discipline(
-            expansion.tasks, packages, chains,
+            tasks, packages, chains,
             spatial_authoritative=spatial_authoritative)
         # ПРОЕКТНАТА ЧАСТ СЛЕДВА РАЗМЕРА НА СВОЯТА МРЕЖА (изпълнителят,
         # 25.08.2026).  Веригата идва от обект със съизмерими мрежи и дава
@@ -1217,9 +1232,6 @@ class AIProcessor:
         # ПОСЛЕДОВАТЕЛНА РАБОТА (изпълнителят, 24.08.2026).  Отговорът на
         # въпрос 4 мени и ПОДРЕДБАТА, не само сметката за темпото: при „не"
         # участъкът чака предишния, както в човешкия график.
-        tasks, seq_notes = chain_sections_sequentially(tasks, packages, chains)
-        for note in seq_notes:
-            _prog(note)
         for note in phase_notes:
             _prog(note)
 
@@ -1412,6 +1424,19 @@ class AIProcessor:
         cpm = builder.compute_critical_path(tasks)
         if not cpm["warnings"]:
             tasks = cpm["schedule"]
+
+        # КРАЯТ СЕ ЗАКОВАВА НА ОБЯВЕНИЯ ДЕН, а надзорът се разтяга пак върху
+        # новия край (изпълнителят, 25.08.2026: „Искам всичко да е 255 дни, 45
+        # проектиране и 210 строителство, авторският надзор от ден 46 до края").
+        tasks, fit_notes = fit_contract_span(tasks)
+        for note in fit_notes:
+            _prog(note)
+        # И НАКРАЯ: продължителността на всяка задача = дните, които заема.
+        # Разминат ли се двете, лентата в MS Project е по-дълга от дните и
+        # покрива следващата дейност — точно застъпването, което човекът видя.
+        tasks, sync_notes = sync_durations_to_span(tasks)
+        for note in sync_notes:
+            _prog(note)
 
         # Обобщаващите се разтеглят по децата си — иначе Gantt-ът и таблицата
         # показват друго от MS Project (одит 2026-08-07: 26 от 26 грешни).

@@ -560,6 +560,11 @@ def _build_tasks(
         # 328 задачи излизаха „0 days" в готовия файл.  Графикът на
         # изпълнителя носи същия тип на всяка задача.
         ET.SubElement(task_elem, "Type").text = "1"
+        # И НЕ Е ЗАВИСИМА ОТ ОБЕМА РАБОТА.  С три назначени ресурса MS Project
+        # смята Work = 3 × 8 ч и връща продължителността като 3 ДНИ вместо
+        # един — мерено: 120 застъпени дейности в готовия .mpp при нула в
+        # самия график.  Продължителността ни идва от дните, не от обема.
+        ET.SubElement(task_elem, "EffortDriven").text = "0"
         _apply_constraint(task_elem, task, constraint_mode, start_str, finish_str)
 
         # Calendar

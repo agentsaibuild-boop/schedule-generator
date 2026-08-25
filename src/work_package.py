@@ -1869,8 +1869,27 @@ def assign_fronts(
     if not по_верига and подразбиране == 1:
         return [_with_front(p, _име_на_екип(p.network, 1)) for p in packages]
 
-    def weight(pkg: SpatialWorkPackage) -> float:
+    def _количество(pkg: SpatialWorkPackage) -> float:
         return sum(abs(float(i.quantity)) for i in pkg.items) or 1.0
+
+    #: Колко „метра" струват задължителните стъпки на един участък.
+    #
+    # ЗАЩО НЕ САМО КОЛИЧЕСТВОТО (25.08.2026).  Балансът по метри дава на всеки
+    # екип еднакви метри, но НЕ еднакви дни: клон от 30 м пак иска девет
+    # стъпки по поне един ден.  Мерено на Тръстеник — четири водопроводни екипа
+    # с равни метри излязоха с 374, 368, 320 и 178 дни работа, тоест единият
+    # стоеше два пъти по-малко от другия.
+    #
+    # Затова цената на участъка е ПРОМЕНЛИВА (метрите) плюс ФИКСИРАНА
+    # (задължителните стъпки).  Фиксираната се взима от самите данни — медианата
+    # на веригата — вместо да се пише наизуст число.
+    def _фиксирана_цена(група: list[SpatialWorkPackage]) -> float:
+        стойности = sorted(_количество(p) for p in група)
+        if not стойности:
+            return 0.0
+        среда = len(стойности) // 2
+        return (стойности[среда] if len(стойности) % 2
+                else (стойности[среда - 1] + стойности[среда]) / 2)
 
     # ЕКИПИТЕ СА ПО ДИСЦИПЛИНА, не общи (19.08.2026).
     #
@@ -1887,8 +1906,13 @@ def assign_fronts(
     # Мрежите се балансират поотделно и вече имат СВОИ фронтове.
     out: list[SpatialWorkPackage] = []
     for верига in sorted({p.chain for p in packages}):
-        група = sorted((p for p in packages if p.chain == верига),
-                       key=lambda p: (-weight(p), p.id))
+        от_веригата = [p for p in packages if p.chain == верига]
+        фиксирана = _фиксирана_цена(от_веригата)
+
+        def weight(pkg: SpatialWorkPackage, _ф: float = фиксирана) -> float:
+            return _количество(pkg) + _ф
+
+        група = sorted(от_веригата, key=lambda p: (-weight(p), p.id))
         n = колко(група[0])
         load = [0.0] * n
         buckets: list[list[SpatialWorkPackage]] = [[] for _ in range(n)]
@@ -2966,6 +2990,35 @@ def link_cross_discipline(
     # `enforce_network_order`, който се пуска след първия проход.
     rules = [r for r in rules if not r.get("network_order")]
 
+    # КРЪСТОСАНАТА ВРЪЗКА ОТСТЪПВА ПРЕД РЕДИЦАТА НА ЕКИПА (25.08.2026).
+    #
+    # От днес редицата се навързва ПРЕДИ тези връзки: един екип на два клона
+    # наведнъж е физика, а „каналът преди водопровода по същото трасе" е
+    # предпочитание.  Затова тук връзка, която би затворила кръг с вече
+    # съществуващите, се ПРОПУСКА и се брои — иначе графикът не се подрежда
+    # топологично и всичко ляга на ден 1 (мерено: 1015 задачи, срок 0 дни).
+    наследници: dict[str, set[str]] = {}
+    for t in out:
+        ид = str(t.get("id"))
+        for dep in t.get("dependencies") or []:
+            предшественик = _dep_id(dep)
+            if предшественик:
+                наследници.setdefault(предшественик, set()).add(ид)
+
+    def _достига(откъде: str, докъде: str) -> bool:
+        стек, видени = [откъде], {откъде}
+        while стек:
+            текущ = стек.pop()
+            if текущ == докъде:
+                return True
+            for следващ in наследници.get(текущ, ()):
+                if следващ not in видени:
+                    видени.add(следващ)
+                    стек.append(следващ)
+        return False
+
+    пропуснати_заради_кръг = 0
+
     for _, chains_here in by_alignment.items():
         for rule in rules:
             preds = chains_here.get(rule.get("predecessor_chain"), [])
@@ -2988,6 +3041,9 @@ def link_cross_discipline(
                             deps = list(task.get("dependencies") or [])
                             if any(_dep_id(d) == src for d in deps):
                                 continue
+                            if _достига(dst, src):
+                                пропуснати_заради_кръг += 1
+                                continue
                             deps.append({
                                 "predecessor_id": src,
                                 "type": rule.get("type", "FS"),
@@ -2995,6 +3051,10 @@ def link_cross_discipline(
                                 "reason": rule.get("why", "cross_discipline"),
                             })
                             task["dependencies"] = deps
+                            наследници.setdefault(src, set()).add(dst)
+    if пропуснати_заради_кръг:
+        logger.info("Кръстосани връзки, пропуснати заради кръг с редицата на "
+                    "екипа: %d", пропуснати_заради_кръг)
     return out
 
 
@@ -3382,6 +3442,128 @@ def order_chronologically(tasks: list[dict]) -> list[dict]:
     # Каквото е останало извън дървото, върви накрая — нищо не се губи.
     изход.extend(t for t in tasks if id(t) not in видени)
     return изход
+
+
+def sync_durations_to_span(tasks: list[dict]) -> tuple[list[dict], list[str]]:
+    """Продължителността на задачата = дните, които тя заема.  Без изключения.
+
+    ЗАЩО (изпълнителят, 25.08.2026): „226 Монтаж на фасонни части… и преди е
+    свършило да е започнало Промиване… всяка дейност е след предходната".
+
+    Прав е, и причината е разминаване В НАШИТЕ СОБСТВЕНИ ЧИСЛА: задачата
+    заемаше дни 54–57 (четири дни), а полето `duration` беше останало 6 от
+    по-ранен проход.  Датите в графика идват от дните, а лентата в MS Project —
+    от продължителността; щом двете не съвпадат, лентата излиза по-дълга и
+    покрива следващата дейност.
+
+    Тук двете се изравняват НАКРАЯ, по дните — те са това, което човекът чете
+    и което изнасяме.  Milestone-ите остават нула.
+
+    Returns:
+        (задачи, бележки) — колко задачи са били разминати.
+    """
+    оправени = 0
+    for t in tasks or []:
+        if t.get("is_summary") or t.get("type") == "summary":
+            continue
+        if t.get("milestone") or t.get("is_milestone"):
+            if _num(t.get("duration")):
+                t["duration"] = 0
+                оправени += 1
+            continue
+        начало, край = t.get("start_day"), t.get("end_day")
+        if начало is None or край is None:
+            continue
+        дни = max(int(_num(край)) - int(_num(начало)) + 1, 1)
+        if int(_num(t.get("duration"))) != дни:
+            t["computed_duration"] = int(_num(t.get("duration")))
+            t["duration"] = дни
+            оправени += 1
+
+    бележки: list[str] = []
+    if оправени:
+        бележки.append(
+            f"Изравнени с дните: {оправени} задачи носеха продължителност, "
+            "различна от дните, които заемат — оттам идваха застъпените ленти.")
+        logger.info("%s", бележки[0])
+    return tasks, бележки
+
+
+def fit_contract_span(tasks: list[dict]) -> tuple[list[dict], list[str]]:
+    """Обектът свършва точно на ден `проектиране + строителство`.
+
+    ЗАЩО (изпълнителят, 25.08.2026): „Искам всичко да е 255 дни, 45 дни
+    проектиране и 210 дни строителство".  Обявеният срок е ТАВАН И ЦЕЛ: график,
+    който свършва по-рано, поема риск без насрещна полза, а такъв, който
+    свършва по-късно, е неотговаряща оферта.
+
+    Налагането по фази (`enforce_declared_phase_terms`) работи по-нагоре по
+    веригата; след него минават изравняването, редицата на екипите и сливането
+    на непрекъснатите действия, и краят пак увисва — мерено на Тръстеник: 235
+    дни при обявени 255.  Тук краят се ЗАКОВАВА: последните действия по
+    приемането се разтеглят до целевия ден.
+
+    Returns:
+        (задачи, бележки).
+    """
+    from src.tender_parameters import declared_phase_days
+
+    обявени = declared_phase_days() or {}
+    проектиране = int(обявени.get("design") or 0)
+    строителство = int(обявени.get("construction") or 0)
+    if проектиране <= 0 or строителство <= 0:
+        return tasks, []
+    цел = проектиране + строителство
+
+    листа = [t for t in tasks or []
+             if not (t.get("is_summary") or t.get("type") == "summary")
+             and t.get("end_day") is not None]
+    if not листа:
+        return tasks, []
+    край = max(int(_num(t.get("end_day"))) for t in листа)
+    недостиг = цел - край
+    if недостиг <= 0:
+        return tasks, []
+
+    # Разтягат се ПРИЕМАНЕТО и последните му действия — те държат края.
+    опашка = [t for t in листа
+              if str(t.get("wbs_root") or "") == "acceptance"
+              and not (t.get("milestone") or t.get("is_milestone"))]
+    ако_няма = [t for t in листа if int(_num(t.get("end_day"))) == край]
+    работни = опашка or [t for t in ако_няма
+                         if not (t.get("milestone") or t.get("is_milestone"))]
+    if not работни:
+        return tasks, []
+
+    # Последното действие поема дните, а всичко след него се мести напред.
+    последно = max(работни, key=lambda t: int(_num(t.get("end_day"))))
+    праг = int(_num(последно.get("end_day")))
+    последно["end_day"] = праг + недостиг
+    последно["duration"] = (int(_num(последно.get("end_day")))
+                            - int(_num(последно.get("start_day"))) + 1)
+    последно["declared_term_days"] = True
+    for t in листа:
+        if t is последно:
+            continue
+        if int(_num(t.get("start_day"))) > праг:
+            t["start_day"] = int(_num(t.get("start_day"))) + недостиг
+            t["end_day"] = int(_num(t.get("end_day"))) + недостиг
+
+    # НАДЗОРЪТ ДО КРАЯ (изпълнителят: „авторският надзор е от ден 46 до края").
+    # `enforce_construction_span` мери края по задачите, които НЕ зависят от
+    # него — заради ратчета — и оставаше един ден по-къс от договорния край.
+    for t in tasks or []:
+        if not t.get("spans_construction"):
+            continue
+        t["end_day"] = цел
+        t["duration"] = цел - int(_num(t.get("start_day"))) + 1
+
+    бележка = (f"Договорен срок: обектът свършва на ден {цел} "
+               f"({проектиране} проектиране + {строителство} строителство) — "
+               f"краят е разтеглен с {недостиг} дни по приемането, а надзорът "
+               f"стига до ден {цел}.")
+    logger.info("%s", бележка)
+    return tasks, [бележка]
 
 
 def queue_sections_per_crew(
