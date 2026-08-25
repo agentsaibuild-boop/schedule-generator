@@ -1279,8 +1279,16 @@ class AIProcessor:
         # беше разтеглило.  Обхватът, който човекът вижда, е ТОЗИ, а не онзи
         # отпреди последното местене.
         def _преразпиши(текущи: list[dict]) -> list[dict]:
+            # С ПРИТЕГЛЯНЕ НАЗАД.  Изравняването без `pull_in` пази старата
+            # начална дата на всяка задача („подът е СОБСТВЕНАТА дата"), затова
+            # свиването на продължителностите НЕ свиваше графика: мерено на
+            # Русе — 76 екипо-дни работа, разпънати в 243 дни, от които 164
+            # напълно празни, а фазата се отчиташе „свита от 244 на 243".
             текущи = ScheduleBuilder().reschedule(текущи)["schedule"]
-            return ScheduleBuilder().level_resources(текущи)["schedule"]
+            изравнени = ScheduleBuilder().level_resources(текущи, pull_in=True)
+            if изравнени.get("warnings"):
+                изравнени = ScheduleBuilder().level_resources(текущи)
+            return изравнени["schedule"]
 
         tasks, term_notes = enforce_declared_phase_terms(
             tasks, packages, chains, _преразпиши)
