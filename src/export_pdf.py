@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import logging
 import math
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -62,17 +63,17 @@ RIGHT_MARGIN = 10 * mm
 # и чак СЛЕД тях започва скалата на дните.  Стойностите там са „46 d", „159 d",
 # „6SS+10 d" — дни, не дати.  В процедура датите нямат място: стартът е
 # неизвестен, докато не се подпише договорът и не се състави Протокол 2а.
-COL_NUM_W = 7 * mm          # ID
-COL_NAME_W = 56 * mm        # Вид дейност / Участък
-COL_UNIT_W = 9 * mm         # ед.мярка
-COL_DN_W = 10 * mm          # диаметър
-COL_QTY_W = 13 * mm         # к-во
-COL_DAYS_W = 9 * mm         # Срок
-COL_PRED_W = 13 * mm        # Последователност
-COL_START_W = 11 * mm       # Начало (ден)
-COL_END_W = 11 * mm         # Край (ден)
-COL_CREW_W = 9 * mm         # ЕКИП
-COL_RES_W = 34 * mm         # Ресурси
+COL_NUM_W = 8 * mm          # ID
+COL_NAME_W = 58 * mm        # Вид дейност / Участък
+COL_UNIT_W = 12 * mm        # ед.мярка
+COL_DN_W = 12 * mm          # диаметър
+COL_QTY_W = 14 * mm         # к-во
+COL_DAYS_W = 12 * mm        # Срок
+COL_PRED_W = 15 * mm        # Последователност
+COL_START_W = 13 * mm       # Начало (ден)
+COL_END_W = 13 * mm         # Край (ден)
+COL_CREW_W = 10 * mm        # ЕКИП
+COL_RES_W = 36 * mm         # Ресурси
 TABLE_W = (COL_NUM_W + COL_NAME_W + COL_UNIT_W + COL_DN_W + COL_QTY_W
            + COL_DAYS_W + COL_PRED_W + COL_START_W + COL_END_W
            + COL_CREW_W + COL_RES_W)
@@ -81,6 +82,20 @@ LEFT_MARGIN = 6 * mm + TABLE_W
 #: Скалата почва ПРЕДИ ден 1 — „за да се вижда по-ясно кога започва всичко"
 #: (изпълнителят, 25.08.2026).  Еталонът също оставя ден пред началото.
 ОСТА_ЗАПОЧВА = -2
+
+#: ЕДИН ДЕН = ЕДНА КОЛОНКА (изпълнителят, 25.08.2026: „графика трябва да мога
+#: да го разгледам и да виждам дните от първия до последния").  Еталонът на
+#: Илиянци прави точно това: над таблицата стоят „-1, 1, 2, 3 …" до ден 780, на
+#: един-единствен лист 8504 × 8504 pt.  Блоковете по 30 дни, които стояха тук
+#: дотогава, показваха срока, но не и деня.
+ДЕН_W = 2.9 * mm
+#: По-тясно от това числото на деня не се чете — тогава се надписва всеки пети.
+ДЕН_W_МИН = 1.1 * mm
+#: Границата на PDF формата: 200 инча.  По-голям лист не се отваря никъде.
+МАКС_ЛИСТ = 14000.0
+#: Заглавният блок и легендата — единственото, което не е таблица или скала.
+ЗАГЛАВИЕ_H = 30 * mm
+ЛЕГЕНДА_H = 14 * mm
 
 # Row heights
 ROW_H = 3.8 * mm
@@ -238,7 +253,7 @@ _КОЛОНИ = (
     ("диаметър", COL_DN_W),
     ("к-во", COL_QTY_W),
     ("Срок", COL_DAYS_W),
-    ("Послед.", COL_PRED_W),
+    ("Последователност", COL_PRED_W),
     ("Начало (ден)", COL_START_W),
     ("Край (ден)", COL_END_W),
     ("ЕКИП", COL_CREW_W),
@@ -278,7 +293,7 @@ def _последователност(task: dict, row_of: dict[str, int]) -> str
         лаг = int(dep.get("lag_days") or 0) if isinstance(dep, dict) else 0
         текст = f"{ред}{'' if вид == 'FS' else вид}"
         if лаг:
-            текст += f"{'+' if лаг > 0 else ''}{лаг} d"
+            текст += f"{'+' if лаг > 0 else ''}{лаг} дни"
         парчета.append(текст)
     return ";".join(парчета)
 
@@ -402,6 +417,44 @@ def export_to_pdf(
         return None
 
 
+@dataclass(frozen=True)
+class Лист:
+    """Размерите на ЕДИН лист, изчислени от самия график.
+
+    Тръжният график не се реже на страници: човекът иска да го разгледа целия
+    и да види дните от първия до последния (изпълнителят, 25.08.2026).
+    Еталонът на Илиянци е точно такъв — един лист 8504 × 8504 pt.  Затова
+    листът тук СЛЕДВА графика, вместо графикът да следва листа.
+    """
+
+    page_w: float
+    page_h: float
+    table_left: float
+    gantt_left: float
+    gantt_width: float
+    day_w: float
+    content_top: float
+
+
+def _изчисли_листа(total_days: int, редове: list[dict]) -> Лист:
+    """Колко голям трябва да е листът, за да се побере всичко наведнъж."""
+    дни = max(total_days - ОСТА_ЗАПОЧВА + 1, 1)
+    table_left = 6 * mm
+    gantt_left = table_left + TABLE_W + 4 * mm
+
+    day_w = ДЕН_W
+    page_w = gantt_left + дни * day_w + RIGHT_MARGIN
+    if page_w > МАКС_ЛИСТ:
+        day_w = max((МАКС_ЛИСТ - gantt_left - RIGHT_MARGIN) / дни, ДЕН_W_МИН)
+        page_w = gantt_left + дни * day_w + RIGHT_MARGIN
+
+    висок = sum(PHASE_ROW_H if r.get("_is_phase") else ROW_H for r in редове)
+    page_h = min(ЗАГЛАВИЕ_H + HEADER_H + висок + ЛЕГЕНДА_H, МАКС_ЛИСТ)
+    return Лист(page_w=page_w, page_h=page_h, table_left=table_left,
+                gantt_left=gantt_left, gantt_width=дни * day_w, day_w=day_w,
+                content_top=page_h - ЗАГЛАВИЕ_H)
+
+
 def _render_pdf(
     schedule_data: list[dict],
     project_name: str,
@@ -412,16 +465,11 @@ def _render_pdf(
     font: str,
     font_bold: str,
 ) -> bytes:
-    """Core PDF rendering logic."""
+    """Целият график на ЕДИН лист: таблицата вляво, скалата по дни вдясно."""
     params = project_params or {}
 
-    # Flatten schedule for display
     flat = _flatten_schedule(schedule_data)
-
-    # Calculate total days and date range
-    all_tasks = flat
-    if not all_tasks:
-        all_tasks = schedule_data
+    all_tasks = flat or schedule_data
 
     max_end_day = max(
         (t.get("end_day", t.get("start_day", 0) + t.get("duration", 0))
@@ -430,90 +478,43 @@ def _render_pdf(
     )
     total_days = max(max_end_day, 1)
 
-
-    # Calculate rows per page
-    # +4mm за реда с разкриването по EU AI Act чл. 50 (виж _draw_title)
-    title_area_h = TOP_MARGIN + 22 * mm  # title block
-    legend_area_h = BOTTOM_MARGIN + 10 * mm
-    usable_h = PAGE_H - title_area_h - legend_area_h - HEADER_H
-    rows_per_page = int(usable_h / ROW_H)
-
-    num_pages = _calculate_pages(len(flat), rows_per_page)
-
-    # Gantt dimensions
-    gantt_width = GANTT_RIGHT - GANTT_LEFT
-
-    # Скалата е В ДНИ, не в календар — тръжен график
-    months = _generate_day_blocks(total_days)
+    лист = _изчисли_листа(total_days, flat)
 
     # Кой ред е коя задача — „Последователност" сочи НОМЕРА, не вътрешния ключ.
     row_of = {str(t.get("id")): int(t.get("_row") or 0) for t in flat if t.get("id")}
 
-    # Create PDF
     buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=PAGE_SIZE)
+    c = canvas.Canvas(buffer, pagesize=(лист.page_w, лист.page_h))
     c.setTitle(f"График — {project_name}")
     # EU AI Act чл. 50(2) — машинно четимо маркиране в метаданните на файла.
     c.setSubject(CONTENT_DISCLOSURE_BG)
     c.setCreator(SYSTEM_NAME)
     c.setKeywords(pdf_metadata_keywords())
 
-    for page_num in range(num_pages):
-        start_idx = page_num * rows_per_page
-        end_idx = min(start_idx + rows_per_page, len(flat))
-        page_tasks = flat[start_idx:end_idx]
+    _draw_title(c, лист, project_name, params, total_days, font, font_bold)
+    _draw_table_header(c, лист, font, font_bold)
+    _draw_day_axis(c, лист, total_days, font)
 
-        if page_num > 0:
-            c.showPage()
+    y = лист.content_top - HEADER_H
+    долу = y - sum(PHASE_ROW_H if t.get("_is_phase") else ROW_H for t in flat)
 
-        # Draw page contents
-        _draw_title(c, project_name, params, start_date, total_days, font, font_bold)
+    _draw_day_grid(c, лист, total_days, лист.content_top - HEADER_H, долу)
 
-        content_top = PAGE_H - title_area_h
-        _draw_table_header(c, content_top, font_bold)
-        _draw_month_header(c, content_top, months, total_days, gantt_width)
+    for i, task in enumerate(flat):
+        row_h = PHASE_ROW_H if task.get("_is_phase") else ROW_H
+        if i % 2 == 0:
+            c.setFillColor(HexColor("#F8F8F8"))
+            c.rect(лист.table_left, y - row_h, TABLE_W, row_h, fill=1, stroke=0)
+        _draw_task_row(
+            c, лист, task, y, row_h, int(task.get("_row", i + 1)),
+            total_days, show_critical_path, font, font_bold,
+            task.get("_is_sub", False), row_of,
+        )
+        y -= row_h
 
-        # Draw rows
-        y = content_top - HEADER_H
-        for i, task in enumerate(page_tasks):
-            if y < legend_area_h:
-                break
-
-            row_h = PHASE_ROW_H if task.get("_is_phase") else ROW_H
-            is_sub = task.get("_is_sub", False)
-
-            # Alternating row background
-            if i % 2 == 0:
-                c.setFillColor(HexColor("#F8F8F8"))
-                c.rect(LEFT_MARGIN - TABLE_W, y - row_h, TABLE_W, row_h, fill=1, stroke=0)
-                c.rect(GANTT_LEFT - 4 * mm, y - row_h, gantt_width + 4 * mm, row_h, fill=1, stroke=0)
-
-            _draw_task_row(
-                c, task, y, row_h, int(task.get("_row", start_idx + i + 1)),
-                total_days, gantt_width, show_critical_path,
-                font, font_bold, is_sub, row_of,
-            )
-
-            y -= row_h
-
-        # Phase separator line (design/construction boundary)
-        _draw_phase_separator(c, schedule_data, total_days, gantt_width, content_top, y, font)
-
-        # Month grid lines on Gantt area
-        _draw_month_grid(c, months, total_days, gantt_width, content_top - HEADER_H, y)
-
-        # Legend
-        _draw_legend(c, font, font_bold, schedule_data)
-
-        # Page number
-        if num_pages > 1:
-            c.setFont(font, FONT_SIZE_SMALL)
-            c.setFillColor(colors.gray)
-            c.drawRightString(
-                PAGE_W - RIGHT_MARGIN,
-                BOTTOM_MARGIN / 2,
-                f"Страница {page_num + 1} от {num_pages}",
-            )
+    _draw_phase_separator(c, лист, schedule_data, total_days,
+                          лист.content_top - HEADER_H, y, font)
+    _draw_legend(c, лист, font, font_bold, schedule_data)
 
     c.save()
     pdf_bytes = buffer.getvalue()
@@ -524,183 +525,198 @@ def _render_pdf(
 
     return pdf_bytes
 
-
-# ---------------------------------------------------------------------------
-# Drawing functions
-# ---------------------------------------------------------------------------
-
-
 def _draw_title(
     c: canvas.Canvas,
+    лист: Лист,
     project_name: str,
     params: dict,
-    start_date: str,
     total_days: int,
     font: str,
     font_bold: str,
 ) -> None:
-    """Draw the title block at the top of the page."""
-    y = PAGE_H - 8 * mm
+    """Заглавният блок.  БЕЗ ДАТИ — нито на съставяне, нито на изпълнение.
 
-    # Line 1: Main title
+    Изпълнителят, 25.08.2026: „никъде да няма дати, а само брой дни".  В
+    процедура договор няма, Протокол 2а няма, тоест всяка календарна дата е
+    измислена — включително датата, на която е съставен листът.
+    """
+    y = лист.page_h - 8 * mm
+
     c.setFont(font_bold, FONT_SIZE_TITLE)
     c.setFillColor(colors.black)
-    c.drawCentredString(PAGE_W / 2, y, "ЛИНЕЕН ГРАФИК")
+    c.drawCentredString(лист.page_w / 2, y, "ЛИНЕЕН ГРАФИК")
 
-    # Line 2: Project info
     y -= 6 * mm
     version = params.get("version", "V1.0")
-    date_str = datetime.now().strftime("%d.%m.%Y")
     c.setFont(font, FONT_SIZE_SUBTITLE)
-    c.drawCentredString(
-        PAGE_W / 2, y,
-        f"Проект: {project_name}    Версия: {version}    Дата: {date_str}",
-    )
+    c.drawCentredString(лист.page_w / 2, y,
+                        f"Проект: {project_name}    Версия: {version}")
 
-    # Line 3: Duration info
     y -= 5 * mm
     design_days = params.get("design_days", 0)
     construction_days = params.get("construction_days", 0)
     if design_days and construction_days:
         duration_text = (
-            f"Срок: {total_days} дни ({design_days}д проектиране + "
-            f"{construction_days}д строителство)"
+            f"Срок: {total_days} дни ({design_days} дни проектиране + "
+            f"{construction_days} дни строителство)"
         )
     else:
         duration_text = f"Срок: {total_days} дни"
-    # Тръжен график: няма календар, защото няма подписан договор.  Броенето е
-    # от ден 1 — денят, в който тръгва изпълнението (Протокол 2а).
     duration_text += "   ·   всички срокове са в ДНИ от ден 1"
     c.setFont(font, FONT_SIZE_SMALL + 1)
-    c.drawCentredString(PAGE_W / 2, y, duration_text)
+    c.drawCentredString(лист.page_w / 2, y, duration_text)
 
-    # Line 4: Teams
     teams = params.get("teams", "")
     if teams:
         y -= 4 * mm
-        c.drawCentredString(PAGE_W / 2, y, f"Екипи: {teams}")
+        c.drawCentredString(лист.page_w / 2, y, f"Екипи: {teams}")
 
     # EU AI Act чл. 50 — видимо разкриване върху самия документ.
-    # Стои НАД разделителната линия, в заглавния блок: този PDF отива при
-    # възложителя и получателят трябва да види произхода без да рови в
-    # метаданните.
     y -= 4 * mm
     c.setFont(font, FONT_SIZE_SMALL)
     c.setFillColor(colors.grey)
-    c.drawCentredString(PAGE_W / 2, y, CONTENT_DISCLOSURE_BG)
+    c.drawCentredString(лист.page_w / 2, y, CONTENT_DISCLOSURE_BG)
     c.setFillColor(colors.black)
 
-    # Separator line below title
     y -= 3 * mm
     c.setStrokeColor(colors.black)
     c.setLineWidth(0.5)
-    c.line(LEFT_MARGIN - TABLE_W, y, PAGE_W - RIGHT_MARGIN, y)
+    c.line(лист.table_left, y, лист.page_w - RIGHT_MARGIN, y)
+
+def _раздели_заглавието(заглавие: str, ширина: float, c, шрифт: str,
+                        размер: float) -> list[str]:
+    """Заглавието на колоната на един или два реда — както в еталона.
+
+    „Начало (ден)" не се побира в 13 mm и лягаше върху съседната колона; в
+    еталона то стои на два реда, „Начало" над „(ден)".
+    """
+    if c.stringWidth(заглавие, шрифт, размер) <= ширина:
+        return [заглавие]
+    думи = заглавие.split(" ")
+    for разрез in range(len(думи) - 1, 0, -1):
+        горе, долу = " ".join(думи[:разрез]), " ".join(думи[разрез:])
+        if (c.stringWidth(горе, шрифт, размер) <= ширина
+                and c.stringWidth(долу, шрифт, размер) <= ширина):
+            return [горе, долу]
+    # ЕДНА ДУМА, по-дълга от колоната: „Последователност".  Еталонът я реже по
+    # средата („Посл" / „едователност") — по-добре разрязана, отколкото легнала
+    # върху съседната колона.
+    for разрез in range(len(заглавие) - 1, 0, -1):
+        горе, долу = заглавие[:разрез], заглавие[разрез:]
+        if (c.stringWidth(горе, шрифт, размер) <= ширина
+                and c.stringWidth(долу, шрифт, размер) <= ширина):
+            return [горе, долу]
+    return [заглавие]
 
 
-def _draw_table_header(
-    c: canvas.Canvas, content_top: float, font_bold: str
-) -> None:
-    """Draw the table column headers."""
-    y = content_top
-    x_start = LEFT_MARGIN - TABLE_W
+def _draw_table_header(c: canvas.Canvas, лист: Лист, font: str,
+                       font_bold: str) -> None:
+    """Шапката на таблицата: единайсетте колони на еталона, четими."""
+    y = лист.content_top
+    x_start = лист.table_left
 
-    # Header background
     c.setFillColor(HexColor("#E0E0E0"))
     c.rect(x_start, y - HEADER_H, TABLE_W, HEADER_H, fill=1, stroke=0)
-
-    # Header border
     c.setStrokeColor(colors.black)
     c.setLineWidth(0.3)
     c.rect(x_start, y - HEADER_H, TABLE_W, HEADER_H, fill=0, stroke=1)
 
-    # Column headers
-    c.setFont(font_bold, FONT_SIZE + 1)
+    # Шапката е с РАЗМЕРА НА РЕДА, не по-едра: „ед.мярка" и „диаметър" не се
+    # побират в своите колони при по-голям шрифт и лягаха върху съседните.
+    размер = FONT_SIZE
+    c.setFont(font_bold, размер)
     c.setFillColor(colors.black)
-    text_y = y - HEADER_H + 2.5 * mm
 
-    x = x_start + 1 * mm
+    x = x_start
     for заглавие, ширина in _КОЛОНИ:
-        c.drawString(x, text_y, заглавие)
+        редове = _раздели_заглавието(заглавие, ширина - 1.6 * mm, c,
+                                     font_bold, размер)
+        text_y = y - HEADER_H + (2.4 * mm if len(редове) == 1 else 4.2 * mm)
+        for ред in редове:
+            c.drawString(x + 0.8 * mm, text_y, ред)
+            text_y -= 1.9 * mm
+        if x > x_start:
+            c.setStrokeColor(HexColor("#BBBBBB"))
+            c.setLineWidth(0.2)
+            c.line(x, y, x, y - HEADER_H)
         x += ширина
 
+def _draw_day_axis(c: canvas.Canvas, лист: Лист, total_days: int,
+                   font: str) -> None:
+    """Скалата: всеки ден със своя номер, от първия до последния.
 
-def _draw_month_header(
-    c: canvas.Canvas,
-    content_top: float,
-    months: list[dict],
-    total_days: int,
-    gantt_width: float,
-) -> None:
-    """Draw the month scale header above the Gantt area."""
-    y = content_top
+    Изпълнителят, 25.08.2026: „графика трябва да мога да го разгледам и да
+    виждам дните от първия до последния".  Еталонът на Илиянци надписва всеки
+    ден поотделно; блоковете по 30 дни, които стояха тук, показваха срока, но
+    не и деня.  При много дълъг обект колонката става по-тясна от числото — там
+    се надписва всеки пети ден, а решетката пак е дневна.
+    """
+    y = лист.content_top
 
-    # Header background for Gantt area
     c.setFillColor(HexColor("#E0E0E0"))
-    c.rect(GANTT_LEFT - 4 * mm, y - HEADER_H, gantt_width + 4 * mm, HEADER_H, fill=1, stroke=0)
-
+    c.rect(лист.gantt_left, y - HEADER_H, лист.gantt_width, HEADER_H,
+           fill=1, stroke=0)
     c.setStrokeColor(colors.black)
     c.setLineWidth(0.3)
-    c.rect(GANTT_LEFT - 4 * mm, y - HEADER_H, gantt_width + 4 * mm, HEADER_H, fill=0, stroke=1)
+    c.rect(лист.gantt_left, y - HEADER_H, лист.gantt_width, HEADER_H,
+           fill=0, stroke=1)
 
-    c.setFont(FONT_NAME if _font_registered else "Helvetica", FONT_SIZE)
+    размер = min(FONT_SIZE_SMALL, лист.day_w / (1.15 * mm) * FONT_SIZE_SMALL)
+    c.setFont(font, размер)
     c.setFillColor(colors.black)
+    през = 1 if лист.day_w >= 2.2 * mm else (5 if лист.day_w >= 1.4 * mm else 10)
 
-    for i, month in enumerate(months):
-        x1 = _day_to_x(month["start_day"], total_days, GANTT_LEFT, gantt_width)
-        x2 = _day_to_x(month["end_day"], total_days, GANTT_LEFT, gantt_width)
-        mid_x = (x1 + x2) / 2
-
-        # Month label
-        label = month["label"]
-        text_y = y - HEADER_H + 2.5 * mm
-
-        # Clip label if column is too narrow
-        col_w = x2 - x1
-        if col_w > 15 * mm:
-            c.drawCentredString(mid_x, text_y, label)
-        elif col_w > 8 * mm:
-            c.drawCentredString(mid_x, text_y, month["short_label"])
-
-        # Vertical separator line
-        if i > 0:
-            c.setStrokeColor(HexColor("#CCCCCC"))
-            c.setLineWidth(0.2)
-            c.line(x1, y, x1, y - HEADER_H)
+    text_y = y - HEADER_H + 2.4 * mm
+    for ден in range(ОСТА_ЗАПОЧВА, total_days + 1):
+        x1 = _day_to_x(ден, total_days, лист.gantt_left, лист.gantt_width)
+        x2 = _day_to_x(ден + 1, total_days, лист.gantt_left, лист.gantt_width)
+        if ден > 0 and (ден % през == 0 or ден == 1 or ден == total_days):
+            c.drawCentredString((x1 + x2) / 2, text_y, str(ден))
+        c.setStrokeColor(HexColor("#CCCCCC"))
+        c.setLineWidth(0.15)
+        c.line(x1, y, x1, y - HEADER_H)
 
     # ТУК ЗАПОЧВА ВСИЧКО.  Водещите дни пред ден 1 съществуват само за да се
-    # вижда този ръб (изпълнителят, 25.08.2026).  Без надпис ръбът е поредната
-    # разделителна чертица.
-    x_старт = _day_to_x(1, total_days, GANTT_LEFT, gantt_width)
+    # вижда този ръб (изпълнителят, 25.08.2026).
+    x_старт = _day_to_x(1, total_days, лист.gantt_left, лист.gantt_width)
     c.setStrokeColor(HexColor("#8B0000"))
     c.setLineWidth(0.8)
     c.line(x_старт, y, x_старт, y - HEADER_H)
     c.setFillColor(HexColor("#8B0000"))
-    c.setFont(FONT_NAME if _font_registered else "Helvetica", FONT_SIZE_SMALL)
-    c.drawString(x_старт + 0.5 * mm, y - 2.2 * mm, "ден 1")
+    c.setFont(font, FONT_SIZE_SMALL)
+    c.drawString(x_старт + 0.4 * mm, y - 1.6 * mm, "ден 1")
     c.setFillColor(colors.black)
+
+def _дни(стойност) -> str:
+    """Продължителност, изписана на български: „45 дни", „1 ден"."""
+    try:
+        число = float(стойност)
+    except (TypeError, ValueError):
+        return ""
+    цяло = int(число) if float(число).is_integer() else число
+    return f"{цяло} ден" if цяло == 1 else f"{цяло} дни"
 
 
 def _draw_task_row(
     c: canvas.Canvas,
+    лист: Лист,
     task: dict,
     y: float,
     row_h: float,
     row_num: int,
     total_days: int,
-    gantt_width: float,
     show_critical: bool,
     font: str,
     font_bold: str,
     is_sub: bool,
     row_of: dict[str, int] | None = None,
 ) -> None:
-    """Draw a single task row (table + Gantt bar)."""
+    """Един ред: единайсетте колони вляво, лентата вдясно."""
     row_of = row_of or {}
-    x_start = LEFT_MARGIN - TABLE_W
+    x_start = лист.table_left
     text_y = y - row_h + 1.0 * mm
     is_phase = task.get("_is_phase", False)
 
-    # Select font
     if is_phase:
         c.setFont(font_bold, FONT_SIZE + 0.5)
     elif is_sub:
@@ -709,9 +725,7 @@ def _draw_task_row(
         c.setFont(font, FONT_SIZE)
 
     c.setFillColor(colors.black)
-
-    # Table columns
-    x = x_start + 1 * mm
+    x = x_start + 0.8 * mm
 
     # ID
     c.drawString(x, text_y, str(row_num))
@@ -738,8 +752,7 @@ def _draw_task_row(
     c.setFont(font if not is_phase else font_bold, FONT_SIZE)
     duration = task.get("duration", 0) or 0
     if duration > 0:
-        цяло = int(duration) if float(duration).is_integer() else duration
-        c.drawString(x, text_y, f"{цяло} d")
+        c.drawString(x, text_y, _дни(duration))
     x += COL_DAYS_W
 
     c.setFont(font, FONT_SIZE_SMALL)
@@ -751,8 +764,8 @@ def _draw_task_row(
     start_day = task.get("start_day", 0)
     end_day = task.get("end_day", start_day + max(duration, 1) - 1)
     if duration > 0 or start_day:
-        c.drawString(x, text_y, f"{int(start_day)} d")
-        c.drawString(x + COL_START_W, text_y, f"{int(end_day)} d")
+        c.drawString(x, text_y, f"ден {int(start_day)}")
+        c.drawString(x + COL_START_W, text_y, f"ден {int(end_day)}")
     x += COL_START_W + COL_END_W
 
     # ЕКИП
@@ -763,29 +776,27 @@ def _draw_task_row(
                                          font, FONT_SIZE_SMALL))
     x += COL_CREW_W
 
-    # Ресурси — както в еталона: имената, разделени с „;"
+    # Ресурси — ПОСЛЕДНАТА колона от таблицата, вляво от графиката.
+    # „След графичното обозначаване да няма нищо" (изпълнителят, 25.08.2026):
+    # вдясно от лентите не се пише нито ресурс, нито име.
     ресурси = ";".join(str(r) for r in (task.get("resources") or []))
     if ресурси:
         c.drawString(x, text_y, _подрежи(c, ресурси, COL_RES_W - 1 * mm,
                                          font, FONT_SIZE_SMALL))
     c.setFont(font, FONT_SIZE)
 
-    # Table row bottom border
     c.setStrokeColor(HexColor("#E0E0E0"))
     c.setLineWidth(0.1)
-    c.line(x_start, y - row_h, LEFT_MARGIN, y - row_h)
+    c.line(x_start, y - row_h, x_start + TABLE_W, y - row_h)
 
-    # --- Gantt bar ---
-    start_day = task.get("start_day", 0)
-    end_day = task.get("end_day", start_day + max(duration, 1) - 1)
+    # --- лентата ---
     task_type = task.get("type", "design")
     is_critical = task.get("is_critical", False) and show_critical
 
     if duration == 0:
-        # Milestone — draw diamond
-        mx = _day_to_x(start_day, total_days, GANTT_LEFT, gantt_width)
+        mx = _day_to_x(start_day, total_days, лист.gantt_left, лист.gantt_width)
         my = y - row_h / 2
-        diamond_size = 2 * mm
+        diamond_size = min(2 * mm, row_h / 2)
         c.setFillColor(HexColor("#FFD700"))
         c.setStrokeColor(colors.black)
         c.setLineWidth(0.3)
@@ -798,30 +809,26 @@ def _draw_task_row(
         c.drawPath(path, fill=1, stroke=1)
         return
 
-    bar_x = _day_to_x(start_day, total_days, GANTT_LEFT, gantt_width)
-    bar_end_x = _day_to_x(end_day + 1, total_days, GANTT_LEFT, gantt_width)
+    bar_x = _day_to_x(start_day, total_days, лист.gantt_left, лист.gantt_width)
+    bar_end_x = _day_to_x(end_day + 1, total_days, лист.gantt_left, лист.gantt_width)
     bar_w = max(bar_end_x - bar_x, 1)
     bar_y = y - row_h / 2 - BAR_H / 2
 
-    # Bar color
     bar_color = COLOR_MAP.get(task_type, HexColor("#4472C4"))
     if is_critical:
         bar_color = CRITICAL_COLOR
 
-    # Phase bars: lighter, taller
     if is_phase:
         c.setFillColor(bar_color)
         c.setFillAlpha(0.3)
         c.rect(bar_x, bar_y - 0.5 * mm, bar_w, BAR_H + 1 * mm, fill=1, stroke=0)
         c.setFillAlpha(1.0)
 
-        # Top and bottom lines for summary bar
         c.setStrokeColor(bar_color)
         c.setLineWidth(0.8)
         c.line(bar_x, bar_y + BAR_H + 0.5 * mm, bar_end_x, bar_y + BAR_H + 0.5 * mm)
         c.line(bar_x, bar_y - 0.5 * mm, bar_end_x, bar_y - 0.5 * mm)
 
-        # Down triangles at ends
         tri_size = 1 * mm
         for tx in (bar_x, bar_end_x):
             path = c.beginPath()
@@ -833,30 +840,27 @@ def _draw_task_row(
             c.setFillAlpha(1.0)
             c.drawPath(path, fill=1, stroke=0)
     else:
-        # Regular bar
         c.setFillColor(bar_color)
         if is_sub:
             c.setFillAlpha(0.7)
         c.rect(bar_x, bar_y, bar_w, BAR_H, fill=1, stroke=0)
         c.setFillAlpha(1.0)
 
-        # Critical path border
         if is_critical:
             c.setStrokeColor(HexColor("#8B0000"))
             c.setLineWidth(0.8)
             c.rect(bar_x, bar_y, bar_w, BAR_H, fill=0, stroke=1)
 
-
 def _draw_phase_separator(
     c: canvas.Canvas,
+    лист: Лист,
     schedule_data: list[dict],
     total_days: int,
-    gantt_width: float,
     content_top: float,
     content_bottom: float,
     font: str,
 ) -> None:
-    """Draw vertical dashed line at design/construction boundary."""
+    """Пунктирът, на който свършва проектирането и тръгва строителството."""
     design_end = 0
     for task in schedule_data:
         if task.get("phase") == "design":
@@ -866,78 +870,58 @@ def _draw_phase_separator(
     if design_end <= 0:
         return
 
-    x = _day_to_x(design_end, total_days, GANTT_LEFT, gantt_width)
+    x = _day_to_x(design_end, total_days, лист.gantt_left, лист.gantt_width)
     c.setStrokeColor(CRITICAL_COLOR)
     c.setLineWidth(0.5)
     c.setDash(3, 2)
-    c.line(x, content_top - HEADER_H, x, content_bottom)
-    c.setDash()  # reset
+    c.line(x, content_top, x, content_bottom)
+    c.setDash()
 
-    # Label
     c.setFont(font, FONT_SIZE_SMALL)
     c.setFillColor(CRITICAL_COLOR)
-    c.drawCentredString(x, content_top - HEADER_H + 1 * mm, "Протокол обр.2")
+    c.drawCentredString(x, content_top + 1 * mm, "Протокол обр.2")
 
+def _draw_day_grid(c: canvas.Canvas, лист: Лист, total_days: int,
+                   top_y: float, bottom_y: float) -> None:
+    """Дневната решетка под скалата, с по-тъмна черта на всеки десети ден."""
+    for ден in range(ОСТА_ЗАПОЧВА, total_days + 2):
+        x = _day_to_x(ден, total_days, лист.gantt_left, лист.gantt_width)
+        десети = ден > 0 and ден % 10 == 0
+        c.setStrokeColor(HexColor("#D0D0D0") if десети else HexColor("#EFEFEF"))
+        c.setLineWidth(0.2 if десети else 0.1)
+        c.line(x, top_y, x, bottom_y)
 
-def _draw_month_grid(
-    c: canvas.Canvas,
-    months: list[dict],
-    total_days: int,
-    gantt_width: float,
-    top_y: float,
-    bottom_y: float,
-) -> None:
-    """Draw vertical grid lines for month boundaries and zebra stripes."""
-    x_старт = _day_to_x(1, total_days, GANTT_LEFT, gantt_width)
+    x_старт = _day_to_x(1, total_days, лист.gantt_left, лист.gantt_width)
     c.setStrokeColor(HexColor("#8B0000"))
     c.setLineWidth(0.5)
     c.line(x_старт, top_y, x_старт, bottom_y)
-    for i, month in enumerate(months):
-        x = _day_to_x(month["start_day"], total_days, GANTT_LEFT, gantt_width)
-
-        # Zebra stripe for even months
-        if i % 2 == 0:
-            x_end = _day_to_x(month["end_day"], total_days, GANTT_LEFT, gantt_width)
-            c.setFillColor(HexColor("#F5F5F5"))
-            c.setFillAlpha(0.3)
-            c.rect(x, bottom_y, x_end - x, top_y - bottom_y, fill=1, stroke=0)
-            c.setFillAlpha(1.0)
-
-        # Grid line
-        if i > 0:
-            c.setStrokeColor(HexColor("#DDDDDD"))
-            c.setLineWidth(0.15)
-            c.line(x, top_y, x, bottom_y)
-
 
 def _draw_legend(
     c: canvas.Canvas,
+    лист: Лист,
     font: str,
     font_bold: str,
     schedule_data: list[dict],
 ) -> None:
-    """Draw horizontal legend at the bottom of the page."""
+    """Легендата — под таблицата, вляво.  Вдясно от графиката няма нищо."""
     y = BOTTOM_MARGIN - 2 * mm
-    x = LEFT_MARGIN - TABLE_W
+    x = лист.table_left
 
-    # Separator line
     c.setStrokeColor(colors.black)
     c.setLineWidth(0.5)
-    c.line(x, y + 6 * mm, PAGE_W - RIGHT_MARGIN, y + 6 * mm)
+    c.line(x, y + 6 * mm, лист.page_w - RIGHT_MARGIN, y + 6 * mm)
 
     c.setFont(font_bold, FONT_SIZE)
     c.setFillColor(colors.black)
     c.drawString(x, y + 1 * mm, "ЛЕГЕНДА:")
     x += 18 * mm
 
-    # Collect types present in schedule
     present_types = set()
     for task in schedule_data:
         present_types.add(task.get("type", ""))
         for sub in task.get("sub_activities", []):
             present_types.add(sub.get("type", ""))
 
-    # Draw legend items
     c.setFont(font, FONT_SIZE)
     box_size = 3 * mm
     spacing = 3 * mm
@@ -955,7 +939,6 @@ def _draw_legend(
         c.drawString(x, y + 0.5 * mm, label)
         x += c.stringWidth(label, font, FONT_SIZE) + spacing
 
-    # Milestone symbol
     c.setFillColor(HexColor("#FFD700"))
     diamond_x = x + 1.5 * mm
     diamond_y = y + 1.5 * mm
@@ -973,7 +956,6 @@ def _draw_legend(
     c.drawString(x, y + 0.5 * mm, "Етап")
     x += c.stringWidth("Етап", font, FONT_SIZE) + spacing
 
-    # Critical path indicator
     c.setStrokeColor(CRITICAL_COLOR)
     c.setLineWidth(1.5)
     c.line(x, y + 1.5 * mm, x + 8 * mm, y + 1.5 * mm)
@@ -981,7 +963,6 @@ def _draw_legend(
 
     c.setFillColor(colors.black)
     c.drawString(x, y + 0.5 * mm, "Критичен път")
-
 
 def _подрежи(c: canvas.Canvas, текст: str, ширина: float, шрифт: str, размер: float) -> str:
     """Съкращава текста, за да се побере в колоната (иначе влиза в съседната)."""
