@@ -34,6 +34,10 @@ _CAPACITY_PATH = Path(__file__).resolve().parent.parent / "config" / "resource_c
 _capacity_cache: dict[str, Any] | None = None
 
 
+#: За колко бригади са писани числата във файла („обект с два фронта").
+_ФРОНТОВЕ_В_КОНФИГА = 2
+
+
 def _load_resource_capacity() -> dict[str, Any]:
     """Наличният ресурс по вид — колко едновременни задачи може да поеме.
 
@@ -47,7 +51,60 @@ def _load_resource_capacity() -> dict[str, Any]:
             logger.warning("resource_capacity.json не се чете (%s): %s",
                            _CAPACITY_PATH, exc)
             _capacity_cache = {"default": 1, "capacity": {}}
-    return _capacity_cache
+    return _приравни_към_обявените_бригади(_capacity_cache)
+
+
+def обявени_бригади() -> int:
+    """Колко бригади е обявил изпълнителят за ТОЗИ търг (сумарно)."""
+    from src.tender_parameters import declared_crews
+
+    обявени = declared_crews() or {}
+    return sum(int(n) for n in обявени.values() if int(n) > 0)
+
+
+def _приравни_към_обявените_бригади(конфиг: dict[str, Any]) -> dict[str, Any]:
+    """Паркът следва БРОЯ БРИГАДИ, който търгът обявява.
+
+    ЗАЩО (Тръстеник, 25.08.2026).  Числата във файла са, по собствената му
+    бележка, „РАЗУМНО ПОДРАЗБИРАНЕ за обект с два фронта, НЕ са измерени".
+    Този търг обявява ШЕСТ бригади — четири по водопровода, две по канала.
+    Шест бригади с три багера не работят непрекъснато, и изравняването честно
+    ги вкарваше в пауза: 257 празни дни, всяка бригада стои по пет дни от
+    всеки дванайсет.  Тоест графикът противоречеше на собствената си оферта.
+
+    Затова ПРЕДПОЛОЖЕНИТЕ бройки се умножават по това, с колко бригади е
+    обявено, че се работи.  ОБЯВЕНИТЕ бройки — тези, чийто `_източник` почва
+    с „ОБЯВЕНО" (собственият екип за съоръжения) — НЕ се пипат: човекът ги е
+    казал, а казаното е по-силно от изведеното.
+
+    Изключва се с `FLEET_FOLLOWS_CREWS=0`.
+    """
+    if os.getenv("FLEET_FOLLOWS_CREWS", "1") == "0":
+        return конфиг
+    бригади = обявени_бригади()
+    ако = бригади / _ФРОНТОВЕ_В_КОНФИГА
+    if ако <= 1.0:
+        return конфиг
+
+    import math
+
+    def _обявено(v: Any) -> bool:
+        return (isinstance(v, dict)
+                and str(v.get("_източник") or "").startswith("ОБЯВЕНО"))
+
+    мащабиран = dict(конфиг)
+    мащабиран["capacity"] = {
+        име: (стойност if _обявено(стойност) or not isinstance(стойност, int)
+              else int(math.ceil(стойност * ако)))
+        for име, стойност in (конфиг.get("capacity") or {}).items()}
+    мащабиран["headcount"] = {
+        име: (стойност if _обявено(стойност) or not isinstance(стойност, dict)
+              else {**стойност,
+                    "налични": int(math.ceil(
+                        int(стойност.get("налични") or 1) * ако))})
+        for име, стойност in (конфиг.get("headcount") or {}).items()}
+    мащабиран["_приравнено_към"] = бригади
+    return мащабиран
 
 
 def _task_resources(task: dict, *, leveling_only: bool = False) -> list[str]:

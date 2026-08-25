@@ -153,6 +153,10 @@ class _ScriptedRouter:
         }
 
 
+def obhvat_end(обхват: dict) -> int:
+    return int(обхват["end_day"])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", default=str(Path.home() / "Desktop" / "2026"))
@@ -174,6 +178,9 @@ def main() -> int:
                         help="папка за ЦЕЛИЯ комплект от една версия: график, "
                              "опис, диагностика, сравнение на календарите и "
                              "audit_manifest.json")
+    parser.add_argument("--notes", action="store_true",
+                        help="печатай бележките на конвейера (какво е решило "
+                             "всяко правило)")
     parser.add_argument("--reference", default="",
                         help="еталонен MSPDI за сравнението на календарите")
     # Договорният обхват НЕ идва от КСС: проектирането и авторският надзор се
@@ -241,7 +248,8 @@ def main() -> int:
 
     result = ai.generate_schedule_packaged(
         {"analysis": args.analysis}, boq_index, num_teams=args.teams,
-        segments=situation_segments, project_path=project)
+        segments=situation_segments, project_path=project,
+        progress_callback=(lambda ред: print(f"  · {ред}")) if args.notes else None)
 
     status = result.get("status")
     # Външният слой връща графика в `schedule.tasks`; вътрешният — в `tasks`.
@@ -264,11 +272,29 @@ def main() -> int:
         if isinstance(value, bool):
             print(f"  {'ок ' if value else 'НЕ '} {key}")
     print(f"  проследимост до КСС: {flags['source_ref_resolvable_pct']}%")
+    # Паднал флаг без подробности е диагноза без симптом: тук излиза КОЙ
+    # ресурс, кой ден и с колко е над тавана си.
+    for претоварен in flags.get("resource_overloads") or []:
+        print(f"     претоварен: {претоварен}")
+    for невярно in flags.get("template_applicability") or []:
+        print(f"     неприложим шаблон: {невярно}")
     print(f"\nЧИСТ: {is_clean(flags)}")
 
     timing = duration_report(tasks)
     print(f"срок: {timing['total_days']} дни, критичен път "
           f"{timing['critical_path_days']} дни")
+
+    # ФАЗИТЕ, а не само сборът: обявеният срок се проверява по фаза, затова
+    # тук се вижда коя фаза колко е взела от тавана си.
+    from src.schedule_diagnostics import phase_spans
+    from src.tender_parameters import declared_phase_days
+    обявени = declared_phase_days()
+    for ключ, обхват in sorted(phase_spans(tasks).items(),
+                               key=lambda kv: kv[1]["start_day"]):
+        таван = обявени.get(ключ)
+        от_тавана = f" при обявени {таван}" if таван else ""
+        print(f"  фаза {обхват['label']:<18} ден {обхват['start_day']:>4}–"
+              f"{obhvat_end(обхват):<4} = {обхват['days']:>4} дни{от_тавана}")
 
     summary = (result.get("duration_report") or {}).get("summary") or {}
     print(f"продължителности: {summary.get('recomputed', 0)} по норма, "

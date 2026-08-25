@@ -650,6 +650,7 @@ class AIProcessor:
                                       chain_sections_sequentially,
                                       close_design_after_all_parts,
                                       normalize_over_allocation,
+                                      make_actions_continuous,
                                       order_chronologically,
                                       order_sewer_by_flow, packages_from_ai,
                                       scale_design_parts_to_networks,
@@ -1350,6 +1351,13 @@ class AIProcessor:
             _prog(note)
         if again_notes:
             tasks, _ = enforce_construction_span(tasks)
+
+        # НЕПРЕКЪСНАТИ ДЕЙСТВИЯ.  Последното нещо преди CPM: изравняването и
+        # налагането на срока вече са подредили датите, а тук се затварят
+        # празните дни ВЪТРЕ в участъка — без да се мести нищо.
+        tasks, cont_notes = make_actions_continuous(tasks)
+        for note in cont_notes:
+            _prog(note)
 
         cpm = builder.compute_critical_path(tasks)
         if not cpm["warnings"]:
