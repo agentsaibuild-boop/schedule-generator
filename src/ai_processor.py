@@ -639,6 +639,7 @@ class AIProcessor:
         from src.work_package import (applied_resolutions, assign_fronts,
                                       check_conservation,
                                       queue_sections_per_crew,
+                                      compact_sections,
                                       sync_durations_to_span,
                                       fit_contract_span,
                                       conservation_messages, expand_packages,
@@ -1405,6 +1406,14 @@ class AIProcessor:
         # празните дни ВЪТРЕ в участъка — без да се мести нищо.
         tasks, cont_notes = make_actions_continuous(tasks)
         for note in cont_notes:
+            _prog(note)
+
+        # ДЕЙСТВИЯТА В УЧАСТЪКА СЕ ДОЛЕПЯТ (26.08.2026).  Клон с 14 дни работа
+        # стоеше разпънат на 177 — започваше рано, чакаше друга мрежа и
+        # довършваше месеци по-късно.  Бригадата идва, изкарва участъка и си
+        # отива; затова действията се дърпат напред до последното.
+        tasks, compact_notes = compact_sections(tasks)
+        for note in compact_notes:
             _prog(note)
 
         # РЕДИЦАТА НА ЕКИПА — НАКРАЯ, ВЪРХУ ДАТИТЕ (изпълнителят, 25.08.2026).

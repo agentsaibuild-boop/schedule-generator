@@ -136,7 +136,9 @@ class TestТемпотоРешаваПродължителностите:
 
         сбор = sum(t["duration"] for t in задачи)
         assert сбор > 300, f"веригата остана {сбор} екипо-дни вместо ~360"
-        assert any("искат 360" in б for б in бележки), бележки
+        # Бележката казва КАКВО е станало; от 26.08.2026 темпото се прилага
+        # ПО УЧАСТЪК, затова текстът ѝ е друг, а числото — същото.
+        assert any("360" in б and "ПО УЧАСТЪК" in б for б in бележки), бележки
 
     def test_smetnatoto_ostava_vidimo_i_pri_razpravyane(self):
         from src.segment_scale import calibrate_to_declared_pace
