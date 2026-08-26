@@ -52,9 +52,11 @@ class TestИзвежданеОтСрока:
 
     def test_dva_ekipa_paralelno_udvoyavat_tempoto_na_obekta(self):
         # Два екипа в 180 дни значат 360 екипо-дни: всеки кара по-бавно, а
-        # обектът се събира в същия срок.
-        един, _ = derive(_обект(), days=180, crews=1, parallel=True)
-        два, _ = derive(_обект(), days=180, crews=2, parallel=True)
+        # обектът се събира в същия срок.  Метрите тук са достатъчни, за да не
+        # се задейства подът на темпото (виж `TestПодНаТемпото`).
+        голям = _обект("water_section", 9000)
+        един, _ = derive(голям, days=180, crews=1, parallel=True)
+        два, _ = derive(голям, days=180, crews=2, parallel=True)
 
         assert round(два["water_section"] * 2, 4) == round(един["water_section"], 4)
 
@@ -67,12 +69,51 @@ class TestИзвежданеОтСрока:
             "не бива да мени темпото")
 
     def test_tempoto_e_po_veriga(self):
-        пакети = _обект("sewer_section", 4075) + _обект("water_section", 3247)
+        # Канал с двойно повече метри от водопровода → и темпото му е по-високо.
+        # Срокът е къс нарочно, за да не опира в пода.
+        пакети = _обект("sewer_section", 8000) + _обект("water_section", 4000)
 
-        темпа, _ = derive(пакети, days=660, crews=2, parallel=True)
+        темпа, _ = derive(пакети, days=180, crews=2, parallel=True)
 
         assert set(темпа) == {"sewer_section", "water_section"}
         assert темпа["sewer_section"] > темпа["water_section"]
+
+
+class TestПодНаТемпото:
+    """Темпото се извежда от срока, но не пада под реалното.
+
+    FAILURE означава: обект с малко метри и много екипи пак получава темпо от
+    един-два метра на ден, а бригада не кара така.  Мерено на Илиянци —
+    3247 м ÷ 660 дни ÷ 4 екипа = 1.2 м/ден, и оттам срокът избухваше на 1900
+    дни.  Подовете са на изпълнителя (26.08.2026): вода 6, канал 4 м/ден.
+    """
+
+    def test_vodata_ne_pada_pod_shest(self):
+        темпа, _ = derive(_обект("water_section", 3247), days=660, crews=4,
+                          parallel=True)
+
+        assert темпа["water_section"] == 6.0
+
+    def test_kanala_ne_pada_pod_chetiri(self):
+        темпа, _ = derive(_обект("sewer_section", 4075), days=660, crews=2,
+                          parallel=True)
+
+        assert темпа["sewer_section"] == 4.0
+
+    def test_podat_se_obyavyava_i_kazva_kolko_ekipa_stigat(self):
+        _, бележки = derive(_обект("water_section", 3247), days=660, crews=4,
+                            parallel=True)
+
+        казано = " ".join(бележки)
+        assert "под реалното" in казано
+        assert "ПОВЕЧЕ, отколкото обектът изисква" in казано
+
+    def test_realno_tempo_ne_se_pipa(self):
+        # 11 662 м ÷ 210 дни ÷ 8 екипа = 6.94 м/ден — над пода, остава си.
+        темпа, _ = derive(_обект("water_section", 11662), days=210, crews=8,
+                          parallel=True)
+
+        assert round(темпа["water_section"], 2) == 6.94
 
 
 class TestЧислотоСеОбявява:
