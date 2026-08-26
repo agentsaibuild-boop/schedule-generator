@@ -640,6 +640,7 @@ class AIProcessor:
                                       check_conservation,
                                       queue_sections_per_crew,
                                       compact_sections,
+                                      dispatch_sections,
                                       sync_durations_to_span,
                                       fit_contract_span,
                                       conservation_messages, expand_packages,
@@ -1426,6 +1427,22 @@ class AIProcessor:
         tasks, compact_notes = compact_sections(tasks)
         for note in compact_notes:
             _prog(note)
+
+        # И ЧАК СЛЕД ТОВА СЕ РАЗДАВАТ КЛОНОВЕТЕ (26.08.2026).  Раздаването брои
+        # колко ДНИ заема клонът един екип; ако вътре в клона още стоят празни
+        # дни, екипът се води зает и по тях.  Мерено: 2196 екипо-дни се
+        # разстилаха на 583 дни, при 220 възможни — защото клон с 14 дни работа
+        # държеше екипа 177 дни.  Затова първо се долепя, после се раздава.
+        #
+        # ЗАСЕГА С ФЛАГ (`DISPATCH_SECTIONS=1`).  Раздаването пакетира екипите
+        # плътно и оттам ИСКА толкова машини, колкото са бригадите: при
+        # еталонния парк `resource_capacity_ok` пада.  Това е верен сигнал, а не
+        # дефект на раздаването — но докато паркът не следва бригадите, то не
+        # може да е поведение по подразбиране.
+        if os.getenv("DISPATCH_SECTIONS", "0") not in ("0", "false", ""):
+            tasks, dispatch_notes = dispatch_sections(tasks, packages)
+            for note in dispatch_notes:
+                _prog(note)
 
         # РЕДИЦАТА НА ЕКИПА — НАКРАЯ, ВЪРХУ ДАТИТЕ (изпълнителят, 25.08.2026).
         # Връзките в редицата ги слага `chain_sections_sequentially`, но след
