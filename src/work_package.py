@@ -1845,6 +1845,9 @@ def conservation_messages(report: dict[str, Any]) -> list[str]:
 def assign_fronts(
     packages: list[SpatialWorkPackage],
     num_fronts: int | dict[str, int],
+    *,
+    темпа: dict[str, float] | None = None,
+    chains: dict[str, Any] | None = None,
 ) -> list[SpatialWorkPackage]:
     """Разпредели пакетите между фронтовете, БЕЗ да дублира количества.
 
@@ -1871,6 +1874,29 @@ def assign_fronts(
 
     def _количество(pkg: SpatialWorkPackage) -> float:
         return sum(abs(float(i.quantity)) for i in pkg.items) or 1.0
+
+    #: Колко ДНИ ще вземе този участък — по същата сметка, по която после ще му
+    #: бъдат сметнати продължителностите (`calibrate_to_declared_pace`).
+    #
+    # ЗАЩО НЕ ПО МЕТРИ (26.08.2026).  Балансът по метри дава на всеки екип
+    # еднакви метри, но не еднакви ДНИ: клон от 30 м пак иска девет стъпки по
+    # поне един ден.  Мерено на Тръстеник — осем екипа с равни метри излязоха с
+    # 81 до 276 дни работа.  Тук се брои това, което наистина заема екипа.
+    _стъпки_на_верига: dict[str, int] = {}
+    if chains:
+        for ключ, верига in (chains.get("chains") or {}).items():
+            _стъпки_на_верига[ключ] = len(верига.get("steps") or [])
+
+    def _дни(pkg: SpatialWorkPackage) -> float:
+        под = float(_стъпки_на_верига.get(pkg.chain, 1) or 1)
+        темпо = float((темпа or {}).get(pkg.chain, 0.0) or 0.0)
+        метри = sum(abs(float(i.quantity)) for i in pkg.items
+                    if str(getattr(i, "activity_class", "")) == "laying"
+                    and str(getattr(i, "unit", "")).strip().lower()
+                    in ("m", "м", "мл", "ml"))
+        if темпо > 0 and метри > 0:
+            return max(под, метри / темпо)
+        return под
 
     #: Колко „метра" струват задължителните стъпки на един участък.
     #
@@ -1908,8 +1934,14 @@ def assign_fronts(
     for верига in sorted({p.chain for p in packages}):
         от_веригата = [p for p in packages if p.chain == верига]
         фиксирана = _фиксирана_цена(от_веригата)
+        # Когато темпото е известно, теглото е в ДНИ — това е истинската мярка
+        # за заетостта на екипа.  Без темпо се пада към метри плюс фиксирана
+        # цена на участък, което е приблизително същото подреждане.
+        по_дни = bool(темпа) and bool(_стъпки_на_верига)
 
         def weight(pkg: SpatialWorkPackage, _ф: float = фиксирана) -> float:
+            if по_дни:
+                return _дни(pkg)
             return _количество(pkg) + _ф
 
         група = sorted(от_веригата, key=lambda p: (-weight(p), p.id))
