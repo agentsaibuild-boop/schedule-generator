@@ -2109,9 +2109,14 @@ def enforce_construction_span(tasks: list[dict]) -> tuple[list[dict], list[str]]
     if not spanning:
         return out, []
 
+    # РАЗПЪВАНАТА ЗАДАЧА НЕ МЕРИ САМА СЕБЕ СИ (26.08.2026).  Задълженията по
+    # договора също са `spans_construction`; ако влязат в мерилото, началото
+    # на строителството става тяхното начало (ден 1) и цялата фаза се дърпа
+    # преди проектирането — мерено, 12 грешки във валидацията.
     building = [t for t in out
                 if t.get("wbs_root") == "construction"
                 and not t.get("is_summary")
+                and not t.get("spans_construction")
                 and t.get("start_day") is not None]
     if not building:
         return out, ["няма строителни задачи — надзорът остава както е"]
@@ -2353,6 +2358,13 @@ def expand_packages(
             # проектантски стъпки дават 245 дни последователно и 120 със
             # своята топология.
             link_to, relation, lag = prev_ids, "FS", 0
+            # ЗАДЪЛЖЕНИЕ ЗА ЦЕЛИЯ СРОК НЯМА ПРЕДШЕСТВЕНИК (26.08.2026).
+            # Месечните доклади не чакат документите на изпълнителя — и двете
+            # вървят от първия до последния ден.  Навържат ли се FS, всяко
+            # следващо трябва да започне след края на предишното, тоест след
+            # края на обекта: 1319 дни и невалиден график.
+            if step.get("spans_construction"):
+                link_to = []
             declared = str(step.get("predecessor") or "").strip()
             if declared:
                 link_to = by_step_key.get(declared, prev_ids)
@@ -2569,9 +2581,15 @@ def contract_packages(
     cfg = chains if chains is not None else load_chains()
     defined = cfg.get("chains") or {}
 
-    keys = ["mobilization", "acceptance"]
+    # ЗАДЪЛЖЕНИЯТА ПО ДОГОВОРА вървят през целия строителен срок и ги има при
+    # ВСЯКА поръчка — не само при инженеринг.  Взети са от 24-те изпълнени
+    # графика на изпълнителя (26.08.2026): документи на изпълнителя, месечни
+    # доклади, актове по Наредба № 3, опазване на околната среда, доставка на
+    # материали, лабораторни изпитвания.  Всяко от тях стои в 12 от 24-те.
+    keys = ["mobilization", "site_duties", "acceptance"]
     if with_design:
-        keys = ["design", "mobilization", "supervision", "acceptance"]
+        keys = ["design", "mobilization", "site_duties", "supervision",
+                "acceptance"]
 
     out: list[SpatialWorkPackage] = []
     for key in keys:
@@ -2644,9 +2662,14 @@ def link_contract_phases(
     # избирал, затова пропускът не се виждаше.
     spatial = {"sewer_section", "water_section", "water_section_hdd",
                "pavement_section", "cable_section", "structure"}
+    # ЗАДЪЛЖЕНИЯТА ПО ДОГОВОРА НЕ СА РАБОТА, КОЯТО ПРИЕМАНЕТО ЧАКА
+    # (26.08.2026).  Месечните доклади свършват с последния ден на обекта; ако
+    # приемането се върже за тях, то не може да започне никога.  Те се
+    # разпъват по строителството, а не го определят.
     build = [t for t in out
              if pkg_chain.get(str(t.get("parent_id") or "")) in spatial
-             and not t.get("is_summary")]
+             and not t.get("is_summary")
+             and not t.get("spans_construction")]
 
     # --- проектиране → мобилизация ---
     design, mob = tasks_of("design"), tasks_of("mobilization")
@@ -2735,8 +2758,13 @@ def link_contract_phases(
         # мести → надзорът пак се разтяга.  Сега краят му е FF към последната
         # задача от приемането и той не е ничий предшественик.
         sup_ids = {str(t["id"]) for t in tasks_of("supervision")}
+        # СЪЩОТО ВАЖИ ЗА ЗАДЪЛЖЕНИЯТА ПО ДОГОВОРА (26.08.2026).  Те не са
+        # висящ край, а покривало: месечните доклади и актовете по Наредба № 3
+        # свършват с последния ден на обекта.  Вържат ли се ПРЕДИ приемането,
+        # то не може да започне никога и графикът пада от валидацията.
         loose = [t for t in out
                  if not t.get("is_summary")
+                 and not t.get("spans_construction")
                  and str(t["id"]) not in successors
                  and str(t["id"]) not in acceptance_ids
                  and str(t["id"]) not in sup_ids]

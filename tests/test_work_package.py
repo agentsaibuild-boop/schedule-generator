@@ -819,8 +819,11 @@ def test_contract_phases_exist_without_any_boq_row():
     minimal = contract_packages(with_design=False)
     full = contract_packages(with_design=True)
 
-    assert {p.chain for p in minimal} == {"mobilization", "acceptance"}
-    assert {p.chain for p in full} == {"design", "mobilization",
+    # От 26.08.2026 и задълженията по договора идват от договора, не от КСС —
+    # взети са от 24-те изпълнени графика на изпълнителя (в 12 от тях са).
+    assert {p.chain for p in minimal} == {"mobilization", "site_duties",
+                                          "acceptance"}
+    assert {p.chain for p in full} == {"design", "mobilization", "site_duties",
                                        "supervision", "acceptance"}
     assert all(p.items == () for p in full), "фазите нямат количества"
 
@@ -861,8 +864,13 @@ def test_schedule_closes_on_a_single_final_milestone():
 
     successors = {d["predecessor_id"] for t in tasks
                   for d in (t.get("dependencies") or [])}
+    # ЗАДЪЛЖЕНИЯТА ЗА ЦЕЛИЯ СРОК не са висящ край, а покривало: месечните
+    # доклади и актовете по Наредба № 3 свършват с последния ден на обекта и
+    # нямат наследник по определение — както и авторският надзор (26.08.2026).
     loose = [t for t in tasks
-             if not t.get("is_summary") and t["id"] not in successors]
+             if not t.get("is_summary")
+             and not t.get("spans_construction")
+             and t["id"] not in successors]
 
     assert len(loose) == 1, [t["id"] for t in loose]
     assert loose[0]["milestone"] is True
