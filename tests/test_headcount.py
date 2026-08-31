@@ -15,6 +15,15 @@ FAILURE означава: таванът пак ограничава колко 
 един каналджия.  Оттам идваше 82-процентното чакане на водопроводните пакети.
 """
 
+# ЗАЩО НЕ БАГЕР.  Дотук багерът беше примерът за машина, която може да е
+# само на едно място.  Изпълнителят обаче каза на 31.08.2026, че багери,
+# бетоновози и самосвали се наемат колкото трябва — и те излязоха от
+# твърдото изравняване (`hired` в resource_capacity.json).  Механизмът,
+# който тези тестове проверяват, е СЪЩИЯТ; сменен е само примерът, за да е
+# ресурс, който наистина ограничава.  Заваръчната машина за ПЕ е такъв:
+# 2 налични, не е надзорна, не е на екипа, не се наема.
+
+
 from __future__ import annotations
 
 import sys
@@ -47,17 +56,19 @@ def test_the_reference_crew_composition_is_loaded():
 
 
 def test_machines_are_counted_by_how_many_there_are():
-    """Три багера, по един на задача → три едновременни, не „слот" за задача.
+    """Две машини, по една на задача → две едновременни, не „слот" за задача.
 
     Примерът беше „Каналджия", докато хората бяха общообектов ресурс.  От
-    19.08.2026 те принадлежат на ЕКИПА и не ограничават обекта; машините
-    остават общи и точно те са мерилото.
+    19.08.2026 те принадлежат на ЕКИПА и не ограничават обекта; общите машини
+    остават мерилото.  Броят е този на ресурса в конфигурацията: заваръчната
+    машина за ПЕ е 2.
     """
-    резултат = ScheduleBuilder().level_resources(_задачи(6, ["Багер ескаватор"]))
+    резултат = ScheduleBuilder().level_resources(
+        _задачи(6, ["Заваръчна машина за ПЕ"]))
 
     едновременни = sum(1 for t in резултат["schedule"]
                        if int(t["start_day"]) == 1)
-    assert едновременни == 3, [t["start_day"] for t in резултат["schedule"]]
+    assert едновременни == 2, [t["start_day"] for t in резултат["schedule"]]
 
 
 def test_people_belong_to_the_crew_and_do_not_cap_the_site():
@@ -90,7 +101,7 @@ def test_a_task_that_needs_nobody_special_is_not_capped():
 def test_an_explicit_capacity_still_wins():
     """Който вика с `capacity={...}`, казва „толкова, точка"."""
     резултат = ScheduleBuilder().level_resources(
-        _задачи(6, ["Багер ескаватор"]), capacity={"Багер ескаватор": 2})
+        _задачи(6, ["Заваръчна машина за ПЕ"]), capacity={"Заваръчна машина за ПЕ": 2})
 
     едновременни = sum(1 for t in резултат["schedule"]
                        if int(t["start_day"]) == 1)
@@ -106,7 +117,7 @@ def test_the_overload_check_counts_the_same_way():
     """Иначе гейтът отхвърля точно графиците, които изравняването е сметнало."""
     from src.schedule_diagnostics import _capacity_overloads
 
-    изравнен = ScheduleBuilder().level_resources(_задачи(6, ["Багер ескаватор"]))
+    изравнен = ScheduleBuilder().level_resources(_задачи(6, ["Заваръчна машина за ПЕ"]))
 
     assert not _capacity_overloads(изравнен["schedule"])
 
@@ -122,6 +133,6 @@ def test_the_check_still_catches_a_real_overload():
     """Гейт, който не може да падне, е безполезен."""
     from src.schedule_diagnostics import _capacity_overloads
 
-    претоварен = _задачи(9, ["Багер ескаватор"])   # 9 наведнъж при 3 налични
+    претоварен = _задачи(9, ["Заваръчна машина за ПЕ"])   # 9 наведнъж при 3 налични
 
     assert _capacity_overloads(претоварен)

@@ -107,10 +107,17 @@ def _приравни_към_обявените_бригади(конфиг: dic
     return мащабиран
 
 
-def _task_resources(task: dict, *, leveling_only: bool = False) -> list[str]:
+def _task_resources(task: dict, *, leveling_only: bool = False,
+                    keep: set[str] | None = None) -> list[str]:
     """Ресурсите, които задачата заема — съставът на бригадата плюс екипа.
 
-    `leveling_only` изключва НАДЗОРНИТЕ роли.  Виж `_is_leveling_resource`.
+    `leveling_only` изключва НАДЗОРНИТЕ роли и НАЕТИТЕ машини.  Виж
+    `_is_leveling_resource`.
+
+    `keep` са имената, за които викащият е подал ИЗРИЧЕН таван.  Те остават,
+    каквото и да казва общото правило: който вика с `capacity={...}`, казва
+    „толкова едновременни, точка", и конфигурацията не бива да го отменя
+    мълчаливо.
     """
     names: list[str] = []
     for raw in task.get("resources") or []:
@@ -122,8 +129,10 @@ def _task_resources(task: dict, *, leveling_only: bool = False) -> list[str]:
         names.append(team)
     if leveling_only:
         на_екипа = _per_crew_roles()
+        пазени = keep or set()
         names = [n for n in names
-                 if _is_leveling_resource(n) and n not in на_екипа]
+                 if n in пазени
+                 or (_is_leveling_resource(n) and n not in на_екипа)]
     return names
 
 
@@ -280,10 +289,20 @@ def _is_leveling_resource(name: str) -> bool:
     Числото НЕ се вдига на око до 6, за да улучи 660 дни: колко ръководители
     има реално е организационен въпрос към изпълнителя, а не настройка, с която
     да се постигне желан срок.
+
+    ВТОРО ИЗКЛЮЧЕНИЕ — НАЕТИТЕ МАШИНИ (изпълнителят, 31.08.2026): „Багери,
+    бетоновози и самосвали се наемат колкото ни е нужно."  Таваните им идваха
+    от измерен ВРЪХ в еталонния график — колко машини са работили едновременно
+    ТАМ, а не колко може да има.  Върхът е долна граница за парка, не таван, и
+    докато стоеше като таван, изравняването отлагаше работа заради машина,
+    която се докарва с едно обаждане.  Списъкът е в `hired` и съдържа точно
+    потвърденото, не обобщение по подразбиране.
     """
     config = _load_resource_capacity()
-    надзорни = config.get("supervisory") or []
-    return str(name).strip() not in {str(n).strip() for n in надзорни}
+    свободни = {str(n).strip() for n in (config.get("supervisory") or [])}
+    свободни |= {str(n).strip()
+                 for n in ((config.get("hired") or {}).get("роли") or [])}
+    return str(name).strip() not in свободни
 
 # Над този брой задачи DFS проверката за цикли не се изпълнява и графикът
 # се ОТХВЪРЛЯ (fail-closed).  DFS е O(V+E), затова лимитът е висок — реален
@@ -971,7 +990,8 @@ class ScheduleBuilder:
                     earliest = max(earliest, new_end[dep_id] + 1 + lag)
             earliest = max(earliest, 1)
 
-            resources = _task_resources(task, leveling_only=True)
+            resources = _task_resources(task, leveling_only=True,
+                                        keep=изрични)
             # НЕПРЕКЪСНАТАТА ДЕЙНОСТ не се изравнява твърдо, както и надзорът:
             # тя описва присъствие на обекта през целия строеж, а не такт на
             # производство.  Ако участваше, 595-дневната ѝ заетост щеше да

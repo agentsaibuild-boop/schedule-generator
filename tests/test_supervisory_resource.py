@@ -13,6 +13,15 @@ FAILURE означава: срокът пак ще се определя от н
 и техниката — и никаква работа по мрежата няма да го скъси.
 """
 
+# ЗАЩО НЕ БАГЕР.  Дотук багерът беше примерът за машина, която може да е
+# само на едно място.  Изпълнителят обаче каза на 31.08.2026, че багери,
+# бетоновози и самосвали се наемат колкото трябва — и те излязоха от
+# твърдото изравняване (`hired` в resource_capacity.json).  Механизмът,
+# който тези тестове проверяват, е СЪЩИЯТ; сменен е само примерът, за да е
+# ресурс, който наистина ограничава.  Заваръчната машина за ПЕ е такъв:
+# 2 налични, не е надзорна, не е на екипа, не се наема.
+
+
 from __future__ import annotations
 
 import sys
@@ -42,9 +51,9 @@ class TestSupervisoryIsNotASemaphore:
             f"стартове: {sorted(стартове)}")
 
     def test_a_production_resource_still_caps_concurrency(self):
-        """Багерът си остава ограничение — той наистина може да е на едно място."""
+        """Производственият ресурс си остава ограничение."""
         резултат = ScheduleBuilder().level_resources(
-            _задачи(6, ["Багер универсален"]), capacity={"Багер универсален": 2})
+            _задачи(6, ["Заваръчна машина за ПЕ"]), capacity={"Заваръчна машина за ПЕ": 2})
         стартове = sorted(t["start_day"] for t in резултат["schedule"])
 
         assert стартове[0] == 1 and стартове[-1] > 1, \
@@ -60,12 +69,12 @@ class TestSupervisoryIsNotASemaphore:
     def test_supervisory_roles_come_from_configuration(self):
         """Списъкът е конфигурация, а не име, зашито в кода."""
         assert _is_leveling_resource("Ръководител работна група") is False
-        assert _is_leveling_resource("Багер универсален") is True
+        assert _is_leveling_resource("Заваръчна машина за ПЕ") is True
 
     def test_the_manager_is_still_assigned_to_the_task(self):
         """Изключен от изравняването НЕ значи изтрит от графика."""
         резултат = ScheduleBuilder().level_resources(
-            _задачи(2, ["Ръководител работна група", "Багер универсален"]))
+            _задачи(2, ["Ръководител работна група", "Заваръчна машина за ПЕ"]))
 
         assert all("Ръководител работна група" in t["resources"]
                    for t in резултат["schedule"])
@@ -91,17 +100,17 @@ class TestTheGateCountsByTheSameRule:
     def test_a_production_overload_is_still_reported(self):
         from src.schedule_diagnostics import _capacity_overloads
 
-        задачи = _задачи(9, ["Багер универсален"])
+        задачи = _задачи(9, ["Заваръчна машина за ПЕ"])
         претоварени = _capacity_overloads(задачи)
 
         assert претоварени, "истинско претоварване вече не се вижда"
-        assert претоварени[0]["resource"] == "Багер универсален"
+        assert претоварени[0]["resource"] == "Заваръчна машина за ПЕ"
 
     def test_the_two_sides_agree_on_a_levelled_schedule(self):
         """Каквото изравняването е пуснало, гейтът не бива да отхвърля."""
         from src.schedule_diagnostics import _capacity_overloads
 
         изравнен = ScheduleBuilder().level_resources(
-            _задачи(9, ["Ръководител работна група", "Багер универсален"]))
+            _задачи(9, ["Ръководител работна група", "Заваръчна машина за ПЕ"]))
 
         assert _capacity_overloads(изравнен["schedule"]) == []
