@@ -41,6 +41,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
+from src.text_norm import cyrillize, mixed_words
+
 logger = logging.getLogger(__name__)
 
 
@@ -108,12 +110,26 @@ def _scope_of(text: str) -> tuple[bool | None, str]:
 
 
 def _lines_with_boxes(page: Any) -> list[tuple[str, tuple[float, ...]]]:
+    """Редовете на страницата, с КИРИЛИЗИРАН текст.
+
+    Тук е единствената врата, през която текстът на чертежа влиза в четците —
+    затова поправката на омоглифите стои тук, а не в десетина регулярни израза.
+    Без нея `Kл` с латинско K не съвпада с `^Кл\\.` и клонът изчезва мълчаливо:
+    в `Ситуация Вод.pdf` това са 10 от 30 етикета.  Виж `src/text_norm.py`.
+    """
     out: list[tuple[str, tuple[float, ...]]] = []
+    смесени: list[str] = []
     for блок in page.get_text("dict")["blocks"]:
         for ред in блок.get("lines", []):
             текст = "".join(с["text"] for с in ред.get("spans", [])).strip()
             if текст:
-                out.append((текст, tuple(ред["bbox"])))
+                смесени.extend(mixed_words(текст))
+                out.append((cyrillize(текст, whole_line=True), tuple(ред["bbox"])))
+    if смесени:
+        # КАЗВА СЕ КОЕ е поправено: тиха поправка на чужд текст е същият клас
+        # проблем като тихото изпускане, само от другата страна.
+        logger.info("Смесена азбука в чертежа — поправени %d означения: %s",
+                    len(смесени), sorted(set(смесени))[:8])
     return out
 
 
@@ -774,6 +790,9 @@ def read_water_table(path: str | Path) -> list[Segment]:
             думи = page.get_text("words")
             if not думи:
                 continue
+            # Същата поправка като в `_lines_with_boxes`: таблицата се хваща по
+            # думата „клон“, а тя също може да е с латинско K.
+            думи = [(*w[:4], cyrillize(w[4]), *w[5:]) for w in думи]
 
             # Хедърът се пренася на няколко реда, затова се събира по ЛЕНТА
             # височина, а не по един ред: първата дума „клон" дава лентата.
