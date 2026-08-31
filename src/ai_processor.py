@@ -1314,6 +1314,15 @@ class AIProcessor:
         for note in scale_notes:
             _prog(note)
 
+        # ДОКАЗАНАТА ПРОДЪЛЖИТЕЛНОСТ СЕ ЗАПАЗВА ТУК — преди обявеното темпо да
+        # пренапише `duration` (одиторът, 31.08.2026: „feasibility duration и
+        # bid duration са две различни понятия; не позволявайте второто да
+        # унищожава първото").  След този ред всяка задача носи `base_duration`
+        # и `base_duration_source`, каквото и да се случи по-нататък.
+        from src.duration_evidence import stamp_base
+        for note in stamp_base(tasks):
+            _prog(note)
+
         # НЯМА НОРМИ ЗА ПОЛАГАНЕ (изпълнителят, 24.08.2026).  Когато графикът
         # не се оценява по методика, срокът е ДАДЕНОСТ, а производителността
         # се ИЗЧИСЛЯВА от него и от заявените екипи — виж `deadline_pace`.
@@ -1512,6 +1521,17 @@ class AIProcessor:
         tasks, sync_notes = sync_durations_to_span(tasks)
         for note in sync_notes:
             _prog(note)
+
+        # ОФЕРТНАТА ПРОДЪЛЖИТЕЛНОСТ И РАЗЛИКАТА ѝ ОТ ДОКАЗАНАТА — тук, върху
+        # последното състояние.  Оттук нататък всяка задача може да каже: „по
+        # доказателства 13 дни; в офертата 10.5, защото …".
+        from src.duration_evidence import (describe as _опиши_основанията,
+                                           report as _основания, stamp_bid)
+        for note in stamp_bid(tasks):
+            _prog(note)
+        _evidence = _основания(tasks)
+        for ред in _опиши_основанията(_evidence):
+            _prog(ред)
 
         # КРИТИЧНИЯТ ПЪТ СЕ СМЯТА НАКРАЯ — ВЪРХУ ДАТИТЕ, КОИТО ОСТАВАТ.
         #
