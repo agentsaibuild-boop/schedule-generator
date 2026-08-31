@@ -111,6 +111,22 @@ def _prepare(project: Path) -> dict[str, Any]:
     return {"ai": ai, "boq_index": boq_index, **saved}
 
 
+def _цена_по_токени(usage: dict) -> float:
+    """Цена от изгорените токени, по тарифата на работника.
+
+    Ползва се, когато прогонът не си каже цената — тоест точно при провал,
+    който също е платен.  Тарифата идва от `ai_router.PRICING`, за да не се
+    появи трето място, което държи цени.
+    """
+    from src.ai_router import MODEL_WORKER, PRICING
+
+    тарифа = PRICING.get(MODEL_WORKER) or {}
+    вх = float(тарифа.get("input") or 0.0)
+    изх = float(тарифа.get("output") or 0.0)
+    return round(int(usage.get("tokens_in") or 0) * вх
+                 + int(usage.get("tokens_out") or 0) * изх, 6)
+
+
 def _metrics(run: int, result: dict, elapsed: float,
              boq_index: list | None = None) -> dict:
     """Показателите от предишния пакет ПЛЮС структурните флагове.
@@ -308,7 +324,8 @@ def _run_series(prep: dict, number: int, label: str,
 
         if result is None:
             records.append({"run": run, "status": "error", "exportable": False,
-                            "error": str(failure), "cost": 0.0, **usage,
+                            "error": str(failure),
+                            "cost": _цена_по_токени(usage), **usage,
                             "seconds": round(time.monotonic() - started, 1)})
             continue
 
@@ -317,6 +334,13 @@ def _run_series(prep: dict, number: int, label: str,
         record["manifest_id"] = (манифест or {}).get("manifest_id", "")
         record["git_commit"] = (манифест or {}).get("git_commit", "")
         record.update(usage)
+        # ПРОВАЛЕНИЯТ ПРОГОН СЪЩО СЕ Е ПЛАТИЛ.  Прогон, който не е върнал
+        # график, връща и резултат без цена — затова 8 от 40 записани прогона
+        # казваха $0.0000, макар да бяха изгорели токени (отрязан отговор на
+        # 32 000, празен отговор от 7).  Сборът излизаше $0.4595 при
+        # действителни $0.6333 по токени, тоест занижен с 37 %.
+        if not record.get("cost"):
+            record["cost"] = _цена_по_токени(usage)
         records.append(record)
         mark = "✓" if record["clean"] else ("~" if record["exportable"] else "·")
         print(f"    {mark} прогон {run:2d}: {record['status']:20s} "
