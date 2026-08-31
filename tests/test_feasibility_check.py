@@ -80,3 +80,49 @@ def test_границите_са_подредени():
     assert (ДОКАЗАНО_ТЕМПО["p25"] < ДОКАЗАНО_ТЕМПО["median"]
             < ДОКАЗАНО_ТЕМПО["p75"] < ДОКАЗАНО_ТЕМПО["max"])
     assert ДОКАЗАНО_ТЕМПО["_източник"]
+
+
+# ---------------------------------------------------------------------------
+# Бюджетът на фазата: първо резервът, после темпото
+# ---------------------------------------------------------------------------
+
+def test_мобилизацията_излиза_от_прозореца_за_участъци():
+    """Одиторът, 31.08.2026: „contract span → phase budget → production window
+    → crew feasibility", а не „contract span → метри ÷ екипи"."""
+    from src.deadline_pace import production_window
+
+    задачи = [{"wbs_root": "mobilization", "duration": 15},
+              {"wbs_root": "construction", "duration": 400}]
+    прозорец, обяснение = production_window(500, задачи)
+    assert прозорец == 485
+    assert "Прозорец за работа по участъци" in обяснение
+
+
+def test_приемането_НЕ_излиза_от_прозореца():
+    """При Тръстеник приемането върви ЗАСТЪПЕНО с последните участъци.
+
+    Първата версия го изваждаше и вдигна срока от 255 на 494 дни.
+    """
+    from src.deadline_pace import production_window
+
+    задачи = [{"wbs_root": "acceptance", "duration": 30}]
+    прозорец, обяснение = production_window(500, задачи)
+    assert прозорец == 500
+    assert обяснение == ""
+
+
+def test_прекомерен_резерв_не_се_прилага():
+    """Резерв, който изяжда срока, е признак за друг дефект."""
+    from src.deadline_pace import production_window
+
+    задачи = [{"wbs_root": "mobilization", "duration": 400}]
+    прозорец, обяснение = production_window(500, задачи)
+    assert прозорец == 500
+    assert "твърде голям" in обяснение
+
+
+def test_без_задачи_срокът_остава_непокътнат():
+    from src.deadline_pace import production_window
+
+    assert production_window(500, None) == (500, "")
+    assert production_window(500, []) == (500, "")

@@ -1345,7 +1345,7 @@ class AIProcessor:
         from src.deadline_pace import derive as _темпо_от_срока
 
         изведени, pace_from_deadline = _темпо_от_срока(
-            packages, days=срок, crews=екипи,
+            packages, days=срок, crews=екипи, tasks=tasks,
             parallel=teams_work_in_parallel())
         for note in pace_from_deadline:
             _prog(note)
