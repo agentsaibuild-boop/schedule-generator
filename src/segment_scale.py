@@ -492,7 +492,12 @@ def calibrate_to_declared_pace(
     # кара ЕДИН участък наведнъж — значи участък от L метра трае L ÷ темпо дни.
     # Подът си остава: стъпка, която се извършва, не трае нула.
     for верига, задачи in листа.items():
-        темпо = (overrides or {}).get(верига) or declared_pace(верига)
+        # ОТКЪДЕ ИДВА ТЕМПОТО има значение за одита (одиторът, 31.08.2026):
+        # обявеното от изпълнителя е основание за ТОЗИ обект, а изведеното от
+        # срока е решение за офертата.  Двете не бива да се четат еднакво.
+        изведено = (overrides or {}).get(верига)
+        темпо = изведено or declared_pace(верига)
+        произход = "deadline" if изведено else "declared"
         if not темпо:
             continue
         пипнати_участъци = 0
@@ -516,6 +521,7 @@ def calibrate_to_declared_pace(
                     задача.setdefault("computed_duration", беше)
                     задача["duration"] = стана
                     задача["declared_pace"] = темпо
+                    задача["pace_origin"] = произход
 
             # ОСТАТЪКЪТ СЕ ПРЕНАСОЧВА ТАМ, КЪДЕТО ИМА МЯСТО.  Задача от един
             # ден, умножена по 0.29, пак е един ден — а участък от девет такива
@@ -538,6 +544,7 @@ def calibrate_to_declared_pace(
                         задача["duration"] = max(
                             1, int(round(беше - (беше - 1) * дял)))
                         задача["declared_pace"] = темпо
+                        задача["pace_origin"] = произход
                 else:
                     по_дължина = sorted(листа_тук,
                                         key=lambda t: -_num(t.get("duration")))
@@ -545,6 +552,7 @@ def calibrate_to_declared_pace(
                         задача = по_дължина[i % len(по_дължина)]
                         задача["duration"] = int(_num(задача.get("duration"))) + 1
                         задача["declared_pace"] = темпо
+                        задача["pace_origin"] = произход
                     break
             пипнати_участъци += 1
         if пипнати_участъци:
@@ -587,6 +595,7 @@ def calibrate_to_declared_pace(
                     задача.setdefault("computed_duration", беше)
                     задача["duration"] = стана
                     задача["declared_pace"] = темпо
+                    задача["pace_origin"] = произход
             станало = sum(_num(t.get("duration")) for t in задачи)
             бележки.append(
                 f"{верига}: темпо {темпо:g} м/ден на екип → {дължина:.0f} м "
@@ -619,6 +628,7 @@ def calibrate_to_declared_pace(
                 if стана != беше:
                     задача["duration"] = стана
                     задача["declared_pace"] = темпо
+                    задача["pace_origin"] = произход
                     махнато += беше - стана
             if махнато <= 0:
                 break

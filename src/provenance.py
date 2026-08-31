@@ -28,6 +28,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from src.text_norm import cyrillize
+
 logger = logging.getLogger(__name__)
 
 # Състояния на стойност — подредени по тежест на доказателството.
@@ -120,8 +122,16 @@ class QuantityRow(NamedTuple):
 
 
 def _tokens(text: str) -> set[str]:
+    """Значещите думи за сравнение — с ОПРАВЕНА азбука.
+
+    Тръжните документи носят латински букви вътре в кирилски думи (измерено
+    31.08.2026: 68 думи в пакета на Илиянци, между тях `Kл`, `OТ`, `Бaлчо`).
+    Такава дума не съвпада с чистия си двойник и редът от КСС остава без
+    връзка — тихо, точно както се губеха клоновете в чертежа.
+    """
+    text = cyrillize(text or "")
     return {
-        w.lower() for w in _WORD_RE.findall(text or "")
+        w.lower() for w in _WORD_RE.findall(text)
         if len(w) > 2 and w.lower() not in _STOPWORDS
     }
 
@@ -1414,7 +1424,8 @@ def _content_stems(text: str) -> set[str]:
     първите 6 знака.  Общите думи (полагане, работи...) се изхвърлят, за да не
     съвпадне всяка задача с всяко изречение.
     """
-    words = re.findall(r"[A-Za-zА-Яа-я0-9]{5,}", (text or "").lower())
+    words = re.findall(r"[A-Za-zА-Яа-я0-9]{5,}",
+                       cyrillize(text or "").lower())
     return {w[:6] for w in words if w not in _TARGET_STOPWORDS}
 
 
