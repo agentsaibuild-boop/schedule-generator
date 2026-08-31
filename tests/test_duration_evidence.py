@@ -44,6 +44,15 @@ def test_медианата_от_корпуса_е_основание_а_не_л
     assert grade_of(т) in ДОКАЗАНИ
 
 
+def test_темпото_на_стъпката_е_основание_от_корпуса():
+    """`step_rate` идва от еталонния график — 33 задачи бяха обявени за без
+    основание само защото стълбицата не знаеше този произход."""
+    т = _задача(duration_source="step_rate", step_rate=25.3,
+                duration_status="NOT_PARAMETRIC")
+    assert grade_of(т) == "HISTORICAL_CORPUS_MEDIAN"
+    assert grade_of(т) in ДОКАЗАНИ
+
+
 def test_разтеглената_върху_фазата_не_е_доказана():
     т = _задача(duration_source="construction_span", duration=660)
     assert grade_of(т) == "CONTRACT_SPAN_CALIBRATED"
