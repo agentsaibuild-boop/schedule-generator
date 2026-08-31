@@ -21,6 +21,24 @@ from src.deadline_pace import (  # noqa: E402
     ДОКАЗАНО_ТЕМПО, _какво_да_се_смени, feasibility)
 
 
+def test_под_25_ия_персентил_екипите_са_в_повече():
+    """Измереното следствие: излишният екип надува работата, не я скъсява."""
+    присъда, обяснение = feasibility("sewer_section", 3.98)
+    assert присъда == "OVERSTAFFED"
+    assert "надува работата" in обяснение
+
+
+def test_минимумът_екипи_е_най_малкият_изпълним():
+    from src.deadline_pace import минимум_екипи, scenarios
+    # Тръстеник: 4184 м канал за 210 дни.  Изпълнителят обяви 3 екипа.
+    assert минимум_екипи(4184.0, 210) == 3
+    редове = {р["екипи"]: р["присъда"] for р in scenarios(4184.0, 210, до=6)}
+    assert редове[1] == "NOT_SUPPORTED_BY_DATA"
+    assert редове[2] == "REQUIRES_UPLIFT"
+    assert редове[3] == "FEASIBLE"
+    assert редове[6] == "OVERSTAFFED"
+
+
 def test_темпо_в_диапазона_е_изпълнимо():
     присъда, _ = feasibility("water_section", 6.0)
     assert присъда == "FEASIBLE"
