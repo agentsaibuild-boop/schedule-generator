@@ -329,9 +329,20 @@ def main() -> int:
         print(f"\nJSON: {args.dump} ({len(tasks)} задачи)")
 
     if args.xml:
+        from src.calendar_policy import check as _календар_ок, resolve as _календар
         from src.export_xml import export_to_mspdi_xml
+
+        решение = _календар(project)
+        print()
+        print(решение["обяснение"])
+        пречки = _календар_ок(project, решение["календар"])
+        for п in пречки:
+            print(f"ОТКАЗ: {п}")
+        if пречки:
+            return 1
         target = Path(args.xml)
         payload = export_to_mspdi_xml(tasks, args.name,
+                                      calendar_type=решение["календар"],
                                       filename=str(target),
                                       constraint_mode=args.constraints)
         if not payload:

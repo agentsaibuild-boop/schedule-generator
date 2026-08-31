@@ -1638,8 +1638,25 @@ if schedule:
             if st.button("Генерирай XML", type="primary", key="btn_xml", disabled=_blocked, use_container_width=True):
                 with st.spinner("Генерирам XML..."):
                     try:
+                        # КАЛЕНДАРЪТ ИДВА ОТ ДОГОВОРА, не от подразбирането.
+                        # Одиторът, 31.08.2026: „не бих допуснал production
+                        # export, ако contract_calendar != schedule_calendar
+                        # без изрично човешко override" — при 5/5 срещу 7/7
+                        # всяка дата във файла е изместена с около 40 %.
+                        from src.calendar_policy import check as _кал_гейт
+                        from src.calendar_policy import resolve as _кал
+
+                        _папка = getattr(file_mgr, "base_path", None)
+                        _решение = _кал(_папка)
+                        _пречки = _кал_гейт(_папка, _решение["календар"])
+                        if _пречки:
+                            for _п in _пречки:
+                                st.error(_п)
+                            st.stop()
+                        st.caption(_решение["обяснение"])
                         xml_bytes = export_to_mspdi_xml(
                             schedule, project_name, start_date=export_start_date,
+                            calendar_type=_решение["календар"],
                         )
                         if xml_bytes:
                             st.session_state["xml_ready"] = {
