@@ -1052,6 +1052,12 @@ class ScheduleBuilder:
             if start != original:
                 shifted.append({"id": tid, "name": task.get("name"),
                                 "from": original, "to": start})
+                # СЛЕДАТА ОСТАВА НА ЗАДАЧАТА, не само в отчета.  Без нея
+                # `placement_reason` не може да различи „изравняване по ресурс"
+                # от „не знам защо е тук" и обявява десетки задачи за
+                # необяснени (Илиянци: 80 задачи, 700 дни).
+                task["leveled"] = True
+                task["leveled_from_day"] = original
             task["start_day"] = start
             task["end_day"] = end
             new_start[tid] = start

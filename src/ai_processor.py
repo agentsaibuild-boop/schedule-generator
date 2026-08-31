@@ -1549,6 +1549,17 @@ class AIProcessor:
             _prog("Критичният път НЕ е сметнат: "
                   + "; ".join(str(w) for w in cpm["warnings"][:2]))
 
+        # ЗАЩО Е ТАМ — върху окончателните дати, след CPM.  Всяка задача носи
+        # `placement_reason` и `placement_detail`, за да може на въпрос „защо
+        # тази дейност е чак на ден 180" да отговори самият файл.
+        from src.placement_reason import (describe as _опиши_местата,
+                                          explain as _обясни_местата,
+                                          report as _места)
+        for note in _обясни_местата(tasks):
+            _prog(note)
+        for ред in _опиши_местата(_места(tasks)):
+            _prog(ред)
+
         # Обобщаващите се разтеглят по децата си — иначе Gantt-ът и таблицата
         # показват друго от MS Project (одит 2026-08-07: 26 от 26 грешни).
         tasks = builder.roll_up_summaries(tasks)["schedule"]
