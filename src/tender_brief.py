@@ -202,6 +202,7 @@ def _метри_по_мрежа(boq_index: Iterable[Any] | None) -> dict[str, fl
 def brief(base_path: str | Path, boq_index: Iterable[Any] | None = None) -> dict:
     """Всичко прочетено от търга, готово да се покаже преди въпросите."""
     from src.contract_data import read_contract
+    from src.fidic import intervals as _фидик
 
     срокове = read_terms(base_path)
     договор = read_contract(base_path)
@@ -212,6 +213,7 @@ def brief(base_path: str | Path, boq_index: Iterable[Any] | None = None) -> dict
         "работна_седмица": договор.get("работна_седмица", ""),
         "срок_за_дефекти_дни": договор.get("срок_за_дефекти_дни"),
         "договорни_данни": bool(договор.get("приложение")),
+        "фидик": _фидик(base_path),
     }
 
 
@@ -244,6 +246,16 @@ def describe(данни: dict, *, за_въпрос: str = "") -> list[str]:
     if not срокове:
         редове.insert(0, "**От документацията НЕ извадих срокове** — провери "
                          "ги в обявлението, преди да отговориш.")
+
+    # ДОГОВОРНИТЕ ИНТЕРВАЛИ — показват се на човека, преди да влязат в графика
+    # (изпълнителят, 01.09.2026).  Прочетеното от процедурата и приетото от
+    # общите условия стоят едно до друго и се различават на пръв поглед.
+    фидик = данни.get("фидик") or {}
+    if фидик.get("интервали"):
+        from src.fidic import describe as _опиши_фидик
+
+        редове.append("")
+        редове.extend(_опиши_фидик(фидик))
     return редове
 
 
