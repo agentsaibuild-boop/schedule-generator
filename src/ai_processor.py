@@ -1563,6 +1563,14 @@ class AIProcessor:
             _prog("Критичният път НЕ е сметнат: "
                   + "; ".join(str(w) for w in cpm["warnings"][:2]))
 
+        # ОТКЪДЕ ИДВАТ РЕСУРСНИТЕ БРОЙКИ, които държат срока.  Зеленият
+        # `resource_capacity_ok` значи „под наблюдавания връх от ЧУЖД обект", а
+        # се чете като „проверено" — одиторът, 31.08.2026.
+        from src.resource_evidence import binding as _ресурси_държат
+        from src.resource_evidence import describe as _опиши_ресурсите
+        for ред in _опиши_ресурсите(_ресурси_държат(tasks)):
+            _prog(ред)
+
         # ЗАЩО Е ТАМ — върху окончателните дати, след CPM.  Всяка задача носи
         # `placement_reason` и `placement_detail`, за да може на въпрос „защо
         # тази дейност е чак на ден 180" да отговори самият файл.

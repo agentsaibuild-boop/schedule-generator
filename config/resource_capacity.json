@@ -548,5 +548,243 @@
       "Трамбовка",
       "Виброплоча"
     ]
+  },
+  "произход": {
+    "_note": [
+      "ОТКЪДЕ ИДВА ВСЯКА БРОЙКА — три различни състояния, не едно число.",
+      "",
+      "Одиторът, 31.08.2026: „observed_peak_reference, assumed_capacity и",
+      "contractor_confirmed_capacity още не са разделени.  Аз вече бих го",
+      "направил.  Това не е polish.  Така изходът може честно да казва:",
+      "‘Графикът използва 3 CCTV екипа.  В историческия benchmark сме",
+      "виждали 3.  Изпълнителят още не е потвърдил наличността.’“",
+      "",
+      "observed_peak  ИЗМЕРЕН връх от еталонен човешки график — колко машини",
+      "               или хора са работили ЕДНОВРЕМЕННО там.  Това е ДОЛНА",
+      "               граница за наличния парк, никога таван.",
+      "assumed        разумно подразбиране.  Не е измерено и не е потвърдено.",
+      "confirmed      изпълнителят е потвърдил, че толкова има.  САМО тази",
+      "               стойност прави срока обвързващ.",
+      "",
+      "Празно `confirmed` НЕ е грешка — то е честният отговор, докато никой",
+      "не е питан.  Но графикът трябва да го КАЗВА, вместо да свети зелено."
+    ],
+    "по_ресурс": {
+      "CCTV камера": {
+        "observed_peak": null,
+        "assumed": 1,
+        "confirmed": null
+      },
+      "Автокран": {
+        "observed_peak": null,
+        "assumed": 1,
+        "confirmed": null
+      },
+      "Агрегат": {
+        "observed_peak": null,
+        "assumed": 3,
+        "confirmed": null
+      },
+      "Асфалтополагач": {
+        "observed_peak": null,
+        "assumed": 1,
+        "confirmed": null
+      },
+      "Асфалторезачка": {
+        "observed_peak": 4,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Багер ескаватор": {
+        "observed_peak": 3,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Багер универсален": {
+        "observed_peak": 5,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Бетоновоз": {
+        "observed_peak": 4,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Бус": {
+        "observed_peak": 6,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Валяк": {
+        "observed_peak": null,
+        "assumed": 1,
+        "confirmed": null
+      },
+      "Вибратор за бетон": {
+        "observed_peak": 4,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Виброплоча": {
+        "observed_peak": 4,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Водопроводчик": {
+        "observed_peak": 6,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Геодезическо оборудване": {
+        "observed_peak": null,
+        "assumed": 3,
+        "confirmed": null
+      },
+      "Дозаторна помпа": {
+        "observed_peak": null,
+        "assumed": 2,
+        "confirmed": null
+      },
+      "Електротехник": {
+        "observed_peak": null,
+        "assumed": 2,
+        "confirmed": null
+      },
+      "Заварчик на ПЕ": {
+        "observed_peak": null,
+        "assumed": 3,
+        "confirmed": null
+      },
+      "Заваръчна машина за ПЕ": {
+        "observed_peak": null,
+        "assumed": 2,
+        "confirmed": null
+      },
+      "Инженер - Геодезист": {
+        "observed_peak": 4,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Каналджия": {
+        "observed_peak": 6,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Компресор с къртица": {
+        "observed_peak": null,
+        "assumed": 2,
+        "confirmed": null
+      },
+      "Лек автомобил": {
+        "observed_peak": 6,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Машина за ел.муфи": {
+        "observed_peak": null,
+        "assumed": 2,
+        "confirmed": null
+      },
+      "Мини челен товарач": {
+        "observed_peak": null,
+        "assumed": 3,
+        "confirmed": null
+      },
+      "Общ работник": {
+        "observed_peak": 10,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Помпа за изпитване": {
+        "observed_peak": null,
+        "assumed": 2,
+        "confirmed": null
+      },
+      "Проектант": {
+        "observed_peak": 4,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Ръководител проектантски екип": {
+        "observed_peak": 4,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Ръководител работна група": {
+        "observed_peak": 6,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Система за укрепване на изкопи": {
+        "observed_peak": null,
+        "assumed": 2,
+        "confirmed": null
+      },
+      "Сондажна машина": {
+        "observed_peak": null,
+        "assumed": 1,
+        "confirmed": null
+      },
+      "Сондьор": {
+        "observed_peak": null,
+        "assumed": 2,
+        "confirmed": null
+      },
+      "Строителен работник": {
+        "observed_peak": 8,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Технически ръководител": {
+        "observed_peak": null,
+        "assumed": 1,
+        "confirmed": null
+      },
+      "Товарен автомобил": {
+        "observed_peak": 6,
+        "assumed": null,
+        "confirmed": null
+      },
+      "Трамбовка": {
+        "observed_peak": null,
+        "assumed": 3,
+        "confirmed": null
+      },
+      "Трасировъчна апаратура": {
+        "observed_peak": null,
+        "assumed": 3,
+        "confirmed": null
+      },
+      "Фронт 1": {
+        "observed_peak": null,
+        "assumed": 3,
+        "confirmed": null
+      },
+      "Фронт 2": {
+        "observed_peak": null,
+        "assumed": 3,
+        "confirmed": null
+      },
+      "Фронт 3": {
+        "observed_peak": null,
+        "assumed": 3,
+        "confirmed": null
+      },
+      "Фронт 4": {
+        "observed_peak": null,
+        "assumed": 3,
+        "confirmed": null
+      },
+      "Хидравличен чук": {
+        "observed_peak": null,
+        "assumed": 3,
+        "confirmed": null
+      },
+      "Хидравлична станция с помпа": {
+        "observed_peak": null,
+        "assumed": 3,
+        "confirmed": null
+      }
+    }
   }
 }
