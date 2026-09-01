@@ -108,6 +108,13 @@ class SpatialWorkPackage:
     chainage_to: float | None = None
     dn: int | None = None
     material: str = ""
+    #: Как се полага ТОЗИ участък: "HDD" (безизкопно) или "open" (траншейно).
+    #
+    # Методът е свойство на УЧАСТЪКА, не на технологичния шаблон: реален обект
+    # може да е изцяло сондажен (Елхово, 09.2026 — и 29-те участъка), изцяло
+    # траншеен, или смесен.  Без това поле методът се четеше само от името на
+    # задачата и цял сондажен обект се смяташе по нормите за открит изкоп.
+    method: str = ""
     front: str = ""                   # реален фронт/екип, не етикет
     items: tuple[PackageItem, ...] = ()
     #: Дали улицата и възлите са ПОТВЪРДЕНИ от ситуационния чертеж.
@@ -433,6 +440,7 @@ def packages_from_ai(
             chainage_to=_as_number(raw.get("chainage_to")),
             dn=_as_int(raw.get("dn")),
             material=str(raw.get("material") or "").strip(),
+            method=str(raw.get("method") or "").strip(),
             items=tuple(items),
         ))
 
@@ -905,12 +913,23 @@ def normalize_over_allocation(
     Returns:
         (пакети, бележки за изравненото).
     """
+    from src.provenance import is_contract_scope_row
+
     required: dict[str, float] = {}
+    contract_scope: list[str] = []
     for row in boq_index:
         qty = getattr(row, "quantity", None)
         ref = getattr(row, "ref", None)
-        if ref and isinstance(qty, (int, float)) and not isinstance(qty, bool):
-            required[str(ref)] = float(qty)
+        if not (ref and isinstance(qty, (int, float))) or isinstance(qty, bool):
+            continue
+        # Проектиране/авторски надзор носят количество (1 бр) в инженеринговите
+        # КСС, но ги изпълнява ДОГОВОРНА ФАЗА (`contract_packages`), не
+        # пространствен участък.  Затова не се искат от участъците — и се
+        # ИЗБРОЯВАТ, за да не изчезнат тихо.
+        if is_contract_scope_row(getattr(row, "description", "")):
+            contract_scope.append(str(ref))
+            continue
+        required[str(ref)] = float(qty)
 
     planned: dict[str, float] = {}
     for pkg in packages:
@@ -1200,12 +1219,23 @@ def check_conservation(
         ЛИПСВАЩО или ПРЕВИШЕНО количество.  Превишението е блокиращо: то
         означава дублирана работа, тоест по-дълъг и по-скъп график.
     """
+    from src.provenance import is_contract_scope_row
+
     required: dict[str, float] = {}
+    contract_scope: list[str] = []
     for row in boq_index:
         qty = getattr(row, "quantity", None)
         ref = getattr(row, "ref", None)
-        if ref and isinstance(qty, (int, float)) and not isinstance(qty, bool):
-            required[str(ref)] = float(qty)
+        if not (ref and isinstance(qty, (int, float))) or isinstance(qty, bool):
+            continue
+        # Проектиране/авторски надзор носят количество (1 бр) в инженеринговите
+        # КСС, но ги изпълнява ДОГОВОРНА ФАЗА (`contract_packages`), не
+        # пространствен участък.  Затова не се искат от участъците — и се
+        # ИЗБРОЯВАТ, за да не изчезнат тихо.
+        if is_contract_scope_row(getattr(row, "description", "")):
+            contract_scope.append(str(ref))
+            continue
+        required[str(ref)] = float(qty)
 
     planned: dict[str, float] = {}
     holders: dict[str, list[str]] = {}
@@ -1234,6 +1264,9 @@ def check_conservation(
         "short": short,
         "unknown_ref": unknown,
         "missing": missing,
+        # Редовете, изключени като договорен обхват — изброени, за да се вижда
+        # КАКВО е освободено от Σ=КСС, вместо да изчезне без следа.
+        "contract_scope": sorted(contract_scope),
         "totals": {ref: {"required": required.get(ref), "planned": planned.get(ref, 0.0)}
                    for ref in sorted(set(required) | set(planned))},
     }
@@ -2040,6 +2073,10 @@ def _step_task(
         task["contractual"] = True
     if step.get("method"):
         task["method"] = step["method"]
+    elif pkg.method:
+        # Шаблонът има предимство (той описва стъпката); пакетът допълва,
+        # когато стъпката не казва нищо за метода.
+        task["method"] = pkg.method
     # DN/материал: първо от РЕДА (документа), после от пакета (модела).
     dn = (item.dn if item is not None and item.dn else None) or pkg.dn
     material = (item.material if item is not None and item.material else "") or pkg.material

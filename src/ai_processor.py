@@ -568,6 +568,7 @@ class AIProcessor:
         segments: list[dict] | None = None,
         progress_callback: Any | None = None,
         feedback: str = "",
+        declared_spatial_source: str = "",
     ) -> dict:
         """Генерирай ПАКЕТИ (физически участъци), после ги разгъни в задачи.
 
@@ -733,8 +734,15 @@ class AIProcessor:
         # участък, не за зониране, зависимости или доказателство за
         # покритие.  Днес друг източник няма, тоест това е `suggested`.
         from src.spatial_source import SpatialSource, is_authoritative
-        spatial_source = (SpatialSource.PDF_SUGGESTIONS_ONLY if segments
-                          else SpatialSource.NONE)
+        # Извикващият може да ОБЯВИ по-силен източник, когато участъците не са
+        # прочетени от чертеж с vision, а са СТРУКТУРНИ — например изписани в
+        # самото КСС, с улица, клон, възли и дължина, сверени срещу редовете
+        # (Елхово, 09.2026).  Подразбирането не се мени: без обявяване
+        # прочетеното от PDF си остава етикет.
+        spatial_source = (SpatialSource(declared_spatial_source)
+                          if declared_spatial_source
+                          else (SpatialSource.PDF_SUGGESTIONS_ONLY if segments
+                                else SpatialSource.NONE))
         spatial_authoritative = is_authoritative(spatial_source)
 
         packages, parse_errors = packages_from_ai(
@@ -1176,6 +1184,7 @@ class AIProcessor:
         segments: list[dict] | None = None,
         progress_callback: Any | None = None,
         feedback: str = "",
+        declared_spatial_source: str = "",
     ) -> dict:
         """Пакетната генерация, приведена към СТАНДАРТНИЯ резултат на pipeline-а.
 
@@ -1193,7 +1202,8 @@ class AIProcessor:
         result = self.generate_packages(
             analysis, boq_index, num_teams=num_teams, locations=locations,
             segments=segments, progress_callback=progress_callback,
-            feedback=feedback)
+            feedback=feedback,
+            declared_spatial_source=declared_spatial_source)
         if result["status"] == "error":
             return {"status": "error", "message": result.get("message", ""),
                     "packaged": True, "parse_errors": result.get("parse_errors", [])}

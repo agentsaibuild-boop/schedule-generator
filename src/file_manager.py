@@ -997,6 +997,9 @@ class FileManager:
         for ws in wb.worksheets:
             # Build a map of merged cells -> top-left value
             merged_vals: dict[tuple[int, int], Any] = {}
+            # Клетките, които САМО ПРОДЪЛЖАВАТ слята област — не са отделна
+            # клетка и не бива да се броят повторно при избора на хедър.
+            merged_followers: set[tuple[int, int]] = set()
             for merge_range in ws.merged_cells.ranges:
                 top_left_val = ws.cell(
                     merge_range.min_row, merge_range.min_col
@@ -1004,6 +1007,8 @@ class FileManager:
                 for row in range(merge_range.min_row, merge_range.max_row + 1):
                     for col in range(merge_range.min_col, merge_range.max_col + 1):
                         merged_vals[(row, col)] = top_left_val
+                        if (row, col) != (merge_range.min_row, merge_range.min_col):
+                            merged_followers.add((row, col))
 
             def _cell_value(row: int, col: int) -> Any:
                 if (row, col) in merged_vals:
@@ -1027,15 +1032,25 @@ class FileManager:
             )
 
             def _header_score(r: int) -> int:
+                # Слятото знаме се брои ВЕДНЪЖ (Елхово, 09.2026).  Заглавието
+                # „…водопроводната МРЕЖА…", слято над 7 колони, вземаше 7 точки
+                # и биеше истинския хедър („№ | СМР | Ед. м-ка | Общо | Ед.
+                # цена" — 2 точки).  Резултатът беше КСС без нито едно
+                # количество, без съобщение за грешка.
                 score = 0
                 for c in range(1, (ws.max_column or 1) + 1):
+                    if (r, c) in merged_followers:
+                        continue
                     v = _cell_value(r, c)
                     low = str(v or "").strip().lower()
                     if low and any(k in low for k in header_keywords):
                         score += 1
                 return score
 
-            scan_to = min(ws.max_row or 1, 25) + 1
+            # Прозорецът стига до 40-ия ред: КСС по участъци държи таблицата с
+            # оразмерителни параметри НАД самата сметка, а хедърът на Елхово е
+            # чак на ред 30 — при таван 25 той изобщо не се стига.
+            scan_to = min(ws.max_row or 1, 40) + 1
             scored = [(_header_score(r), -r, r) for r in range(1, scan_to)]
             best_score, _, best_r = max(scored) if scored else (0, 0, 1)
             if best_score >= 2:

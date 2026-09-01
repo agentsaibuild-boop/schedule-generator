@@ -219,6 +219,19 @@ def _build_xml(
     # --- 1. Project properties ---
     ET.SubElement(root, "SaveVersion").text = "14"
     ET.SubElement(root, "Name").text = project_name
+    # ПЛАНИРАЙ ОТ НАЧАЛОТО (проверено в самия MS Project, 01.09.2026).
+    #
+    # Подаваме и StartDate, и FinishDate.  Без този флаг Project приема, че
+    # проектът се планира ОТ КРАЯ назад: внесеният график излизаше с дати ПРЕДИ
+    # обявеното начало — „Част Водоснабдяване" тръгваше на 15.05 при начало
+    # 01.06.  Продължителностите бяха верни, датите — не, и нищо не съобщаваше
+    # за това.  Това е „разписването назад" от старите наблюдения в MS Project.
+    #
+    # РЕДЪТ Е ЧАСТ ОТ ПОПРАВКАТА: в MSPDI схемата `ScheduleFromStart` стои
+    # ПРЕДИ `StartDate`.  Сложен след `FinishDate`, Project го подминава мълком
+    # и пак разписва назад — тоест верен елемент на грешно място е същото като
+    # липсващ, но изглежда като направен.
+    ET.SubElement(root, "ScheduleFromStart").text = "1"
     ET.SubElement(root, "StartDate").text = f"{start_date}T08:00:00"
     ET.SubElement(root, "FinishDate").text = finish_dt.strftime("%Y-%m-%dT17:00:00")
     ET.SubElement(root, "CalendarUID").text = "1"

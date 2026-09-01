@@ -28,9 +28,23 @@ pytestmark = pytest.mark.skipif(
     shutil.which("git") is None, reason="git не е наличен")
 
 
+def _clean_env() -> dict:
+    """Средата БЕЗ GIT_* — иначе тестът работи върху ЧУЖД индекс.
+
+    Тестовете вдигат временни репа, но hook-ът ги пуска ПО ВРЕМЕ НА КОМИТ, а
+    тогава git подава `GIT_INDEX_FILE`, `GIT_DIR` и др. надолу.  Наследени, те
+    насочват `git diff --cached` от временното репо към ИСТИНСКОТО — blob-овете
+    липсват, сканът връща rc 3 (fail-closed) и шест теста падат.  Резултатът е,
+    че с инсталиран hook НИТО ЕДИН комит не минава, а самостоятелният прогон на
+    pytest е зелен: дефектът се вижда само в момента, в който пречи.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=repo, capture_output=True,
-                          text=True, encoding="utf-8", errors="replace")
+                          text=True, encoding="utf-8", errors="replace",
+                          env=_clean_env())
 
 
 def _scan(repo: Path, *args: str) -> int:
@@ -38,7 +52,7 @@ def _scan(repo: Path, *args: str) -> int:
     return subprocess.run(
         [sys.executable, str(SCAN), *args],
         cwd=repo, capture_output=True, text=True,
-        encoding="utf-8", errors="replace").returncode
+        encoding="utf-8", errors="replace", env=_clean_env()).returncode
 
 
 @pytest.fixture()
@@ -130,7 +144,7 @@ def _hook_repo(repo: Path) -> Path:
 
 def _run_hook(repo: Path) -> subprocess.CompletedProcess:
     """Изпълни РЕАЛНИЯ hooks/pre-commit (само скана)."""
-    env = dict(os.environ)
+    env = _clean_env()
     env["PRECOMMIT_SKIP_TESTS"] = "1"
     # осигури, че `python`/`python3` се резолвва (hook-ът ги търси)
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
@@ -240,7 +254,7 @@ def test_real_hook_fails_closed_on_git_show_error(repo: Path, tmp_path: Path):
         'for a in "$@"; do [ "$a" = "show" ] && exit 128; done\n'
         'PATH="$REAL_PATH" exec git "$@"\n', encoding="utf-8")
     (shim / "git").chmod(0o755)
-    env = dict(os.environ)
+    env = _clean_env()
     env["PRECOMMIT_SKIP_TESTS"] = "1"
     env["REAL_PATH"] = str(Path(sys.executable).parent) + os.pathsep + real_path
     env["PATH"] = str(shim) + os.pathsep + env["REAL_PATH"]
@@ -273,8 +287,10 @@ def test_ci_orchestration_two_channels(repo: Path):
     dl = _deny(repo)
     # канал 1: pathname за ВСИЧКИ (git ls-files) — трябва да хване token-ИМЕТО
     names = subprocess.run(["git", "ls-files"], cwd=repo, capture_output=True,
-                           text=True, encoding="utf-8").stdout.split()
+                           text=True, encoding="utf-8",
+                           env=_clean_env()).stdout.split()
     ch1 = subprocess.run([sys.executable, str(SCAN), "--names-only", dl, *names],
                          cwd=repo, capture_output=True, text=True,
-                         encoding="utf-8", errors="replace").returncode
+                         encoding="utf-8", errors="replace",
+                         env=_clean_env()).returncode
     assert ch1 == 2                                  # token-ИМЕ хванато по канал 1

@@ -165,8 +165,38 @@ _DESC_KEYS = ("наименование", "описание", "дейност", 
               "мрежа", "клон", "вид дейност", "работи")
 # „дължин" — при тръбните КСС количеството е в колона „Дължина /m/", не
 # „Количество" (проба 2026-07-24, реален проект).
-_QTY_KEYS = ("количество", "к-во", "кол-во", "дължин", "quantity", "qty")
-_UNIT_KEYS = ("мярка", "ед. мярка", "ед.мярка", "мерна", "unit", "uom")
+_QTY_KEYS = ("количество", "к-во", "кол-во", "дължин", "общо", "quantity", "qty")
+
+# „Общо" е количество САМО когато не е пари.  В КСС по участъци (Елхово,
+# 09.2026) колоните са „…участъци… | Общо | Ед. цена | Стойност" — там „Общо"
+# е сборът на реда в мерната му единица.  Но „Общо стойност"/„Общо лв" е
+# сумата в лева и да я вземеш за количество е по-лошо от липсващо количество.
+_MONEY_MARKERS = ("стойност", "цена", "лв", "лева", "bgn", "eur", "价")
+
+
+def _is_money_header(column: str) -> bool:
+    low = str(column).lower()
+    return any(m in low for m in _MONEY_MARKERS)
+# „м-ка"/„ед. м-ка" — съкращението в реалните КСС на Райкомерс (Елхово,
+# 09.2026).  Без него мярката излиза празна и редът не се различава
+# метри от броеве.
+_UNIT_KEYS = ("мярка", "ед. мярка", "ед.мярка", "м-ка", "ед. м-ка",
+              "ед.м-ка", "мерна", "unit", "uom")
+
+
+# Ред, който сочи КЪДЕ е работата, а не КАКВА е: „кл. 41", „т. 154'", „поз. 3".
+# В йерархичните КСС (Елхово, 09.2026) името на работата стои в РОДИТЕЛСКИЯ ред
+# („Реконструкция на водопровод (без възстановяване на настилки)"), а под него
+# вървят само клоновете.  Без наследяване тези редове не се класифицират и
+# веригите не ги виждат — 62 от 64 реда изпадаха мълчаливо.
+_BARE_REF_RE = re.compile(
+    r"^(кл\.?|клон|т\.?|точка|поз\.?|позиция|уч\.?|участък|№)\s*[\w'\-\.′″/]*$",
+    re.IGNORECASE | re.UNICODE)
+
+
+def _is_bare_reference(text: str) -> bool:
+    """Дали описанието е само указател към място, без вид работа."""
+    return bool(_BARE_REF_RE.match(str(text or "").strip()))
 
 
 def _looks_like_description(text: str) -> bool:
@@ -227,6 +257,13 @@ def _pick(row: dict, keys: tuple[str, ...], prefer_numeric: bool = False,
     """
     matches = [(str(c), v) for c, v in row.items()
                if any(k in str(c).lower() for k in keys)]
+    # Колона с пари не е количество (виж `_MONEY_MARKERS`).  Отсява се само
+    # ако остане нещо друго — иначе тесен КСС с една-единствена колона
+    # „Количество (лв)" би останал без нито едно число.
+    if keys is _QTY_KEYS:
+        без_пари = [(c, v) for c, v in matches if not _is_money_header(c)]
+        if без_пари:
+            matches = без_пари
     if prefer_numeric:
         for col, val in matches:
             if _number(val) is not None:
@@ -314,6 +351,7 @@ def build_quantity_index(base_path: str | Path) -> list[QuantityRow]:
         document = data.get("source_file", jf.stem)
         for sheet in data.get("sheets") or []:
             sheet_name = sheet.get("name", "")
+            parent_description = ""      # важи само в рамките на ЕДИН лист
             for offset, row in enumerate(sheet.get("rows") or []):
                 if not isinstance(row, dict):
                     continue
@@ -335,6 +373,23 @@ def build_quantity_index(base_path: str | Path) -> list[QuantityRow]:
                     description = best
                 if not description:
                     continue
+                # РЕД БЕЗ НИТО ЕДНА БУКВА НЕ Е ПОЗИЦИЯ (Елхово, 09.2026).
+                # Легендата на колоните („1 | 2 | … | 6 = 4 * 5") влизаше в
+                # индекса като позиция с описание „2", мярка „3'" и количество
+                # 4 — фантом, който после блокира Σ=КСС, защото нищо не може да
+                # го изпълни.
+                if not _looks_like_description(description):
+                    continue
+
+                # РОДИТЕЛЯТ КАЗВА КАКВА Е РАБОТАТА.  Ред без количество и с
+                # истинско име („Реконструкция на водопровод (възстановяване на
+                # настилки)") се помни; следващите редове, които са само
+                # указател („кл. 41"), го наследяват като предтекст.  Така
+                # класификаторът вижда работата, а цитатът остава на своя ред.
+                if _number(quantity) is None and not _is_bare_reference(description):
+                    parent_description = description
+                elif parent_description and _is_bare_reference(description):
+                    description = f"{parent_description} — {description}"
 
                 # Реалният Excel ред (одит v11 #2): конверторът вече го записва
                 # (`__excel_row__`).  Fallback към offset+2 само за стар формат.
@@ -831,11 +886,44 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
 # Одит v18 P0: fallback по мярка заверяваше грешни позиции (пътни знаци 5бр ↔
 # ревизионни шахти 5бр; бетон 100м³ ↔ изкоп 100м³; кабел 100м ↔ водопровод 100м).
 # Затова непознато описание → None (двусмислено) → човешки преглед, не гадаене.
+# „БЕЗ X" КАЗВА КАКВО НЕ Е В РЕДА.  Реален КСС (Елхово, 09.2026) разделя
+# работата на „Реконструкция на водопровод (БЕЗ възстановяване на настилки)" и
+# „Реконструкция на водопровод (възстановяване на настилки)".  Класификаторът
+# четеше и двата като настилка, тоест полагането на тръбата минаваше за асфалт.
+# Изисква се РАЗДЕЛИТЕЛ след „без", за да оцелеят „безизкопно" и „безтраншеен".
+_NEGATED_RE = re.compile(r"\(\s*без\s+[^)]*\)|(?<![\w-])без\s+[^,;.()]*",
+                         re.IGNORECASE | re.UNICODE)
+
+
+def _strip_negations(text: str) -> str:
+    """Махни каквото редът изрично ИЗКЛЮЧВА, преди да се класифицира."""
+    stripped = _NEGATED_RE.sub(" ", str(text or ""))
+    return re.sub(r"\s+", " ", stripped).strip(" -—–,;")
+
+
+# ДОГОВОРЕН ОБХВАТ, НЕ РАБОТА ПО СМЕТКА.  Проектирането и авторският надзор
+# се създават като отделни фази (`work_package.contract_packages`), а не като
+# пространствени участъци.  Когато КСС ги остойностява като редове (инженеринг
+# — Елхово, 09.2026), Σ=КСС ги искаше в участък и блокираше целия график.
+_CONTRACT_SCOPE_MARKERS = (
+    "авторски надзор", "инвестиционен проект", "работен проект",
+    "идеен проект", "проектиране", "непредвидени разходи",
+    "обща цена", "строителен надзор",
+)
+
+
+def is_contract_scope_row(description: str) -> bool:
+    """Дали редът е договорен обхват, а не физическа работа по трасето."""
+    low = str(description or "").lower()
+    return any(m in low for m in _CONTRACT_SCOPE_MARKERS)
+
+
 def _coverer_class(row: QuantityRow) -> str | None:
-    cls = activity_class(row.description)
+    description = _strip_negations(row.description)
+    cls = activity_class(description)
     if cls in _PRODUCTION_CLASSES:
         return cls
-    desc = str(row.description or "").lower()
+    desc = description.lower()
     if ("тръб" in desc or "водопровод" in desc or "канализац" in desc
             or "мрежа" in desc or re.search(r"\bdn\b|\bф\s*\d", desc)):
         return "laying"
