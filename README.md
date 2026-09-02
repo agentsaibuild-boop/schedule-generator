@@ -88,7 +88,7 @@
 
 Streamlit UI, детерминистичен pipeline за графика (`schedule_builder`, `work_package`, `duration_calculator`, `execution_batches`), двоен AI маршрутизатор за чат и документи, конвертиране на файлове, интерактивен Gantt и експорт към PDF/XML.
 
-Правилата за разработчици са в [CLAUDE.md](CLAUDE.md). Подробна техническа документация: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Брийф за одитора: [docs/BRIEF_ZA_ODITORA_2026-08-31.md](docs/BRIEF_ZA_ODITORA_2026-08-31.md).
+Правилата за разработчици са в [CLAUDE.md](CLAUDE.md). Пълен брийф на системата: [docs/BRIEF_NA_SISTEMATA.md](docs/BRIEF_NA_SISTEMATA.md). Подробна техническа документация: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Период 18–31.08 за одитора: [docs/BRIEF_ZA_ODITORA_2026-08-31.md](docs/BRIEF_ZA_ODITORA_2026-08-31.md).
 
 ## Структура на проекта
 
