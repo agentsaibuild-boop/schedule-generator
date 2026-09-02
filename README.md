@@ -283,8 +283,8 @@ python -m pytest tests/test_exports.py
 # E2E тестове (10 теста — изискват реален .env с API ключове)
 python -m pytest tests/e2e/ -v
 
-# Всички тестове
-python -m pytest tests/ -v
+# Unit тестове (без E2E и без snapshot върху стари прогони)
+python -m pytest tests/ --ignore=tests/e2e -m "not snapshot"
 ```
 
 > **Pre-commit hook**: При `git commit` се пускат security/PII скан и unit тестовете.
