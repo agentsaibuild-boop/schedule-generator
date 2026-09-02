@@ -131,8 +131,34 @@ def scan_staged(terms: list[str]) -> tuple[list[tuple[str, str, str]], bool] | N
             op_error = True
             continue
         text = blob.stdout.decode("utf-8", "ignore")
-        for kind, h in _scan_value(text, terms):      # СЪДЪРЖАНИЕ (denylist+ключ+път)
+        # КЛЮЧОВЕ И МАШИННИ ПЪТИЩА — върху ЦЕЛИЯ staged blob, винаги.
+        # Ключ, който вече е в HEAD, е ЖИВА тайна: той трябва да се извади
+        # и смени, а не да се приеме за „стар" и подмине.
+        for kind, h in _scan_value(text, []):
             hits.append((p, "съдържание/" + kind, h))
+
+        # КЛИЕНТСКИЯТ DENYLIST — само върху НОВИТЕ редове.
+        #
+        # ЗАЩО (02.09.2026).  Дотук и той се проверяваше върху целия blob,
+        # тоест файл, който вече НОСИ име в HEAD, ставаше некомитваем
+        # завинаги: `work_package.py` и `provenance.py` държат имена на
+        # обекти в коментари от седмици и всяка следваща поправка по тях се
+        # блокираше.  Пазачът блокираше съдържание, което сам е пуснал
+        # преди, а единственият изход беше `--no-verify` — тоест УЧЕШЕ да се
+        # изключва целият hook, заедно с проверката за ключове по-горе.
+        # Пазачът е срещу НОВО изтичане; вече изтеклото се чисти с история,
+        # не с блокиран комит.
+        #
+        # Каквото го няма в HEAD (нов файл или нечетим blob) се сканира ЦЯЛО
+        # — fail-closed.
+        предишен = _git("show", f"HEAD:{p}")
+        if предишен.returncode == 0:
+            в_head = set(предишен.stdout.decode("utf-8", "ignore").splitlines())
+            нови = [ln for ln in text.splitlines() if ln not in в_head]
+        else:
+            нови = text.splitlines()
+        for h in scan_text("\n".join(нови), terms):
+            hits.append((p, "съдържание/denylist", h))
     return hits, op_error
 
 

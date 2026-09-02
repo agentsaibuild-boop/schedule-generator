@@ -213,3 +213,61 @@ def test_machine_path_lowercase_is_also_blocked():
     assert _scan_value(f"{u}/alice/{d}/plan.md", [])
     assert _scan_value("app" + "data/local/temp/x", [])
     assert not _scan_value("src/normal/file.py", [])
+
+
+def _staged(monkeypatch, staged_text: str, head_text: str | None):
+    """Подправя git: какво е STAGED и какво е в HEAD за същия път."""
+    import types
+    import tools.security_scan as ss
+
+    def fake_run(cmd, **kw):
+        r = types.SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        if "diff" in cmd:
+            r.stdout = b"src/x.py\x00"
+        elif "show" in cmd:
+            цел = cmd[cmd.index("show") + 1]
+            if цел.startswith("HEAD:"):
+                if head_text is None:          # файлът е НОВ — няма го в HEAD
+                    r.returncode = 128
+                else:
+                    r.stdout = head_text.encode("utf-8")
+            else:
+                r.stdout = staged_text.encode("utf-8")
+        return r
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+
+
+def test_staged_denylist_already_in_head_does_not_block(tmp_path, monkeypatch):
+    """Термин, който ВЕЧЕ Е В HEAD, не блокира следващия комит.
+
+    ЗАЩО (02.09.2026): пазачът четеше целия staged blob и файл, който носи
+    името от седмици, ставаше НЕКОМИТВАЕМ ЗАВИНАГИ.  Единственият изход беше
+    `--no-verify`, който изключва и проверката за ключове — тоест строгостта
+    тук произвеждаше по-слаба защита другаде.
+
+    FAILURE означава: пазачът пак блокира заради собственото си минало.
+    """
+    dl = _denylist(tmp_path, TERM)
+    редове = f"# коментар за {TERM}\nx = 1\n"
+    _staged(monkeypatch, staged_text=редове + "y = 2\n", head_text=редове)
+    assert main(["security_scan.py", "--staged", dl]) == 0
+
+
+def test_staged_denylist_newly_added_still_blocks(tmp_path, monkeypatch):
+    """НОВО добавен термин блокира — това е смисълът на пазача.
+
+    FAILURE означава: сравнението с HEAD е разхлабило скана дотам, че ново
+    изтичане минава.
+    """
+    dl = _denylist(tmp_path, TERM)
+    _staged(monkeypatch, staged_text=f"x = 1\n# нов ред за {TERM}\n",
+            head_text="x = 1\n")
+    assert main(["security_scan.py", "--staged", dl]) == 2
+
+
+def test_staged_denylist_in_new_file_blocks(tmp_path, monkeypatch):
+    """Нов файл се сканира ЦЯЛ — няма HEAD версия, с която да се сравни."""
+    dl = _denylist(tmp_path, TERM)
+    _staged(monkeypatch, staged_text=f"# {TERM}\n", head_text=None)
+    assert main(["security_scan.py", "--staged", dl]) == 2
