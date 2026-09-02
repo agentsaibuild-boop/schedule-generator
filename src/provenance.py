@@ -183,9 +183,24 @@ _DESC_KEYS = ("наименование", "описание", "дейност", 
 
 # „дължин" — при тръбните КСС количеството е в колона „Дължина /m/", не
 # „Количество" (проба 2026-07-24, реален проект).
-_QTY_KEYS = ("количество", "к-во", "кол-во", "дължин", "quantity", "qty",
-             "количества", "кол.", "к - во", "брой", "бр.", "обем", "площ",
-             "amount")
+_QTY_KEYS = ("количество", "к-во", "кол-во", "дължин", "общо", "quantity",
+             "qty", "количества", "кол.", "к - во", "брой", "бр.", "обем",
+             "площ", "amount")
+
+#: „ОБЩО" Е КОЛИЧЕСТВО САМО КОГАТО НЕ Е ПАРИ.
+#:
+#: В КСС по участъци (реален инженерингов търг, 09.2026) колоните са
+#: „…участък 1 | участък 2 | Общо | Ед. цена | Стойност" — там „Общо" е сборът
+#: на реда В МЕРНАТА МУ ЕДИНИЦА и е единственото място с пълното количество.
+#: Но „Общо стойност"/„Общо лв" е сумата в лева, а количество в лева е по-лошо
+#: от липсващо количество: то минава всички проверки и произвежда график.
+_MONEY_MARKERS = ("стойност", "цена", "лв", "лева", "bgn", "eur")
+
+
+def _is_money_header(column: str) -> bool:
+    """Дали заглавието на колоната говори за пари, а не за количество."""
+    low = str(column).lower()
+    return any(m in low for m in _MONEY_MARKERS)
 
 #: МЯРКАТА Е НАЙ-ЧЕСТО СЪКРАТЕНАТА КОЛОНА и точно затова се изпуска.
 #:
@@ -201,6 +216,22 @@ _UNIT_KEYS = ("мярка", "ед. мярка", "ед.мярка", "мерна",
               "м-ка", "мка", "м.к.", "м-ка.", "ед.м", "ед. м", "ед.мер",
               "мер.ед", "мерна единица", "единица", "ед-ца", "ед. измерване",
               "мярка/", "м. е.", "м.е.", "measure")
+
+
+#: РЕД, КОЙТО СОЧИ КЪДЕ Е РАБОТАТА, А НЕ КАКВА Е: „кл. 41", „т. 154'", „поз. 3".
+#:
+#: В йерархичните КСС (реален търг, 09.2026) името на работата стои в РОДИТЕЛСКИЯ
+#: („Реконструкция на водопровод (без възстановяване на настилки)"), а под него
+#: вървят само клоновете.  Без наследяване тези редове не се класифицират и
+#: веригите не ги виждат — 62 от 64 реда изпадаха мълчаливо.
+_BARE_REF_RE = re.compile(
+    r"^(кл\.?|клон|т\.?|точка|поз\.?|позиция|уч\.?|участък|№)\s*[\w'\-\.′″/]*$",
+    re.IGNORECASE | re.UNICODE)
+
+
+def _is_bare_reference(text: str) -> bool:
+    """Дали описанието е само указател към място, без вид работа."""
+    return bool(_BARE_REF_RE.match(str(text or "").strip()))
 
 
 def _looks_like_description(text: str) -> bool:
@@ -292,6 +323,13 @@ def _pick(row: dict, keys: tuple[str, ...], prefer_numeric: bool = False,
     """
     matches = [(str(c), v) for c, v in row.items()
                if _заглавието_пасва(str(c), keys)]
+    # КОЛОНА С ПАРИ НЕ Е КОЛИЧЕСТВО (виж `_MONEY_MARKERS`).  Отсява се само ако
+    # остане нещо друго: тесен КСС с единствена колона „Количество (лв)" иначе
+    # би останал без нито едно число, а това е по-лошо от неточното.
+    if keys is _QTY_KEYS:
+        без_пари = [(c, v) for c, v in matches if not _is_money_header(c)]
+        if без_пари:
+            matches = без_пари
     if prefer_numeric:
         for col, val in matches:
             if _number(val) is not None:
@@ -360,7 +398,22 @@ def _е_римско(row: dict) -> bool:
     return False
 
 
-def _index_row(row: dict, document: str, sheet: str, row_no: int) -> QuantityRow | None:
+def _нов_родител(текущ: str, indexed: "QuantityRow | None") -> str:
+    """Кой ред остава РОДИТЕЛ за следващите указатели в същата таблица.
+
+    Родител е ред с истинско име и БЕЗ количество — заглавието на група
+    („Реконструкция на водопровод (възстановяване на настилки)").  Ред с
+    количество е работа, не заглавие, и не сменя родителя.
+    """
+    if indexed is None:
+        return текущ
+    if indexed.quantity is None and not _is_bare_reference(indexed.description):
+        return indexed.description
+    return текущ
+
+
+def _index_row(row: dict, document: str, sheet: str, row_no: int,
+               parent_description: str = "") -> QuantityRow | None:
     """Един ред от таблица → индексиран количествен ред, или None ако е празен.
 
     Общо за Excel листовете и за таблиците в DOCX: и двете стигат дотук като
@@ -372,9 +425,11 @@ def _index_row(row: dict, document: str, sheet: str, row_no: int) -> QuantityRow
         document: Име на документа-източник.
         sheet: Име на листа или „таблица N".
         row_no: Номер на реда в източника, 1-базиран.
+        parent_description: Описанието на последния РОДИТЕЛСКИ ред в същата
+            таблица — виж `_is_bare_reference`.  Празно, ако няма такъв.
 
     Returns:
-        `QuantityRow`, или None — когато редът няма никакво описание.
+        `QuantityRow`, или None — когато редът няма годно описание.
     """
     desc_col, description = _pick(row, _DESC_KEYS)
     qty_col, quantity = _pick(row, _QTY_KEYS, prefer_numeric=True)
@@ -394,6 +449,18 @@ def _index_row(row: dict, document: str, sheet: str, row_no: int) -> QuantityRow
         description = best
     if not description:
         return None
+    # РЕД БЕЗ НИТО ЕДНА БУКВА НЕ Е ПОЗИЦИЯ (реален търг, 09.2026).  Легендата на
+    # колоните („1 | 2 | … | 6 = 4 * 5") влизаше в индекса като позиция с
+    # описание „2", мярка „3'" и количество 4 — фантом, който после блокира
+    # Σ=КСС, защото нищо не може да го изпълни.
+    if not _looks_like_description(description):
+        return None
+
+    # РОДИТЕЛЯТ КАЗВА КАКВА Е РАБОТАТА.  Ред, който е само указател („кл. 41"),
+    # наследява описанието на последния ред с истинско име като предтекст.  Така
+    # класификаторът вижда работата, а цитатът остава на своя ред.
+    if parent_description and _is_bare_reference(description):
+        description = f"{parent_description} — {description}"
 
     return QuantityRow(
         description=description,
@@ -636,6 +703,7 @@ def build_quantity_index(base_path: str | Path) -> list[QuantityRow]:
                             "чете като количествена сметка.", sheet_name,
                             document)
                 continue
+            родител = ""            # важи само в рамките на ЕДИН лист
             for offset, row in enumerate(sheet.get("rows") or []):
                 if not isinstance(row, dict):
                     continue
@@ -644,7 +712,9 @@ def build_quantity_index(base_path: str | Path) -> list[QuantityRow]:
                 excel_row = row.get("__excel_row__")
                 if not isinstance(excel_row, int):
                     excel_row = offset + 2
-                indexed = _index_row(row, document, sheet_name, excel_row)
+                indexed = _index_row(row, document, sheet_name, excel_row,
+                                     родител)
+                родител = _нов_родител(родител, indexed)
                 if indexed is not None:
                     index.append(indexed)
 
@@ -681,12 +751,14 @@ def build_quantity_index(base_path: str | Path) -> list[QuantityRow]:
             # позиция със счупено количество би се сметнала за заглавие и би
             # пренаписала контекста на всичко отдолу.
             раздел = ""
+            родител = ""        # важи само в рамките на ЕДНА таблица
             for offset, row in enumerate(table.get("rows") or []):
                 if not isinstance(row, dict):
                     continue
                 име = f"таблица {tno} · {раздел}" if раздел else f"таблица {tno}"
                 # +2: хедърът е ред 1, а редовете се броят от 1 като в Excel.
-                indexed = _index_row(row, document, име, offset + 2)
+                indexed = _index_row(row, document, име, offset + 2, родител)
+                родител = _нов_родител(родител, indexed)
                 if indexed is None:
                     continue
                 if indexed.quantity is None and _е_римско(row):
@@ -1408,11 +1480,51 @@ def verify_citations(schedule: list[dict], index: list[QuantityRow]) -> dict:
 # Одит v18 P0: fallback по мярка заверяваше грешни позиции (пътни знаци 5бр ↔
 # ревизионни шахти 5бр; бетон 100м³ ↔ изкоп 100м³; кабел 100м ↔ водопровод 100м).
 # Затова непознато описание → None (двусмислено) → човешки преглед, не гадаене.
+#: „БЕЗ X" КАЗВА КАКВО НЕ Е В РЕДА.
+#:
+#: Реален КСС (инженерингов търг, 09.2026) разделя работата на „Реконструкция
+#: водопровод (БЕЗ възстановяване на настилки)" и „…(възстановяване на
+#: настилки)".  Класификаторът четеше и двата като настилка, тоест полагането
+#: на тръбата минаваше за асфалт и покритието по вериги излизаше вярно на
+#: погрешно основание.  Изисква се РАЗДЕЛИТЕЛ след „без", за да оцелеят
+#: „безизкопно" и „безтраншеен".
+_NEGATED_RE = re.compile(r"\(\s*без\s+[^)]*\)|(?<![\w-])без\s+[^,;.()]*",
+                         re.IGNORECASE | re.UNICODE)
+
+
+def _strip_negations(text: str) -> str:
+    """Махни каквото редът изрично ИЗКЛЮЧВА, преди да се класифицира."""
+    stripped = _NEGATED_RE.sub(" ", str(text or ""))
+    return re.sub(r"\s+", " ", stripped).strip(" -—–,;")
+
+
+#: ДОГОВОРЕН ОБХВАТ, НЕ РАБОТА ПО ТРАСЕТО.
+#:
+#: Проектирането и авторският надзор се създават като отделни ДОГОВОРНИ ФАЗИ
+#: (`work_package.contract_packages`), а не като пространствени участъци.  Но в
+#: инженеринговите КСС те са остойностени като редове с количество 1 бр — и
+#: тогава Σ=КСС ги искаше в участък и блокираше целия график (09.2026).
+#: Различно от `is_duration_row`: там мярката е „календарни дни"; тук редът има
+#: истинско количество, но изпълнителят му е фаза, не бригада.
+_CONTRACT_SCOPE_MARKERS = (
+    "авторски надзор", "инвестиционен проект", "работен проект",
+    "идеен проект", "проектиране", "непредвидени разходи",
+    "обща цена", "строителен надзор",
+)
+
+
+def is_contract_scope_row(description: str) -> bool:
+    """Дали редът е договорен обхват, а не физическа работа по трасето."""
+    low = str(description or "").lower()
+    return any(m in low for m in _CONTRACT_SCOPE_MARKERS)
+
+
 def _coverer_class(row: QuantityRow) -> str | None:
-    cls = activity_class(row.description)
+    description = _strip_negations(row.description)
+    cls = activity_class(description)
     if cls in _PRODUCTION_CLASSES:
         return cls
-    desc = str(row.description or "").lower()
+    desc = description.lower()
     # СГРАДНИТЕ ОТКЛОНЕНИЯ СА ТОЧКОВИ — броят се, не се мерят.  Кодовете
     # (СКО/СВО) вече се хващаха по-долу, но спецификацията ги ИЗПИСВА с думи:
     # „Изграждане на сградно канализационно отклонение".  Такъв ред съдържа

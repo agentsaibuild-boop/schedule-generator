@@ -1030,7 +1030,7 @@ def normalize_over_allocation(
     Returns:
         (пакети, бележки за изравненото).
     """
-    from src.provenance import is_duration_row
+    from src.provenance import is_contract_scope_row, is_duration_row
 
     required: dict[str, float] = {}
     for row in boq_index:
@@ -1043,6 +1043,11 @@ def normalize_over_allocation(
             # не работа за разпределяне.  Да го искаме в участък значи да
             # обявим графика за непълен заради нещо, което няма къде да отиде
             # — и точно това накара пакетния път да пита модела (19.08.2026).
+            continue
+        if is_contract_scope_row(getattr(row, "description", "")):
+            # Проектиране/авторски надзор носят количество (1 бр) в
+            # инженеринговите КСС, но ги изпълнява ДОГОВОРНА ФАЗА, не
+            # пространствен участък (инженерингов търг, 09.2026).
             continue
         required[str(ref)] = float(qty)
 
@@ -1334,7 +1339,7 @@ def check_conservation(
         ЛИПСВАЩО или ПРЕВИШЕНО количество.  Превишението е блокиращо: то
         означава дублирана работа, тоест по-дълъг и по-скъп график.
     """
-    from src.provenance import is_duration_row
+    from src.provenance import is_contract_scope_row, is_duration_row
 
     required: dict[str, float] = {}
     for row in boq_index:
@@ -1347,6 +1352,11 @@ def check_conservation(
             # не работа за разпределяне.  Да го искаме в участък значи да
             # обявим графика за непълен заради нещо, което няма къде да отиде
             # — и точно това накара пакетния път да пита модела (19.08.2026).
+            continue
+        if is_contract_scope_row(getattr(row, "description", "")):
+            # Проектиране/авторски надзор носят количество (1 бр) в
+            # инженеринговите КСС, но ги изпълнява ДОГОВОРНА ФАЗА, не
+            # пространствен участък (инженерингов търг, 09.2026).
             continue
         required[str(ref)] = float(qty)
 
