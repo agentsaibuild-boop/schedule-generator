@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import contextlib
 import re
 import shutil
@@ -341,37 +342,59 @@ def _пусни_етап(име: str, задачи: list[dict], mpp: Path, ко�
 
 @contextlib.contextmanager
 def _катинар(кой: str):
+    """Взима катинара АТОМАРНО и пуска САМО своя.
+
+    Първата версия проверяваше `exists()` и после пишеше — две сесии минаваха
+    през дупката между двете и пак се събаряха.  `O_CREAT | O_EXCL` е една
+    операция: или файлът е наш, или го държи друг.
+
+    При изчерпано търпение се ПРОДЪЛЖАВА без катинар, шумно.  Тих отказ на цял
+    прогон заради забравен катинар е по-лошо от шумен риск.
+    """
+    наш = False
     край = time.time() + ТЪРПЕНИЕ
     известено = False
-    while КАТИНАР.exists():
+    while True:
+        try:
+            фд = os.open(КАТИНАР, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            pass
+        except OSError:
+            break                      # временната папка не пише — не спираме
+        else:
+            with os.fdopen(фд, "w", encoding="utf-8") as ф:
+                ф.write(f"{кой} · {datetime.now():%H:%M:%S}")
+            наш = True
+            break
         try:
             възраст = time.time() - КАТИНАР.stat().st_mtime
-            чий = КАТИНАР.read_text(encoding="utf-8").strip()
+            чий = КАТИНАР.read_text(encoding="utf-8").strip() or "неизвестен"
         except OSError:
-            break
+            continue                   # изчезна между двете — пробваме пак
         if възраст > ИЗТИЧАНЕ:
             print(f"катинарът е забравен от {чий} ({възраст / 60:.0f} мин) — "
-                  f"продължавам")
-            break
+                  f"махам го")
+            try:
+                КАТИНАР.unlink(missing_ok=True)
+            except OSError:
+                pass
+            continue
         if time.time() > край:
-            print(f"чаках {ТЪРПЕНИЕ // 60} мин за {чий} — продължавам на риск")
+            print(f"чаках {ТЪРПЕНИЕ // 60} мин за {чий} — продължавам БЕЗ "
+                  f"катинар, на риск")
             break
         if not известено:
             print(f"MS Project е зает от {чий}; чакам…")
             известено = True
         time.sleep(10)
     try:
-        КАТИНАР.write_text(f"{кой} · {datetime.now():%H:%M:%S}",
-                           encoding="utf-8")
-    except OSError:
-        pass
-    try:
         yield
     finally:
-        try:
-            КАТИНАР.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if наш:
+            try:
+                КАТИНАР.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def построй(задачи: list[dict], mpp: Path, име: str, начало: str) -> None:
