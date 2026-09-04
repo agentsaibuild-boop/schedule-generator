@@ -162,7 +162,7 @@ src/
 start.bat  ← стартира app на localhost:8501
 
 ## Тестове
-uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e   ← unit тестове (2493 минават в 103 файла; 2498 събрани — 2 се пропускат, 3 са с маркер `snapshot` и стоят извън hook-а)
+uvx --with-requirements requirements.txt pytest tests/ --ignore=tests/e2e -m "not snapshot"   ← unit тестове (snapshot тестовете падат нарочно върху стари прогони и стоят извън hook-а и CI; пакет за одитора: pytest -m snapshot)
 python -m pytest tests/e2e/ -q -m e2e   ← E2E Playwright тестове (10 теста, ~3 мин)
 
 - Unit тестовете не изискват стартирано приложение, но изискват пълния Python стек (.env не е нужен)
