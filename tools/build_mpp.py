@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import contextlib
 import re
 import shutil
 import subprocess
@@ -303,24 +304,74 @@ _ЕТАП_ФУНКЦИИ = {
 def _пусни_етап(име: str, задачи: list[dict], mpp: Path, контекст: dict) -> None:
     import win32com.client as wc
 
-    app = _пусни(wc, mpp)
-    проект = app.ActiveProject
-    for изключи in (lambda: setattr(app, "Calculation", 0),
-                    lambda: setattr(app, "ScreenUpdating", False)):
-        try:
-            изключи()
-        except Exception:
-            pass
-    try:
-        _ЕТАП_ФУНКЦИИ[име](app, проект, задачи, контекст)
-    finally:
-        for върни in (lambda: setattr(app, "Calculation", 1),
-                      lambda: setattr(app, "ScreenUpdating", True)):
+    # Катинарът е на ЕТАП, не на целия строеж: между етапите MS Project е
+    # свободен, а етапът трае под три минути.  Така чуждият прогон не чака
+    # двайсет минути за нашия, а най-много един етап.
+    with _катинар(f"{Path(sys.argv[0]).stem}/{име}"):
+        app = _пусни(wc, mpp)
+        проект = app.ActiveProject
+        for изключи in (lambda: setattr(app, "Calculation", 0),
+                        lambda: setattr(app, "ScreenUpdating", False)):
             try:
-                върни()
+                изключи()
             except Exception:
                 pass
-    _спри(app, mpp)
+        try:
+            _ЕТАП_ФУНКЦИИ[име](app, проект, задачи, контекст)
+        finally:
+            for върни in (lambda: setattr(app, "Calculation", 1),
+                          lambda: setattr(app, "ScreenUpdating", True)):
+                try:
+                    върни()
+                except Exception:
+                    pass
+        _спри(app, mpp)
+
+
+#: MS PROJECT Е ЕДИН COM СЪРВЪР ЗА ЦЯЛАТА МАШИНА.  `DispatchEx` НЕ прави втори
+#: процес — два едновременни строежа пишат в една инстанция и вторият получава
+#: случайни откази („Unspecified error", -2147467259).  Мерено на 04.09.2026:
+#: чужд строеж събори наш по средата на пълненето на задачите.
+#: Затова: файл-катинар.  Чуждият .mpp не се пипа и не се затваря — само се
+#: чака.  Катинар по-стар от ИЗТИЧАНЕ се смята за забравен и се прегазва.
+КАТИНАР = Path(tempfile.gettempdir()) / "msproject.lock"
+ИЗТИЧАНЕ = 15 * 60          # секунди
+ТЪРПЕНИЕ = 15 * 60          # колко чакаме чужд строеж
+
+
+@contextlib.contextmanager
+def _катинар(кой: str):
+    край = time.time() + ТЪРПЕНИЕ
+    известено = False
+    while КАТИНАР.exists():
+        try:
+            възраст = time.time() - КАТИНАР.stat().st_mtime
+            чий = КАТИНАР.read_text(encoding="utf-8").strip()
+        except OSError:
+            break
+        if възраст > ИЗТИЧАНЕ:
+            print(f"катинарът е забравен от {чий} ({възраст / 60:.0f} мин) — "
+                  f"продължавам")
+            break
+        if time.time() > край:
+            print(f"чаках {ТЪРПЕНИЕ // 60} мин за {чий} — продължавам на риск")
+            break
+        if not известено:
+            print(f"MS Project е зает от {чий}; чакам…")
+            известено = True
+        time.sleep(10)
+    try:
+        КАТИНАР.write_text(f"{кой} · {datetime.now():%H:%M:%S}",
+                           encoding="utf-8")
+    except OSError:
+        pass
+    try:
+        yield
+    finally:
+        try:
+            КАТИНАР.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def построй(задачи: list[dict], mpp: Path, име: str, начало: str) -> None:

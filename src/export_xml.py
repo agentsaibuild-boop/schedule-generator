@@ -175,6 +175,7 @@ def export_to_mspdi_xml(
     calendar_type: str = "7-day",
     filename: str | None = None,
     constraint_mode: str = "milestones",
+    team_as_resource: bool = True,
 ) -> bytes | None:
     """Generate MSPDI XML file compatible with MS Project 2010+.
 
@@ -184,6 +185,11 @@ def export_to_mspdi_xml(
         start_date: Calendar start date (ISO format).
         calendar_type: "7-day" (all days working) or "5-day" (Mon-Fri).
         filename: Optional file path to also save XML to disk.
+        team_as_resource: Whether the `team` label also becomes a resource and
+            an assignment.  True keeps the historical behaviour.  Pass False
+            when the label is a CODE (“B1”, “К3”): a code has no place in
+            “Resource Names” — the crew is already visible in the outline and
+            in Text3 (“Екип”).
 
     Returns:
         XML file as bytes, or None on error.
@@ -192,6 +198,8 @@ def export_to_mspdi_xml(
         logger.warning("No schedule data for XML export")
         return None
 
+    global _TEAM_AS_RESOURCE
+    _TEAM_AS_RESOURCE = bool(team_as_resource)
     try:
         root = _build_xml(schedule_data, project_name, start_date, calendar_type,
                           constraint_mode)
@@ -948,6 +956,12 @@ def _split_units(name: str) -> tuple[str, float]:
     return m.group(1).strip(), int(m.group(2)) / 100.0
 
 
+#: Дали етикетът на фронта да влиза и в „Resource Names".  Изключва се от
+#: `export_to_mspdi_xml(team_as_resource=False)` за графици, чиито етикети са
+#: КОДОВЕ — там кодът се появяваше до истинските ресурси на всеки ред.
+_TEAM_AS_RESOURCE = True
+
+
 def _resource_names(task: dict) -> list[str]:
     """\u0420\u0435\u0441\u0443\u0440\u0441\u0438\u0442\u0435 \u043d\u0430 \u0435\u0434\u043d\u0430 \u0437\u0430\u0434\u0430\u0447\u0430: \u0441\u044a\u0441\u0442\u0430\u0432\u044a\u0442 \u043d\u0430 \u0431\u0440\u0438\u0433\u0430\u0434\u0430\u0442\u0430 \u043f\u043b\u044e\u0441 \u0435\u0442\u0438\u043a\u0435\u0442\u044a\u0442 \u043d\u0430 \u0444\u0440\u043e\u043d\u0442\u0430.
 
@@ -960,7 +974,7 @@ def _resource_names(task: dict) -> list[str]:
         if name and name != "\u2014" and name not in names:
             names.append(name)
     team = str(task.get("team") or "").strip()
-    if team and team != "\u2014" and team not in names:
+    if _TEAM_AS_RESOURCE and team and team != "\u2014" and team not in names:
         names.append(team)
     return names
 
