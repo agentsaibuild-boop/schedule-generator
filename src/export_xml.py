@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 import logging
 import math
+import re
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -95,10 +96,17 @@ FIELD_ID_TEXT5 = "188743743"    # Text5 = Източник (КСС)
 # еталон това още е сериозно under-segmentation" — но преди това изобщо не се
 # виждаше КАК е сегментирано, защото полетата не излизаха от пакета.
 FIELD_ID_TEXT6 = "188743746"    # Text6 = Участък (ID)
-FIELD_ID_TEXT7 = "188743749"    # Text7 = Улица
-FIELD_ID_TEXT8 = "188743752"    # Text8 = От възел
-FIELD_ID_TEXT9 = "188743755"    # Text9 = До възел
-FIELD_ID_TEXT10 = "188743758"   # Text10 = Запис (ID)
+# ПОПИТАНИ ОТ MS PROJECT, не изведени по шаблон.  Text1–Text5 вървят през 3
+# (731, 734, 737, 740, 743) и оттам някой е продължил със 749, 752, 755, 758 —
+# но от Text6 нататък стъпката е 1.  Следствието беше тихо: „Улица" се пишеше
+# в Text9, а „От възел", „До възел" и „Запис (ID)" отиваха в несъществуващи
+# полета и просто изчезваха.  Числата са проверени с
+# `app.FieldNameToFieldConstant("Text7", 0)`.
+FIELD_ID_TEXT7 = "188743747"    # Text7 = Улица
+FIELD_ID_TEXT8 = "188743748"    # Text8 = От възел
+FIELD_ID_TEXT9 = "188743749"    # Text9 = До възел
+FIELD_ID_TEXT10 = "188743750"   # Text10 = Запис (ID)
+FIELD_ID_TEXT11 = "188743997"   # Text11 = Ресурси (кодове)
 # ЧИСЛОВИТЕ ПОЛЕТА ВЪРВЯТ ПРЕЗ ЕДНО, НЕ ПРЕЗ ТРИ (25.08.2026).  Text1…Text10
 # наистина се увеличават с 3, но Number1…Number20 — с 1.  Тук стояха номера,
 # сметнати по правилото на текстовите полета, тоест Number2…Number5 се пишеха с
@@ -134,6 +142,10 @@ _SPATIAL_FIELDS: tuple[tuple[str, str, str], ...] = (
     (FIELD_ID_TEXT10, "source_record_id", "Запис (ID)"),
     (FIELD_ID_NUMBER4, "start_day", "Начало (ден)"),
     (FIELD_ID_NUMBER5, "end_day", "Край (ден)"),
+    # Ресурсите като КОДОВЕ.  Пълните имена остават в ресурсния лист и в
+    # легендата; в печатния лист те не се побират и се режат — а орязан
+    # списък не доказва нищо.
+    (FIELD_ID_TEXT11, "resource_codes", "Ресурси (кодове)"),
 )
 
 #: MSPDI иска и името на полето, не само ID-то.
@@ -143,6 +155,7 @@ _FIELD_NAMES = {
     FIELD_ID_TEXT8: "Text8",
     FIELD_ID_TEXT9: "Text9",
     FIELD_ID_TEXT10: "Text10",
+    FIELD_ID_TEXT11: "Text11",
     FIELD_ID_NUMBER2: "Number2",
     FIELD_ID_NUMBER3: "Number3",
     FIELD_ID_NUMBER4: "Number4",
@@ -244,14 +257,16 @@ def _build_xml(
     # --- 1. Project properties ---
     ET.SubElement(root, "SaveVersion").text = "14"
     ET.SubElement(root, "Name").text = project_name
+    # ГРАФИКЪТ СЕ БРОИ НАПРЕД ОТ ДЕН 1 (25.08.2026) — И РЕДЪТ ТУК Е ЧАСТ ОТ
+    # ПРАВИЛОТО.  MSPDI е схема с ФИКСИРАН ред на елементите: `ScheduleFromStart`
+    # стои ПРЕДИ `StartDate`.  Написан след него, MS Project го подминава,
+    # внася проекта като разписван НАЗАД от края и превръща всяка задача в
+    # „Start No Later Than“.  Мерено 03.09.2026: 981 от 983 задачи излизаха с
+    # ConstraintType=5 и целият график се свиваше на ден 1 — зависимостите
+    # изглеждаха мъртви, а причината беше един разместен ред.
+    ET.SubElement(root, "ScheduleFromStart").text = "1"
     ET.SubElement(root, "StartDate").text = f"{start_date}T08:00:00"
     ET.SubElement(root, "FinishDate").text = finish_dt.strftime("%Y-%m-%dT17:00:00")
-    # ГРАФИКЪТ СЕ БРОИ НАПРЕД ОТ ДЕН 1 (25.08.2026).  Без този ред MS Project
-    # разписва проекта НАЗАД от датата в заглавието: мерено на Тръстеник, 888
-    # задачи лягаха ПРЕДИ началото („наш ден 2, MS Project −2"), а вносът им
-    # слагаше „Finish No Later Than" на всяка.  Изнесеният график изглеждаше
-    # като чужд график.
-    ET.SubElement(root, "ScheduleFromStart").text = "1"
     ET.SubElement(root, "CalendarUID").text = "1"
     # ДНИ, НЕ ЧАСОВЕ (изпълнителят, 25.08.2026: „както и часове, закръгли ги
     # да пише дни").  В MSPDI 5 е ЧАСОВЕ, а 7 е ДНИ — дотук стоеше 5 с
@@ -435,6 +450,13 @@ def _build_tasks(
     ET.SubElement(root_task, "Manual").text = "0"
     ET.SubElement(root_task, "Summary").text = "1"
     ET.SubElement(root_task, "CalendarUID").text = "1"
+    # ЗАГЛАВНИЯТ РЕД СЪЩО БРОИ ДНИ.  Без това в колоните „Начало (ден)" и
+    # „Край (ден)" на самия проект пишеше 0 и 0 — единственият ред в целия
+    # график, който не казва кога започва и кога свършва.
+    for _поле, _стойност in ((FIELD_ID_NUMBER4, 1), (FIELD_ID_NUMBER5, _край)):
+        _ea = ET.SubElement(root_task, "ExtendedAttribute")
+        ET.SubElement(_ea, "FieldID").text = _поле
+        ET.SubElement(_ea, "Value").text = str(_стойност)
 
     # ------------------------------------------------------------------
     # ПРОХОД 1: раздай UID на ВСИЧКИ задачи, преди да се строят връзки.
@@ -532,7 +554,17 @@ def _build_tasks(
         task_start = _working_day_to_date(start_dt, start_day, calendar_type)
         task_finish = _working_day_to_date(start_dt, end_day, calendar_type)
 
-        start_str = task_start.strftime("%Y-%m-%dT08:00:00")
+        # ТОЧКА, КОЯТО ЗАТВАРЯ ДЕН, СТОИ В 17:00.  Milestone „Предаване на
+        # проекта" на ден 45 в 08:00 значи „в началото на 45-ия", а той
+        # удостоверява, че 45-ият е ИЗКАРАН.  Практическата последица е, че
+        # предшественикът приключва в 17:00, а точката стои девет часа
+        # по-рано — пет такива несъответствия в готовия файл.
+        # `closing=True` идва от графика: точките на предаването и на Акт 15
+        # затварят ден, а тези на възлагателното писмо и на Протокол 2а
+        # ОТВАРЯТ ден и си остават в 08:00.
+        _затваря = is_milestone and bool(task.get("closing"))
+        start_str = task_start.strftime(
+            "%Y-%m-%dT17:00:00" if _затваря else "%Y-%m-%dT08:00:00")
         # Milestone е ТОЧКА → Finish == Start (одит т.6).
         finish_str = start_str if is_milestone else task_finish.strftime("%Y-%m-%dT17:00:00")
         ET.SubElement(task_elem, "Start").text = start_str
@@ -576,10 +608,12 @@ def _build_tasks(
         # Milestone (0 duration)
         ET.SubElement(task_elem, "Milestone").text = "1" if is_milestone else "0"
 
-        # Critical path
-        ET.SubElement(task_elem, "Critical").text = (
-            "1" if task.get("is_critical") else "0"
-        )
+        # КРИТИЧНИЯТ ПЪТ НЕ СЕ ОБЯВЯВА — той се ИЗЧИСЛЯВА.
+        # Тук се пишеше `Critical` от поле на задачата, което на практика
+        # излизаше 0 за всички: файл, който твърди, че критичен път няма.
+        # MS Project го смята сам от мрежата и от резервите; наше твърдение
+        # само може да се разминава с неговото.  Проверката е в `to_mpp` и
+        # `to_pdf`: те четат колко задачи са критични СЛЕД разписването.
 
         # Custom fields (Extended Attributes on task)
         _add_task_custom_fields(task_elem, task)
@@ -641,21 +675,26 @@ def _apply_constraint(
     if mode != "milestones":
         return
 
-    is_milestone = bool(task.get("milestone") or task.get("is_milestone")) or \
-        (task.get("duration", 0) == 0)
+    # ДОГОВОРНАТА ДАТА НЕ Е ЗАПАЗЕНА ЗА ТОЧКИ.  Предаването на работния проект
+    # е задача от ЕДИН ДЕН (неотменимо правило на инженера), а тя носи обявения
+    # срок за проектиране — значи и нейният краен срок трябва да се обяви.
+    # Дотук `Deadline` се пишеше само на milestone-и и тя оставаше без.
     contractual = bool(task.get("contractual") or task.get("is_contractual"))
-    if not (is_milestone and contractual):
+    if not contractual:
         return
 
     # Договорната дата може да е явна; иначе е там, където графикът я е сложил.
+    # ДЕНЯТ СВЪРШВА В 17:00.  За milestone `finish_str` е равен на `start_str`,
+    # тоест 08:00 — а краен срок в 08:00 значи „до НАЧАЛОТО на този ден“.
     deadline = str(task.get("contract_date") or "").strip()
-    deadline_str = f"{deadline}T17:00:00" if len(deadline) == 10 else finish_str
+    deadline_str = (f"{deadline}T17:00:00" if len(deadline) == 10
+                    else finish_str[:10] + "T17:00:00")
 
-    # Deadline (не constraint) — маркер + отрицателен резерв при закъснение.
+    # САМО Deadline, БЕЗ FNLT.  Deadline е маркер: дава отрицателен резерв при
+    # закъснение и не мърда нищо.  FNLT е ОГРАНИЧЕНИЕ и мери — мерено
+    # 03.09.2026: с ConstraintDate в 08:00 то дърпаше точката на предаването в
+    # началото на деня, а с нея и целия строителен срок два дни назад.
     ET.SubElement(task_elem, "Deadline").text = deadline_str
-    # FNLT е „не по-късно от", тоест не мести задачата напред, само назад.
-    task_elem.find("ConstraintType").text = CONSTRAINT_FINISH_NO_LATER
-    ET.SubElement(task_elem, "ConstraintDate").text = deadline_str
 
 
 def _add_task_custom_fields(task_elem: ET.Element, task: dict) -> None:
@@ -714,20 +753,24 @@ def _add_task_custom_fields(task_elem: ET.Element, task: dict) -> None:
         ET.SubElement(ea, "Value").text = team
 
 
-# MSPDI PredecessorLink/Type — стойностите са фиксирани от схемата:
-#   0 = Finish-to-Finish, 1 = Finish-to-Start,
-#   2 = Start-to-Start,   3 = Start-to-Finish
+# MSPDI PredecessorLink/Type — стойностите са фиксирани от схемата и ПРОВЕРЕНИ
+# по датите в самия MS Project (03.09.2026, задача от 4 дни + четири зависими):
 #
-# Одит 2026-07-23 (round-trip): SS и SF бяха РАЗМЕНЕНИ — SS се записваше
-# като 3 (SF) и обратно.  Тоест всяка SS връзка (урок #15: изкоп SS+1d
-# полагане — най-често срещаната след FS) влизаше в MS Project като
-# Start-to-Finish, което е безсмислено технологично, и Project пренареждаше
-# графика по нея.  Хванато чак когато XML-ът беше прочетен обратно.
+#   Type=0 → свършва заедно с предшественика          → FF
+#   Type=1 → започва след неговия край                 → FS
+#   Type=2 → СВЪРШВА, когато той ЗАПОЧВА               → SF
+#   Type=3 → започва заедно с него                     → SS
+#
+# ВНИМАНИЕ: тук стоеше SS→2 и SF→3, с коментар, че одит от 23.07.2026 е намерил
+# двете разменени и ги е поправил.  Онзи „одит“ е сверявал само round-trip —
+# кодът се записва и се чете същият, каквото и да значи.  Семантиката се мери
+# ЕДИНСТВЕНО по датите, които MS Project изчислява, и по тях SS е 3, не 2.
+# Дотогава всяка SS връзка е влизала в MS Project като Start-to-Finish.
 _DEPENDENCY_TYPE_MAP = {
     "FF": "0",
     "FS": "1",  # default
-    "SS": "2",
-    "SF": "3",
+    "SF": "2",
+    "SS": "3",
 }
 
 
@@ -812,9 +855,11 @@ def _build_resources(
 
     resource_map: dict[str, int] = {}
     res_uid = 1
+    peaks = _resource_peaks(flat_tasks)
 
     for task in flat_tasks:
-        for name in _resource_names(task):
+        for raw in _resource_names(task):
+            name, _ = _split_units(raw)
             if name in resource_map:
                 continue
             resource_map[name] = res_uid
@@ -828,11 +873,52 @@ def _build_resources(
             # приема неограничен ресурс и не показва претоварване — точно
             # затова одитът намери един багер на 16 едновременни задачи.
             # 100% в MSPDI се пише като 1.0 на единица.
-            ET.SubElement(res, "MaxUnits").text = f"{_resource_capacity(name):.1f}"
+            # НАЛИЧНОСТТА НЕ БИВА ДА Е ПО-МАЛКА ОТ НУЖДАТА.  Таблицата в
+            # config/resource_capacity.json е измерена от ДРУГ обект; ако тя
+            # казва 2 багера, а графикът кара 13 едновременно, файлът обявява
+            # претоварване на всеки фронт.  Затова се взима по-голямото от
+            # измереното и от действителния връх на този график.
+            наличност = max(_resource_capacity(name), peaks.get(name, 1.0))
+            ET.SubElement(res, "MaxUnits").text = f"{наличност:.1f}"
+            # КАЛЕНДАРЪТ НА РЕСУРСА Е КАЛЕНДАРЪТ НА ПРОЕКТА.  Без този ред
+            # ресурсът получава Standard (5-дневен), а MS Project разтяга всяка
+            # задача с ресурс през уикендите: мерено 03.09.2026 — 71 задачи от
+            # един ден излизаха с два и три, а срокът в колоната „Срок“ не
+            # съвпадаше с деня в „Начало (ден)“/„Край (ден)“.  Строи се 7/7.
+            ET.SubElement(res, "CalendarUID").text = "1"
 
             res_uid += 1
 
     return resource_map
+
+
+def _resource_peaks(flat_tasks: list[dict]) -> dict[str, float]:
+    """Максималната ЕДНОВРЕМЕННА нужда от всеки ресурс, по дни.
+
+    Върхът е долна граница за обявената наличност: под него графикът твърди,
+    че кара повече машини, отколкото има.  Той е и списъкът, който трябва да
+    влезе в техническото предложение.
+    """
+    parents = {str(t.get("parent_id")).strip() for t in flat_tasks
+               if str(t.get("parent_id") or "").strip()}
+    по_дни: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for task in flat_tasks:
+        tid = str(task.get("id", "")).strip()
+        if task.get("_has_children") or task.get("is_summary") or tid in parents:
+            continue
+        начало = int(task.get("start_day", 1) or 1)
+        край = int(task.get("end_day", начало) or начало)
+        if край < начало:
+            край = начало
+        for raw in _resource_names(task):
+            name, units = _split_units(raw)
+            for ден in range(начало, край + 1):
+                по_дни[ден][name] += units
+    върхове: dict[str, float] = {}
+    for ден in по_дни.values():
+        for name, units in ден.items():
+            върхове[name] = max(върхове.get(name, 0.0), units)
+    return върхове
 
 
 def _resource_capacity(name: str) -> float:
@@ -846,6 +932,20 @@ def _resource_capacity(name: str) -> float:
     config = _load_resource_capacity()
     table = config.get("capacity") or {}
     return float(table.get(name, config.get("default", 1)))
+
+
+def _split_units(name: str) -> tuple[str, float]:
+    """„Общ работник[300%]“ → („Общ работник", 3.0).
+
+    Досега скобата оставаше В ИМЕТО: ресурсният лист показваше „Общ работник",
+    „Общ работник[200%]" и „Общ работник[300%]" като ТРИ различни ресурса, а
+    назначенията нямаха Units изобщо.  Тоест бройката беше текст, който нито
+    се сумира, нито показва претоварване.  Сега тя е стойност.
+    """
+    m = re.match(r"^(.*?)\[(\d+)%\]$", name.strip())
+    if not m:
+        return name.strip(), 1.0
+    return m.group(1).strip(), int(m.group(2)) / 100.0
 
 
 def _resource_names(task: dict) -> list[str]:
@@ -896,7 +996,8 @@ def _build_assignments(
 
         # \u041f\u043e \u0435\u0434\u043d\u043e \u043d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435 \u0437\u0430 \u0412\u0421\u0415\u041a\u0418 \u0440\u0435\u0441\u0443\u0440\u0441 \u043d\u0430 \u0437\u0430\u0434\u0430\u0447\u0430\u0442\u0430 (\u0441\u044a\u0441\u0442\u0430\u0432 + \u0435\u043a\u0438\u043f), \u043d\u0435
         # \u0435\u0434\u043d\u043e \u0437\u0430 \u0446\u0435\u043b\u0438\u044f \u201e\u0435\u043a\u0438\u043f" \u2014 \u0438\u043d\u0430\u0447\u0435 \u043e\u0431\u0435\u0437\u043f\u0435\u0447\u0435\u043d\u043e\u0441\u0442\u0442\u0430 \u043d\u0435 \u0441\u0435 \u0432\u0438\u0436\u0434\u0430 \u0432 MS Project.
-        for name in _resource_names(task):
+        for raw in _resource_names(task):
+            name, units = _split_units(raw)
             res_uid = resource_map.get(name)
             if res_uid is None:
                 continue
@@ -905,6 +1006,9 @@ def _build_assignments(
             ET.SubElement(asn, "UID").text = str(asn_uid)
             ET.SubElement(asn, "TaskUID").text = str(task_uid)
             ET.SubElement(asn, "ResourceUID").text = str(res_uid)
+            # БРОЙКАТА Е СТОЙНОСТ, не текст в името: 3 общи работника са
+            # Units=3, а не ресурс на име „Общ работник[300%]".
+            ET.SubElement(asn, "Units").text = f"{units:.1f}"
 
             asn_uid += 1
 

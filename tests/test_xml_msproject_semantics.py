@@ -114,10 +114,18 @@ def test_pinned_mode_still_available():
 
 
 def test_contractual_milestone_gets_deadline_not_pin():
-    """Constraints САМО по договорни дати — и то като Deadline, не като закова.
+    """Договорната дата е САМО Deadline — без FNLT, без никакво ограничение.
 
     Deadline дава на MS Project отрицателен резерв при закъснение, без да
-    зазижда мрежата.
+    зазижда мрежата.  Дотук освен него се пишеше и FNLT „не по-късно от",
+    с довода, че то мести само назад.
+
+    МЕРЕНО 03.09.2026: мести и напред.  За milestone `finish_str` е равен на
+    `start_str`, тоест 08:00 — а FNLT в 08:00 значи „до НАЧАЛОТО на този ден"
+    и дърпаше точката на предаването девет часа назад.  С нея тръгваше цялата
+    следваща фаза: строителството започваше ден по-рано от обявеното.
+
+    Затова тук се проверява и ОТСЪСТВИЕТО на ограничение — то е същината.
     """
     milestone = {"id": "MS", "name": "Приемане", "duration": 0, "start_day": 30,
                  "end_day": 30, "milestone": True, "contractual": True,
@@ -125,7 +133,8 @@ def test_contractual_milestone_gets_deadline_not_pin():
     task = _tasks(_xml([NORMAL, milestone]))[1]
 
     assert task.findtext(f"{NS}Deadline") == "2026-09-01T17:00:00"
-    assert task.findtext(f"{NS}ConstraintType") == "7"      # Finish No Later Than
+    assert task.findtext(f"{NS}ConstraintType") == "0"      # ASAP, не FNLT
+    assert task.findtext(f"{NS}ConstraintDate") is None
 
 
 def test_non_contractual_milestone_stays_unconstrained():

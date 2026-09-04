@@ -38,8 +38,18 @@ logger = logging.getLogger(__name__)
 _NS = f"{{{NAMESPACE}}}"
 _DURATION_RE = re.compile(r"PT(\d+)H(\d+)M(\d+)S")
 
-# Обратно на _DEPENDENCY_TYPE_MAP в export_xml
-_TYPE_BY_CODE = {"0": "FF", "1": "FS", "2": "SS", "3": "SF"}
+# Обратно на _DEPENDENCY_TYPE_MAP в export_xml.
+#
+# ИЗМЕРЕНО В САМИЯ MS PROJECT (03.09.2026), не изведено от схемата: задача от
+# 4 дни и четири зависими по 2 дни, всяка с различен код.  По ДАТИТЕ:
+#   Type=0 свършва заедно с предшественика      → FF
+#   Type=1 започва след неговия край            → FS
+#   Type=2 СВЪРШВА, когато той ЗАПОЧВА          → SF
+#   Type=3 започва заедно с него                → SS
+# Дотук тук стоеше 2=SS и 3=SF.  Round-trip тестът не го хващаше, защото
+# четецът и писачът грешаха ЕДНАКВО — низът се връщаше същият, какъвто е
+# тръгнал, а MS Project четеше друго.
+_TYPE_BY_CODE = {"0": "FF", "1": "FS", "2": "SF", "3": "SS"}
 
 
 def _text(elem: ET.Element, tag: str) -> str:

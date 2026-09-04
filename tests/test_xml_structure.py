@@ -149,12 +149,21 @@ def test_predecessor_link_fs_no_lag():
 
 
 def test_predecessor_link_ss_with_lag():
-    """SS+30 → Type=2, LinkLag=30×480×10=144000.
+    """SS+30 → Type=3, LinkLag=30×480×10=144000.
 
-    Одит 2026-07-23 (round-trip): този тест твърдеше Type=3, което е SF по
-    MSPDI схемата (0=FF, 1=FS, 2=SS, 3=SF).  Тоест и кодът, и тестът бяха
-    сгрешени по един и същи начин — тестът потвърждаваше дефекта, вместо да
-    го хване.  Всяка SS връзка влизаше в MS Project като Start-to-Finish.
+    ИЗМЕРЕНО В MS PROJECT (03.09.2026), не изведено от четене на схемата.
+    Задача от 4 дни и четири зависими по 2 дни, всяка с различен код; по
+    ДАТИТЕ, които MS Project изчислява:
+
+        Type=0 свършва заедно с предшественика      → FF
+        Type=1 започва след неговия край            → FS
+        Type=2 СВЪРШВА, когато той ЗАПОЧВА          → SF
+        Type=3 започва заедно с него                → SS
+
+    Одитът от 23.07.2026 обърна кода и този тест на 2=SS, позовавайки се на
+    схемата, и провери round-trip — но round-trip не доказва семантика: и
+    писачът, и четецът грешаха еднакво, така че низът се връщаше същият.
+    Семантиката се мери само по датите, които Project смята.
     """
     task = {"id": "t2", "name": "Т2", "dependencies": ["t1"],
             "dependency_type": "SS", "lag_days": 30}
@@ -163,18 +172,18 @@ def test_predecessor_link_ss_with_lag():
     _add_predecessor_links(task_elem, task, uid_map)
     pred = task_elem.find("PredecessorLink")
     assert pred is not None
-    assert pred.find("Type").text == "2"       # SS по MSPDI схемата
+    assert pred.find("Type").text == "3"       # SS, мерено по датите
     expected_lag = str(30 * MINUTES_PER_DAY * LINK_LAG_FACTOR)  # 144000
     assert pred.find("LinkLag").text == expected_lag
 
 
-def test_predecessor_link_sf_is_type_three():
-    """Другата половина на размяната — SF трябва да е 3, не 2."""
+def test_predecessor_link_sf_is_type_two():
+    """Другата половина — SF е 2, не 3 (мерено по датите в MS Project)."""
     task = {"id": "t2", "name": "Т2", "dependencies": ["t1"],
             "dependency_type": "SF"}
     task_elem = ET.Element("Task")
     _add_predecessor_links(task_elem, task, {"t1": 1, "t2": 2})
-    assert task_elem.find("PredecessorLink").find("Type").text == "3"
+    assert task_elem.find("PredecessorLink").find("Type").text == "2"
 
 
 def test_predecessor_link_ff():
